@@ -7,15 +7,15 @@ import type { ViewStyle } from "react-native";
  * NativeWind cannot express cleanly, such as icon colours and safe areas.
  */
 export const colors = {
-  cream: "#FFF9EC",
+  cream: "#FFF8E8",
   surface: "#FFFFFF",
   brand: {
-    DEFAULT: "#045034",
-    light: "#0B6B4A",
+    DEFAULT: "#005B45",
+    light: "#087A5B",
   },
   gold: {
-    DEFAULT: "#F9B91F",
-    soft: "#FFF3CC",
+    DEFAULT: "#FFBE1A",
+    soft: "#FFF1BF",
   },
   ink: {
     DEFAULT: "#0E1F18",
@@ -23,7 +23,7 @@ export const colors = {
     faint: "#8A978F",
     inverse: "#FFFFFF",
   },
-  line: "#EAE3D2",
+  line: "#E8E0C9",
   success: "#1E9E6A",
   danger: "#D64545",
   warning: "#E8870E",
@@ -36,12 +36,12 @@ export const colors = {
     again: "#D64545",
     hard: "#E8870E",
     good: "#1E9E6A",
-    easy: "#F9B91F",
+    easy: "#FFBE1A",
   },
   course: {
     ocean: "#2F7DD1",
     forest: "#1E9E6A",
-    gold: "#F9B91F",
+    gold: "#FFBE1A",
     coral: "#E8796F",
     violet: "#7966D8",
     sky: "#56B4D9",
@@ -108,7 +108,7 @@ export const boxShadow = {
 
 export const gradients = {
   hero: [colors.brand.DEFAULT, colors.brand.light] as const,
-  recording: ["#071D15", colors.brand.DEFAULT] as const,
+  recording: ["#063D30", colors.brand.DEFAULT] as const,
   celebration: [colors.brand.light, colors.brand.DEFAULT] as const,
 } as const;
 
@@ -143,7 +143,7 @@ export const safeAreaStyle: ViewStyle = {
 
 export const safeAreaStyleDark: ViewStyle = {
   flex: 1,
-  backgroundColor: "#071D15",
+  backgroundColor: "#063D30",
 };
 
 export const tokens = {

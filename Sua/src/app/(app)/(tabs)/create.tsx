@@ -35,7 +35,7 @@ export default function Create() {
     if (courseId) router.push({ pathname: "/note/[id]" as never, params: { id: "new", courseId } });
   };
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]">
+      <SafeAreaView className="flex-1 bg-cream">
       <ScrollView contentContainerClassName="px-5 pb-8 pt-6">
         <Text className="text-sm font-semibold text-[#8A8498]">
           Make something useful

@@ -8,9 +8,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 export default function Home() {
   const { profile, courses } = useApp();
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]">
+      <SafeAreaView className="flex-1 bg-cream">
       <ScrollView
-        className="flex-1 bg-[#FCFBFF]"
+        className="flex-1 bg-cream"
         contentContainerClassName="px-5 pb-8 pt-5"
       >
         <View className="flex-row items-center justify-between">

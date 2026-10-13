@@ -69,7 +69,7 @@ export default function Courses() {
       ],
     );
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]">
+      <SafeAreaView className="flex-1 bg-cream">
       <ScrollView contentContainerClassName="px-5 pb-8 pt-6">
         <View className="flex-row items-end justify-between">
           <View>
@@ -187,7 +187,7 @@ export default function Courses() {
           }}
         >
           <View className="flex-1 justify-end bg-black/30">
-            <View className="rounded-t-[32px] bg-[#FCFBFF] p-6">
+            <View className="rounded-t-[32px] bg-cream p-6">
               <View className="mb-6 flex-row items-center justify-between">
                 <Text className="text-2xl font-black text-[#19152C]">
                   {editing ? "Rename course" : "New course"}

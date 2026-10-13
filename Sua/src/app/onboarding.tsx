@@ -56,7 +56,7 @@ export default function Onboarding() {
               {slides.map((_, index) => (
                 <View
                   key={index}
-                  className={`h-2 rounded-full ${index === step ? "w-8 bg-[#F9B91F]" : "w-2 bg-white/55"}`}
+                  className={`h-2 rounded-full ${index === step ? "w-8 bg-[#FFBE1A]" : "w-2 bg-white/55"}`}
                 />
               ))}
             </View>

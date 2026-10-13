@@ -22,7 +22,7 @@ export default function Profile() {
       },
     ]);
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]">
+      <SafeAreaView className="flex-1 bg-cream">
       <ScrollView contentContainerClassName="px-5 pb-8 pt-6">
         <Text className="text-3xl font-black text-[#19152C]">Profile</Text>
         <View className="mt-6 flex-row items-center rounded-3xl bg-white p-5">

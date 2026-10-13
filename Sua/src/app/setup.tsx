@@ -55,7 +55,7 @@ export default function Setup() {
     }
   };
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]" style={{ flex: 1 }}>
+    <SafeAreaView className="flex-1 bg-cream" style={{ flex: 1 }}>
       <ScrollView contentContainerClassName="px-6 pb-8 pt-5">
         <Logo />
         <View className="mt-10">

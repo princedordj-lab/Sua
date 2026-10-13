@@ -21,10 +21,8 @@ function messageFromError(error: unknown): string {
 }
 
 export default function SignIn() {
-  const { isLoaded: signInLoaded, signIn, setActive: setActiveSignIn } =
-    useSignIn();
-  const { isLoaded: signUpLoaded, signUp, setActive: setActiveSignUp } =
-    useSignUp();
+  const { signIn } = useSignIn();
+  const { signUp } = useSignUp();
   const { startSSOFlow } = useSSO();
 
   const [mode, setMode] = useState<"sign-in" | "sign-up">("sign-in");
@@ -48,16 +46,19 @@ export default function SignIn() {
         "Enter your email and password to continue.",
       );
     if (mode === "sign-in") {
-      if (!signInLoaded) return;
       setBusy(true);
       try {
-        const result = await signIn.create({
-          identifier: email.trim(),
+        const { error } = await signIn.password({
+          emailAddress: email.trim(),
           password,
         });
-        if (result.status === "complete" && result.createdSessionId) {
-          await setActiveSignIn({ session: result.createdSessionId });
+        if (error) throw error;
+        if (signIn.status === "complete") {
+          const { error: finalizeError } = await signIn.finalize();
+          if (finalizeError) throw finalizeError;
           router.replace("/");
+        } else {
+          Alert.alert("Sign in incomplete", "Additional verification is required.");
         }
       } catch (error) {
         Alert.alert("Sign in failed", messageFromError(error));
@@ -67,32 +68,26 @@ export default function SignIn() {
       return;
     }
 
-    if (!signUpLoaded) return;
     setBusy(true);
     try {
       const [firstName, ...rest] = fullName.trim().split(/\s+/);
-      const result = await signUp.create({
+      const { error } = await signUp.password({
         emailAddress: email.trim(),
         password,
         firstName: firstName || undefined,
         lastName: rest.length ? rest.join(" ") : undefined,
       });
-      if (result.status === "complete" && result.createdSessionId) {
-        await setActiveSignUp({ session: result.createdSessionId });
+      if (error) throw error;
+      if (signUp.status === "complete") {
+        const { error: finalizeError } = await signUp.finalize();
+        if (finalizeError) throw finalizeError;
         router.replace("/");
         return;
       }
-      try {
-        await signUp.prepareEmailAddressVerification({
-          strategy: "email_code",
-        });
-        setPendingVerification(true);
-      } catch {
-        Alert.alert(
-          "Almost there",
-          "Your account needs a step we cannot finish here. Try signing in, or contact support.",
-        );
-      }
+      const { error: verificationError } =
+        await signUp.verifications.sendEmailCode();
+      if (verificationError) throw verificationError;
+      setPendingVerification(true);
     } catch (error) {
       Alert.alert("Sign up failed", messageFromError(error));
     } finally {
@@ -101,12 +96,14 @@ export default function SignIn() {
   };
 
   const submitVerificationCode = async () => {
-    if (!signUpLoaded || !code) return;
+    if (!code) return;
     setBusy(true);
     try {
-      const result = await signUp.attemptEmailAddressVerification({ code });
-      if (result.status === "complete" && result.createdSessionId) {
-        await setActiveSignUp({ session: result.createdSessionId });
+      const { error } = await signUp.verifications.verifyEmailCode({ code });
+      if (error) throw error;
+      if (signUp.status === "complete") {
+        const { error: finalizeError } = await signUp.finalize();
+        if (finalizeError) throw finalizeError;
         router.replace("/");
       } else {
         Alert.alert("Check the code", "That code did not verify. Try again.");
@@ -143,7 +140,7 @@ export default function SignIn() {
   };
 
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]" style={{ flex: 1 }}>
+    <SafeAreaView className="flex-1 bg-cream" style={{ flex: 1 }}>
       <View className="flex-1 px-6 pt-5">
         <Logo />
         <View className="flex-1 justify-center gap-6">

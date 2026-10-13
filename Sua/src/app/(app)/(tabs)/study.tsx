@@ -10,7 +10,7 @@ import { SectionHeader } from "../../../components/ui";
 import { SafeAreaView } from "react-native-safe-area-context";
 export default function Study() {
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]">
+      <SafeAreaView className="flex-1 bg-cream">
       <ScrollView contentContainerClassName="px-5 pb-8 pt-6">
         <Text className="text-sm font-semibold text-[#8A8498]">
           Your learning loop

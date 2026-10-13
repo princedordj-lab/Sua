@@ -17,7 +17,7 @@ export default function CourseDetail() {
   const course = courses.find((item) => item.id === id);
   if (!course)
     return (
-      <SafeAreaView className="flex-1 items-center justify-center bg-[#FCFBFF]">
+      <SafeAreaView className="flex-1 items-center justify-center bg-cream">
         <Text>Course not found.</Text>
       </SafeAreaView>
     );
@@ -34,7 +34,7 @@ export default function CourseDetail() {
         ? "text-[#F59E0B]"
         : "text-[#7C5CFC]";
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]">
+    <SafeAreaView className="flex-1 bg-cream">
       <ScrollView contentContainerClassName="px-5 pb-8 pt-6">
         <Pressable
           onPress={() => router.back()}

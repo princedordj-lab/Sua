@@ -59,7 +59,7 @@ export default function NoteEditor() {
 
   if (!ready) return <ActivityIndicator className="flex-1" />;
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]">
+    <SafeAreaView className="flex-1 bg-cream">
       <View className="flex-row items-center justify-between border-b border-[#E9E5F2] px-5 py-3">
         <Pressable onPress={() => router.back()} className="flex-row items-center gap-2">
           <ArrowLeft size={20} color="#19152C" />

@@ -17,8 +17,8 @@ export default function Welcome() {
           <Logo light />
           <View className="flex-1 justify-center">
             <View className="mb-3 flex-row items-center gap-2">
-              <Sparkles size={18} color="#F9B91F" />
-              <Text className="font-bold text-[#F9B91F]">
+              <Sparkles size={18} color="#FFBE1A" />
+              <Text className="font-bold text-[#FFBE1A]">
                 Study smarter, every day
               </Text>
             </View>

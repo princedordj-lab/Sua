@@ -14,7 +14,7 @@ export default function Index() {
     else router.replace("/welcome");
   }, [hasCompletedOnboarding, isHydrating, isLoaded, isSignedIn]);
   return (
-    <View className="flex-1 items-center justify-center bg-[#FCFBFF]">
+    <View className="flex-1 items-center justify-center bg-cream">
       <Logo />
     </View>
   );
