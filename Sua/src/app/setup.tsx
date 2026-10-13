@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, Text, View } from "react-native";
 import { router } from "expo-router";
 import { CalendarDays, ChevronRight } from "lucide-react-native";
 import { Field, Logo, PrimaryButton } from "../components/ui";
@@ -20,25 +20,39 @@ export default function Setup() {
   const [level, setLevel] = useState("");
   const [course, setCourse] = useState("");
   const [code, setCode] = useState("");
-  const finish = () => {
-    completeOnboarding(
-      {
-        name: profile?.name ?? "Student",
-        email: profile?.email ?? "student@sua.app",
-        university,
-        programme,
-        level,
-      },
-      {
-        id: `course-${Date.now()}`,
-        code: code || "COURSE 101",
-        name: course || "My first course",
-        lecturer: "",
-        color: "#7C5CFC",
-        noteCount: 0,
-      },
-    );
-    router.replace("/home");
+  const [saving, setSaving] = useState(false);
+
+  const finish = async (skip = false) => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await completeOnboarding(
+        {
+          name: profile?.name ?? "Student",
+          email: profile?.email ?? "",
+          university: skip ? "" : university,
+          programme: skip ? "" : programme,
+          level: skip ? "" : level,
+        },
+        {
+          code: code || "COURSE 101",
+          name: course || "My first course",
+          lecturer: "",
+          color: "#7C5CFC",
+          noteCount: 0,
+        },
+      );
+      router.replace("/home");
+    } catch (error) {
+      Alert.alert(
+        "Could not finish setup",
+        error instanceof Error && error.message
+          ? error.message
+          : "Check your connection and try again.",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
   return (
     <SafeAreaView className="flex-1 bg-[#FCFBFF]" style={{ flex: 1 }}>
@@ -112,10 +126,15 @@ export default function Setup() {
           </View>
         </View>
         <View className="mt-8 gap-3">
-          <PrimaryButton onPress={finish}>
-            Go to my Home <ChevronRight size={16} color="white" />
+          <PrimaryButton onPress={() => finish(false)}>
+            {saving ? "Saving..." : "Go to my Home"}{" "}
+            <ChevronRight size={16} color="white" />
           </PrimaryButton>
-          <Pressable onPress={finish} className="items-center py-3">
+          <Pressable
+            onPress={() => finish(true)}
+            disabled={saving}
+            className="items-center py-3"
+          >
             <Text className="font-bold text-[#7C5CFC]">Skip for now</Text>
           </Pressable>
         </View>

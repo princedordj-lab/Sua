@@ -31,7 +31,8 @@
           "imageWidth": 76
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "@clerk/expo"
     ],
     "experiments": {
       "typedRoutes": true,

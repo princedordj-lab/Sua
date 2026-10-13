@@ -6,6 +6,7 @@ import { authenticate } from "./middleware/auth.js";
 import { meRouter } from "./routes/me.js";
 import { coursesRouter } from "./routes/courses.js";
 import { clerkWebhookRouter } from "./routes/webhooks.js";
+import { notesRouter } from "./routes/notes.js";
 
 const app = express();
 
@@ -34,6 +35,7 @@ app.use(clerkMiddleware());
 
 app.use("/api/me", authenticate, meRouter);
 app.use("/api/courses", authenticate, coursesRouter);
+app.use("/api/notes", authenticate, notesRouter);
 
 app.use((err, _req, res, _next) => {
   const status = err.status ?? 500;

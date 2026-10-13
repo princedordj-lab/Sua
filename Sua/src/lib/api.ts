@@ -1,6 +1,16 @@
-import type { Course, UserProfile } from "./types";
+import type {
+  NoteSyncChange,
+  ServerNote,
+  ServerCourse,
+  ServerCourseCreate,
+  ServerProfile,
+  ServerProfileUpdate,
+} from "./types";
+import { Platform } from "react-native";
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:4000/api";
+const API_URL =
+  process.env.EXPO_PUBLIC_API_URL ??
+  (Platform.OS === "android" ? "http://10.0.2.2:4000/api" : "http://localhost:4000/api");
 type RequestOptions = RequestInit & { token?: string };
 
 export async function apiRequest<T>(
@@ -16,19 +26,24 @@ export async function apiRequest<T>(
     },
   });
   if (!response.ok) throw new Error(`API request failed (${response.status})`);
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
 export const coursesApi = {
-  list: (token: string) => apiRequest<Course[]>("/courses", { token }),
-  create: (token: string, course: Omit<Course, "id">) =>
-    apiRequest<Course>("/courses", {
+  list: (token: string) => apiRequest<ServerCourse[]>("/courses", { token }),
+  create: (token: string, course: ServerCourseCreate) =>
+    apiRequest<ServerCourse>("/courses", {
       method: "POST",
       token,
       body: JSON.stringify(course),
     }),
-  update: (token: string, id: string, changes: Partial<Course>) =>
-    apiRequest<Course>(`/courses/${id}`, {
+  update: (
+    token: string,
+    id: string,
+    changes: Partial<ServerCourseCreate> & { archived?: boolean },
+  ) =>
+    apiRequest<ServerCourse>(`/courses/${id}`, {
       method: "PATCH",
       token,
       body: JSON.stringify(changes),
@@ -38,10 +53,22 @@ export const coursesApi = {
 };
 
 export const profileApi = {
-  update: (token: string, profile: Partial<UserProfile>) =>
-    apiRequest<UserProfile>("/me", {
+  get: (token: string) => apiRequest<ServerProfile>("/me", { token }),
+  update: (token: string, changes: ServerProfileUpdate) =>
+    apiRequest<ServerProfile>("/me", {
       method: "PATCH",
       token,
-      body: JSON.stringify(profile),
+      body: JSON.stringify(changes),
+    }),
+};
+
+export const notesApi = {
+  listForCourse: (token: string, courseId: string) =>
+    apiRequest<ServerNote[]>(`/notes/course/${courseId}`, { token }),
+  sync: (token: string, changes: NoteSyncChange[]) =>
+    apiRequest<{ notes: ServerNote[] }>("/notes/sync", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ changes }),
     }),
 };

@@ -1,4 +1,6 @@
 import type { SQLiteDatabase } from "expo-sqlite";
+import { notesApi } from "./api";
+import type { ServerNote } from "./types";
 
 export type Note = {
   id: string;
@@ -116,4 +118,49 @@ export async function pendingSyncCount(db: SQLiteDatabase) {
     "SELECT COUNT(*) as count FROM sync_queue",
   );
   return row?.count ?? 0;
+}
+
+export async function syncPendingNotes(db: SQLiteDatabase, token: string) {
+  const queue = await db.getAllAsync<SyncQueueItem>(
+    "SELECT * FROM sync_queue ORDER BY id ASC LIMIT 100",
+  );
+  if (!queue.length) return 0;
+  const changes = queue.map((item) => ({
+    operation: item.operation,
+    id: item.entityId,
+    ...(item.operation === "upsert" ? JSON.parse(item.payload) : {}),
+  }));
+  const response = await notesApi.sync(token, changes);
+  await db.withTransactionAsync(async () => {
+    for (const item of queue) {
+      if (item.operation === "upsert") {
+        await db.runAsync("UPDATE notes SET sync_state = 'synced' WHERE id = ?", item.entityId);
+      }
+      await db.runAsync("DELETE FROM sync_queue WHERE id = ?", item.id);
+    }
+  });
+  for (const note of response.notes) await upsertSyncedNote(db, note);
+  return queue.length;
+}
+
+export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
+  await db.runAsync(
+    `INSERT INTO notes (id, course_id, title, body, source_type, created_at, updated_at, sync_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'synced')
+     ON CONFLICT(id) DO UPDATE SET course_id = excluded.course_id,
+       title = excluded.title, body = excluded.body, source_type = excluded.source_type,
+       updated_at = excluded.updated_at, sync_state = 'synced'`,
+    note.id,
+    note.courseId,
+    note.title,
+    note.body,
+    note.sourceType,
+    note.createdAt,
+    note.updatedAt,
+  );
+}
+
+export async function pullCourseNotes(db: SQLiteDatabase, token: string, courseId: string) {
+  const notes = await notesApi.listForCourse(token, courseId);
+  for (const note of notes) await upsertSyncedNote(db, note);
 }

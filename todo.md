@@ -218,27 +218,37 @@ Complete milestones in order where dependencies require it. Each milestone can b
 ### Milestone 1 — App foundation, identity, and course model
 
 - [x] Create Expo React Native app foundation, NativeWind styling conventions, navigation shell, and five-tab structure.
-- [x] Implement the frontend onboarding walkthrough, setup questions, skip paths, local sign-in flow, and automatic first course. Clerk integration remains pending.
-- [ ] Configure NeonDB, Prisma, core schema, row-level security, and user/course ownership.
-- [ ] Establish authenticated Express.js API conventions and connect frontend API client to backend routes.
+- [x] Implement the frontend onboarding walkthrough, setup questions, skip paths, local sign-in flow, and automatic first course. Clerk integration complete (Google + email/password; Apple sign-in deferred until the Apple Developer account is ready).
+- [x] Configure NeonDB, Prisma, core schema, row-level security, and user/course ownership.
+- [x] Establish authenticated Express.js API conventions and connect frontend API client to backend routes.
 - [ ] Configure Cloudinary file handling through the backend, including ownership checks and student deletion flows.
 - [ ] Implement course create, rename, archive, delete confirmation, and move-note flow.
 - [ ] Add Sentry/PostHog foundations and analytics event definitions.
 
-> Frontend foundation scope is complete. The milestone remains open until Clerk, backend ownership protections, Cloudinary, analytics, and the move-note flow are implemented.
+> Frontend foundation and Clerk identity are complete. NeonDB + Prisma user/course schema is live with per-user row-level security, and the authenticated Express API (`/api/me`, `/api/courses`, Clerk webhook sync) is connected to the frontend client. The milestone remains open until Cloudinary, analytics, and the move-note flow are implemented.
 
 **Exit criteria:** a new user can sign up, finish or skip onboarding, reach Home within 90 seconds, and manage courses with ownership protections in place.
 
 ### Milestone 2 — Local-first notes and capture
 
-- [ ] Implement Expo SQLite local data layer and initial cloud sync strategy.
-- [ ] Build typed-note editor with formatting, autosave, and offline use.
+- [x] Implement Expo SQLite local data layer and initial cloud sync strategy.
+- [x] Build typed-note editor with autosave and offline use.
+- [ ] Add rich-text formatting controls and conflict resolution after the authenticated API contract is finalized.
 - [ ] Build chunked offline audio recorder with pause/resume, timer, crash recovery, and recover-recording flow.
 - [ ] Implement audio compression, Wi-Fi-only default, resumable background upload, and recording limits.
 - [ ] Add PDF, PowerPoint, image, and text upload up to 25 MB; extract text from scans/images.
 - [ ] Ensure notes and source materials are tied to exactly one course.
 
 **Exit criteria:** create and view notes offline; record survives interruption; queued changes/uploads resume on reconnection without losing data.
+
+#### Milestone 2 implementation plan and current slice
+
+- [x] Add a versioned local SQLite database with WAL mode, `notes`, and durable `sync_queue` tables.
+- [x] Tie every note to one `course_id`; expose course-scoped note listing and note editing routes.
+- [x] Add debounced note autosave so edits remain available after leaving the editor or losing connectivity.
+- [x] Surface pending-sync state in the course note list; leave queue delivery behind the authenticated Express sync contract.
+- [ ] Add rich-text formatting, chunked recording/recovery, and resumable upload once Expo audio/file APIs and backend endpoints are selected and verified.
+- [ ] Verify the full offline/reconnect flow on iOS and Android development builds, including crash recovery and 25 MB upload limits.
 
 ### Milestone 3 — AI processing and study-set generation
 

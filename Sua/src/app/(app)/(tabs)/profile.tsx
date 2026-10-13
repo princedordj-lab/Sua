@@ -17,8 +17,7 @@ export default function Profile() {
         text: "Sign out",
         style: "destructive",
         onPress: () => {
-          signOut();
-          router.replace("/welcome");
+          void signOut().finally(() => router.replace("/welcome"));
         },
       },
     ]);

@@ -24,6 +24,7 @@ model User {
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
   courses              Course[]
+  notes                Note[]
 
   @@map("users")
 }
@@ -39,7 +40,25 @@ model Course {
   archived  Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  notes     Note[]
 
   @@index([userId])
   @@map("courses")
+}
+
+model Note {
+  id         String   @id
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  courseId   String
+  course     Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  title      String   @default("")
+  body       String   @default("")
+  sourceType String   @default("typed")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId, updatedAt])
+  @@index([courseId, updatedAt])
+  @@map("notes")
 }

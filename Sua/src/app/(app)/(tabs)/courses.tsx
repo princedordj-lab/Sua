@@ -25,19 +25,28 @@ export default function Courses() {
     setCode("");
     setShowNew(true);
   };
-  const save = () => {
+  const save = async () => {
     if (!name.trim()) return;
-    if (editing) updateCourse(editing.id, { name, code });
-    else
-      addCourse({
-        name,
-        code: code || "COURSE",
-        lecturer: "",
-        color: "#7C5CFC",
-        noteCount: 0,
-      });
-    setEditing(null);
-    setShowNew(false);
+    try {
+      if (editing) await updateCourse(editing.id, { name, code });
+      else
+        await addCourse({
+          name,
+          code: code || "COURSE",
+          lecturer: "",
+          color: "#7C5CFC",
+          noteCount: 0,
+        });
+      setEditing(null);
+      setShowNew(false);
+    } catch (error) {
+      Alert.alert(
+        "Could not save course",
+        error instanceof Error && error.message
+          ? error.message
+          : "Check your connection and try again.",
+      );
+    }
   };
   const remove = (course: Course) =>
     Alert.alert(
@@ -48,7 +57,14 @@ export default function Courses() {
         {
           text: "Delete",
           style: "destructive",
-          onPress: () => deleteCourse(course.id),
+          onPress: () => {
+            deleteCourse(course.id).catch(() =>
+              Alert.alert(
+                "Could not delete course",
+                "Check your connection and try again.",
+              ),
+            );
+          },
         },
       ],
     );
@@ -126,9 +142,16 @@ export default function Courses() {
                     </Text>
                   </Pressable>
                   <Pressable
-                    onPress={() =>
-                      updateCourse(course.id, { archived: !course.archived })
-                    }
+                    onPress={() => {
+                      updateCourse(course.id, {
+                        archived: !course.archived,
+                      }).catch(() =>
+                        Alert.alert(
+                          "Could not update course",
+                          "Check your connection and try again.",
+                        ),
+                      );
+                    }}
                     className="flex-1 flex-row items-center justify-center gap-2 rounded-xl bg-[#F8F6FF] py-3"
                   >
                     <Archive size={15} color="#7C5CFC" />
