@@ -7,7 +7,7 @@ import { useApp } from "../state/AppContext";
 export default function Index() {
   const { isSignedIn, hasCompletedOnboarding } = useApp();
   useEffect(() => {
-    if (hasCompletedOnboarding && isSignedIn) router.replace("/(app)/(tabs)/home");
+    if (hasCompletedOnboarding && isSignedIn) router.replace("/home");
     else if (isSignedIn) router.replace("/setup");
     else router.replace("/welcome");
   }, [hasCompletedOnboarding, isSignedIn]);
