@@ -1,11 +1,19 @@
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
+import { useEffect, useState } from "react";
 import { ArrowLeft, FileText, MoreHorizontal, Plus } from "lucide-react-native";
 import { useApp } from "../../../state/AppContext";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useSQLiteContext } from "expo-sqlite";
+import { listNotes, type Note } from "../../../lib/notes";
 export default function CourseDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { courses } = useApp();
+  const db = useSQLiteContext();
+  const [notes, setNotes] = useState<Note[]>([]);
+  useEffect(() => {
+    listNotes(db, id).then(setNotes);
+  }, [db, id]);
   const course = courses.find((item) => item.id === id);
   if (!course)
     return (
@@ -55,7 +63,7 @@ export default function CourseDetail() {
           <View className="flex-1 rounded-2xl bg-white p-4">
             <Text className="text-sm text-[#8A8498]">Notes</Text>
             <Text className="mt-1 text-2xl font-black text-[#19152C]">
-              {course.noteCount}
+              {notes.length}
             </Text>
           </View>
           <View className="flex-1 rounded-2xl bg-white p-4">
@@ -65,21 +73,27 @@ export default function CourseDetail() {
         </View>
         <View className="mt-8 flex-row items-center justify-between">
           <Text className="text-lg font-extrabold text-[#19152C]">Notes</Text>
-          <Pressable className="flex-row items-center gap-1">
+          <Pressable
+            onPress={() => router.push({ pathname: "/note/[id]" as never, params: { id: "new", courseId: id } })}
+            className="flex-row items-center gap-1"
+          >
             <Plus size={17} color="#7C5CFC" />
             <Text className="font-bold text-[#7C5CFC]">Add note</Text>
           </Pressable>
         </View>
-        <View className="mt-3 items-center rounded-3xl border border-dashed border-[#CFC7F8] bg-[#F8F6FF] px-6 py-10">
-          <FileText size={28} color="#7C5CFC" />
-          <Text className="mt-3 text-base font-extrabold text-[#19152C]">
-            No notes yet
-          </Text>
-          <Text className="mt-2 text-center text-sm leading-5 text-[#8A8498]">
-            Record, upload, or type your first note. You can move notes between
-            courses later.
-          </Text>
-        </View>
+        {notes.length === 0 ? (
+          <View className="mt-3 items-center rounded-3xl border border-dashed border-[#CFC7F8] bg-[#F8F6FF] px-6 py-10">
+            <FileText size={28} color="#7C5CFC" />
+            <Text className="mt-3 text-base font-extrabold text-[#19152C]">No notes yet</Text>
+            <Text className="mt-2 text-center text-sm leading-5 text-[#8A8498]">Record, upload, or type your first note. It stays available offline.</Text>
+          </View>
+        ) : notes.map((note) => (
+          <Pressable key={note.id} onPress={() => router.push({ pathname: "/note/[id]" as never, params: { id: note.id, courseId: id } })} className="mt-3 rounded-2xl bg-white p-4">
+            <Text className="font-extrabold text-[#19152C]">{note.title || "Untitled note"}</Text>
+            <Text numberOfLines={2} className="mt-1 text-sm leading-5 text-[#8A8498]">{note.body || "Empty note"}</Text>
+            <Text className="mt-2 text-xs text-[#17B890]">{note.syncState === "pending" ? "Waiting to sync" : "Synced"}</Text>
+          </Pressable>
+        ))}
       </ScrollView>
     </SafeAreaView>
   );

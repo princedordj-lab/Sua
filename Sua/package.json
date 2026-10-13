@@ -3,6 +3,7 @@
   "main": "expo-router/entry",
   "version": "1.0.0",
   "dependencies": {
+    "@clerk/clerk-expo": "^2.20.1",
     "@expo/ui": "~57.0.23",
     "expo": "~57.0.28",
     "expo-constants": "~57.0.21",
@@ -15,6 +16,7 @@
     "expo-router": "~57.0.26",
     "expo-secure-store": "~57.0.4",
     "expo-splash-screen": "~57.0.10",
+    "expo-sqlite": "^57.0.4",
     "expo-status-bar": "~57.0.1",
     "expo-symbols": "~57.0.3",
     "expo-system-ui": "~57.0.4",

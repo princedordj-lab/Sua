@@ -16,3 +16,5 @@ export type UserProfile = {
   level: string;
   examDate?: string;
 };
+
+export type Note = import("./notes").Note;

@@ -2,6 +2,8 @@ import { Pressable, ScrollView, Text, View } from "react-native";
 import { BookOpen, FileUp, Mic, PenLine } from "lucide-react-native";
 import { SectionHeader } from "../../../components/ui";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { router } from "expo-router";
+import { useApp } from "../../../state/AppContext";
 
 const actions = [
   {
@@ -27,6 +29,11 @@ const actions = [
   },
 ];
 export default function Create() {
+  const { courses } = useApp();
+  const openTypedNote = () => {
+    const courseId = courses[0]?.id;
+    if (courseId) router.push({ pathname: "/note/[id]" as never, params: { id: "new", courseId } });
+  };
   return (
     <SafeAreaView className="flex-1 bg-[#FCFBFF]">
       <ScrollView contentContainerClassName="px-5 pb-8 pt-6">
@@ -42,6 +49,7 @@ export default function Create() {
           {actions.map(({ title, body, icon: Icon, color, iconColor }) => (
             <Pressable
               key={title}
+              onPress={title === "Type a note" ? openTypedNote : undefined}
               className="flex-row items-center rounded-3xl bg-white p-5"
             >
               <View
