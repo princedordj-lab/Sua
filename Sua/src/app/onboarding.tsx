@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Image, Pressable, SafeAreaView, Text, View } from "react-native";
+import { Image, Pressable, Text, View } from "react-native";
 import { router } from "expo-router";
 import { ChevronLeft, ChevronRight } from "lucide-react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { Logo, PrimaryButton } from "../components/ui";
 
 const slides = [

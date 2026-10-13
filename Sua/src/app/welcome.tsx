@@ -1,6 +1,7 @@
-import { Image, Pressable, SafeAreaView, Text, View } from "react-native";
+import { Image, Pressable, Text, View } from "react-native";
 import { router } from "expo-router";
 import { ArrowRight, Sparkles } from "lucide-react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { Logo, PrimaryButton } from "../components/ui";
 
 export default function Welcome() {

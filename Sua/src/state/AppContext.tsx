@@ -1,12 +1,6 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import type { Course, UserProfile } from "../lib/types";
 
-const starterCourses: Course[] = [
-  { id: "cs-101", code: "CS 241", name: "Data Structures", lecturer: "Dr. K. Mensah", color: "#7C5CFC", noteCount: 12 },
-  { id: "ec-204", code: "ECON 204", name: "Microeconomics II", lecturer: "Prof. A. Owusu", color: "#17B890", noteCount: 8 },
-  { id: "st-110", code: "STAT 110", name: "Probability & Statistics", lecturer: "Dr. A. Boateng", color: "#F59E0B", noteCount: 5 },
-];
-
 type AppContextValue = {
   isSignedIn: boolean;
   hasCompletedOnboarding: boolean;
