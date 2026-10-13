@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Alert, Pressable, SafeAreaView, Text, View } from "react-native";
+import { Alert, Pressable, Text, View } from "react-native";
 import { router } from "expo-router";
 import { Apple, Globe2 } from "lucide-react-native";
 import { Field, Logo, PrimaryButton } from "../components/ui";
 import { useApp } from "../state/AppContext";
+import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function SignIn() {
   const { signIn } = useApp();

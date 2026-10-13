@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Pressable, SafeAreaView, ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import { router } from "expo-router";
 import { CalendarDays, ChevronRight } from "lucide-react-native";
 import { Field, Logo, PrimaryButton } from "../components/ui";
 import { useApp } from "../state/AppContext";
+import { SafeAreaView } from "react-native-safe-area-context";
 
 const levels = ["Level 100", "Level 200", "Level 300", "Level 400", "Postgraduate"];
 export default function Setup() {
