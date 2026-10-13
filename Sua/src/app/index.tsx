@@ -11,5 +11,9 @@ export default function Index() {
     else if (isSignedIn) router.replace("/setup");
     else router.replace("/welcome");
   }, [hasCompletedOnboarding, isSignedIn]);
-  return <View className="flex-1 items-center justify-center bg-[#FCFBFF]"><Logo /></View>;
+  return (
+    <View className="flex-1 items-center justify-center bg-[#FCFBFF]">
+      <Logo />
+    </View>
+  );
 }

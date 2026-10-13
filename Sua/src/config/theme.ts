@@ -125,9 +125,12 @@ export const ui = {
   cardLarge: "rounded-card bg-surface p-card-lg shadow-card",
   hero: "rounded-card bg-brand p-card-lg",
   button: "min-h-12 items-center justify-center rounded-btn px-5",
-  buttonPrimary: "min-h-12 items-center justify-center rounded-btn bg-gold px-5 shadow-gold",
-  buttonSecondary: "min-h-12 items-center justify-center rounded-btn bg-brand px-5",
-  input: "h-12 rounded-input border border-line bg-surface px-4 text-body text-ink",
+  buttonPrimary:
+    "min-h-12 items-center justify-center rounded-btn bg-gold px-5 shadow-gold",
+  buttonSecondary:
+    "min-h-12 items-center justify-center rounded-btn bg-brand px-5",
+  input:
+    "h-12 rounded-input border border-line bg-surface px-4 text-body text-ink",
   chip: "rounded-chip px-3 py-2",
   tabBar: "rounded-sheet bg-surface px-4 shadow-float",
   sectionGap: "gap-section",

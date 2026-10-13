@@ -1,4 +1,10 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import type { Course, UserProfile } from "../lib/types";
 
 type AppContextValue = {
@@ -21,25 +27,50 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [courses, setCourses] = useState<Course[]>([]);
-  const value = useMemo<AppContextValue>(() => ({
-    isSignedIn,
-    hasCompletedOnboarding,
-    profile,
-    courses,
-    signIn: (email, name = email.split("@")[0]) => {
-      setIsSignedIn(true);
-      setProfile((current) => current ?? { name, email, university: "", programme: "", level: "" });
-    },
-    signOut: () => { setIsSignedIn(false); setHasCompletedOnboarding(false); },
-    completeOnboarding: (nextProfile, firstCourse) => {
-      setProfile(nextProfile);
-      setCourses((current) => current.length ? current : [firstCourse]);
-      setHasCompletedOnboarding(true);
-    },
-    addCourse: (course) => setCourses((current) => [...current, { ...course, id: `course-${Date.now()}` }]),
-    updateCourse: (id, changes) => setCourses((current) => current.map((course) => course.id === id ? { ...course, ...changes } : course)),
-    deleteCourse: (id) => setCourses((current) => current.filter((course) => course.id !== id)),
-  }), [courses, hasCompletedOnboarding, isSignedIn, profile]);
+  const value = useMemo<AppContextValue>(
+    () => ({
+      isSignedIn,
+      hasCompletedOnboarding,
+      profile,
+      courses,
+      signIn: (email, name = email.split("@")[0]) => {
+        setIsSignedIn(true);
+        setProfile(
+          (current) =>
+            current ?? {
+              name,
+              email,
+              university: "",
+              programme: "",
+              level: "",
+            },
+        );
+      },
+      signOut: () => {
+        setIsSignedIn(false);
+        setHasCompletedOnboarding(false);
+      },
+      completeOnboarding: (nextProfile, firstCourse) => {
+        setProfile(nextProfile);
+        setCourses((current) => (current.length ? current : [firstCourse]));
+        setHasCompletedOnboarding(true);
+      },
+      addCourse: (course) =>
+        setCourses((current) => [
+          ...current,
+          { ...course, id: `course-${Date.now()}` },
+        ]),
+      updateCourse: (id, changes) =>
+        setCourses((current) =>
+          current.map((course) =>
+            course.id === id ? { ...course, ...changes } : course,
+          ),
+        ),
+      deleteCourse: (id) =>
+        setCourses((current) => current.filter((course) => course.id !== id)),
+    }),
+    [courses, hasCompletedOnboarding, isSignedIn, profile],
+  );
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }
 
