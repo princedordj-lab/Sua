@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Image, Pressable, Text, View } from "react-native";
+import { ImageBackground, Pressable, Text, View } from "react-native";
 import { router } from "expo-router";
 import { ChevronLeft, ChevronRight } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -29,55 +29,57 @@ export default function Onboarding() {
   const next = () =>
     step === slides.length - 1 ? router.push("/sign-in") : setStep(step + 1);
   return (
-    <SafeAreaView className="flex-1 bg-[#FCFBFF]" style={{ flex: 1 }}>
-      <View className="flex-1 px-6 pt-5">
-        <View className="flex-row items-center justify-between">
-          <Logo compact />
-          <Pressable onPress={() => router.push("/sign-in")}>
-            <Text className="font-semibold text-[#7C5CFC]">Skip</Text>
-          </Pressable>
-        </View>
-        <View className="flex-1 justify-center">
-          <Image
-            source={slide.image}
-            className="mb-9 h-72 w-full rounded-[30px]"
-            resizeMode="cover"
-          />
-          <Text className="text-[32px] font-black leading-9 text-[#19152C]">
-            {slide.title}
-          </Text>
-          <Text className="mt-4 text-base leading-6 text-[#6E687D]">
-            {slide.body}
-          </Text>
-        </View>
-        <View className="gap-5 pb-4">
-          <View className="flex-row gap-2">
-            {slides.map((_, index) => (
-              <View
-                key={index}
-                className={`h-2 rounded-full ${index === step ? "w-8 bg-[#7C5CFC]" : "w-2 bg-[#D8D2EA]"}`}
-              />
-            ))}
+    <SafeAreaView className="flex-1 bg-[#19152C]" style={{ flex: 1 }}>
+      <ImageBackground
+        source={slide.image}
+        className="flex-1"
+        resizeMode="cover"
+      >
+        <View className="absolute inset-0 bg-[#19152C]/65" />
+        <View className="flex-1 px-6 pt-5">
+          <View className="flex-row items-center justify-between">
+            <Logo compact light />
+            <Pressable onPress={() => router.push("/sign-in")}>
+              <Text className="font-semibold text-white">Skip</Text>
+            </Pressable>
           </View>
-          <PrimaryButton onPress={next}>
-            {step === slides.length - 1
-              ? "Let's set up your space"
-              : "Continue"}{" "}
-            <ChevronRight size={16} color="white" />
-          </PrimaryButton>
-          <Pressable
-            onPress={() => step > 0 && setStep(step - 1)}
-            className="h-7 items-center"
-          >
-            {step > 0 && (
-              <View className="flex-row items-center">
-                <ChevronLeft size={15} color="#7C5CFC" />
-                <Text className="font-bold text-[#7C5CFC]">Back</Text>
-              </View>
-            )}
-          </Pressable>
+          <View className="flex-1 justify-end pb-10">
+            <Text className="text-[32px] font-black leading-9 text-white">
+              {slide.title}
+            </Text>
+            <Text className="mt-4 text-base leading-6 text-white/85">
+              {slide.body}
+            </Text>
+          </View>
+          <View className="gap-5 pb-4">
+            <View className="flex-row gap-2">
+              {slides.map((_, index) => (
+                <View
+                  key={index}
+                  className={`h-2 rounded-full ${index === step ? "w-8 bg-[#F9B91F]" : "w-2 bg-white/55"}`}
+                />
+              ))}
+            </View>
+            <PrimaryButton onPress={next}>
+              {step === slides.length - 1
+                ? "Let's set up your space"
+                : "Continue"}{" "}
+              <ChevronRight size={16} color="white" />
+            </PrimaryButton>
+            <Pressable
+              onPress={() => step > 0 && setStep(step - 1)}
+              className="h-7 items-center"
+            >
+              {step > 0 && (
+                <View className="flex-row items-center">
+                  <ChevronLeft size={15} color="white" />
+                  <Text className="font-bold text-white">Back</Text>
+                </View>
+              )}
+            </Pressable>
+          </View>
         </View>
-      </View>
+      </ImageBackground>
     </SafeAreaView>
   );
 }

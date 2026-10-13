@@ -8,14 +8,22 @@ import {
 } from "react-native";
 import { ChevronRight, Plus } from "lucide-react-native";
 
-export function Logo({ compact = false }: { compact?: boolean }) {
+export function Logo({
+  compact = false,
+  light = false,
+}: {
+  compact?: boolean;
+  light?: boolean;
+}) {
   return (
     <View className="flex-row items-center gap-2">
       <View className="h-9 w-9 items-center justify-center rounded-xl bg-[#7C5CFC]">
         <Text className="text-lg font-black text-white">S</Text>
       </View>
       {!compact && (
-        <Text className="text-2xl font-extrabold tracking-tight text-[#19152C]">
+        <Text
+          className={`text-2xl font-extrabold tracking-tight ${light ? "text-white" : "text-[#19152C]"}`}
+        >
           sua
         </Text>
       )}
