@@ -12,7 +12,10 @@ export async function ensureUser(tx, { clerkId, email, name }) {
   };
   return tx.user.upsert({
     where: { clerkId },
-    update: {},
+    update: {
+      ...(email ? { email } : {}),
+      ...(name ? { name } : {}),
+    },
     create: data,
   });
 }

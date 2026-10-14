@@ -6,6 +6,11 @@ import { clerkClient, getAuth } from "@clerk/express";
  */
 export async function identityFromRequest(req) {
   const { userId, sessionClaims } = getAuth(req);
+  if (!userId) {
+    const err = new Error("Unauthenticated");
+    err.status = 401;
+    throw err;
+  }
   const email =
     sessionClaims?.email ??
     sessionClaims?.primary_email ??
@@ -18,12 +23,14 @@ export async function identityFromRequest(req) {
       .join(" ") || null);
   if (email) return { clerkId: userId, email, name };
   const user = await clerkClient.users.getUser(userId);
+  const resolvedEmail =
+    user.emailAddresses?.find((e) => e.id === user.primaryEmailAddressId)?.emailAddress ??
+    user.primaryEmailAddress?.emailAddress ??
+    user.emailAddresses?.[0]?.emailAddress ??
+    null;
   return {
     clerkId: userId,
-    email:
-      user.primaryEmailAddress?.emailAddress ??
-      user.emailAddresses[0]?.emailAddress ??
-      null,
+    email: resolvedEmail,
     name:
       name ?? ([user.firstName, user.lastName].filter(Boolean).join(" ") || null),
   };

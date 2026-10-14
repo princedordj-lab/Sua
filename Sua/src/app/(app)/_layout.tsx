@@ -4,8 +4,7 @@ import { View } from "react-native";
 import { Logo } from "../../components/ui";
 
 export default function AppLayout() {
-  const { isLoaded, isHydrating, isSignedIn, hasCompletedOnboarding } =
-    useApp();
+  const { isLoaded, isHydrating, isSignedIn } = useApp();
   if (!isLoaded || isHydrating) {
     return (
       <View className="flex-1 items-center justify-center bg-cream">
@@ -14,6 +13,5 @@ export default function AppLayout() {
     );
   }
   if (!isSignedIn) return <Redirect href="/welcome" />;
-  if (!hasCompletedOnboarding) return <Redirect href="/setup" />;
   return <Stack screenOptions={{ headerShown: false }} />;
 }

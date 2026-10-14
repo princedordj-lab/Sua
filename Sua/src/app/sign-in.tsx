@@ -40,15 +40,16 @@ export default function SignIn() {
     setCode("");
   };
 
-  const navigateAfterAuth = ({
-    session,
-    decorateUrl,
-  }: {
+  const navigateAfterAuth = (params?: {
     session?: { currentTask?: unknown } | null;
-    decorateUrl: (url: string) => string;
+    decorateUrl?: (url: string) => string;
   }) => {
-    if (session?.currentTask) return;
-    router.replace(decorateUrl("/") as never);
+    if (params?.session?.currentTask) return;
+    if (mode === "sign-in") {
+      router.replace("/home");
+    } else {
+      router.replace("/setup");
+    }
   };
 
   const finalizeVerifiedSignUp = async () => {
@@ -77,6 +78,7 @@ export default function SignIn() {
       navigate: navigateAfterAuth,
     });
     if (error) throw error;
+    router.replace("/setup");
   };
 
   const submitEmailPassword = async () => {
@@ -98,9 +100,10 @@ export default function SignIn() {
         if (error) throw error;
         if (signIn.status === "complete") {
           const { error: finalizeError } = await signIn.finalize({
-            navigate: navigateAfterAuth,
+            navigate: () => router.replace("/home"),
           });
           if (finalizeError) throw finalizeError;
+          router.replace("/home");
         } else {
           Alert.alert("Sign in incomplete", "Additional verification is required.");
         }
@@ -127,6 +130,7 @@ export default function SignIn() {
           navigate: navigateAfterAuth,
         });
         if (finalizeError) throw finalizeError;
+        router.replace("/setup");
         return;
       }
       const { error: verificationError } =
@@ -167,8 +171,9 @@ export default function SignIn() {
       if (createdSessionId && setActive) {
         await setActive({
           session: createdSessionId,
-          navigate: navigateAfterAuth,
+          navigate: mode === "sign-in" ? () => router.replace("/home") : navigateAfterAuth,
         });
+        router.replace(mode === "sign-in" ? "/home" : "/setup");
       } else {
         throw new Error(
           "Google authentication completed without an active Clerk session. Check the mobile SSO redirect allowlist.",

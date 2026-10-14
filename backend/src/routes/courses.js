@@ -74,17 +74,18 @@ coursesRouter.patch("/:id", async (req, res) => {
     }
     changes.examDate = parsedExamDate;
   }
-  const result = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
-    return tx.course.updateMany({ where: { id, userId: user.id }, data: changes });
-  });
-  if (result.count === 0) {
-    return res.status(404).json({ error: "Course not found" });
-  }
   const course = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
+    const result = await tx.course.updateMany({
+      where: { id, userId: user.id },
+      data: changes,
+    });
+    if (result.count === 0) return null;
     return tx.course.findFirst({ where: { id, userId: user.id } });
   });
+  if (!course) {
+    return res.status(404).json({ error: "Course not found" });
+  }
   res.json(shapeCourse(course));
 });
 
