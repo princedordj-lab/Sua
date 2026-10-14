@@ -15,7 +15,8 @@
         "backgroundColor": "#005B45",
         "foregroundImage": "./assets/images/icons/icon.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.pdordj.Sua"
     },
     "web": {
       "output": "static",
@@ -37,6 +38,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "8ae5fd5d-6679-4e41-af81-2084c5a9a6a0"
+      }
     }
   }
 }
