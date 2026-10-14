@@ -1,11 +1,17 @@
-import { requireAuth } from "@clerk/express";
+import { getAuth } from "@clerk/express";
 
 /**
- * authenticate() runs clerkMiddleware + requireAuth and rejects with 401
- * unless a valid Clerk session token is present. req.auth() exposes
- * { userId, ... } for handlers downstream.
+ * API-safe authentication middleware. `requireAuth()` is intended for
+ * full-stack Express pages and may redirect unauthenticated requests. The
+ * mobile client needs a JSON 401 instead.
  */
-export const authenticate = requireAuth();
+export function authenticate(req, res, next) {
+  const auth = getAuth(req);
+  if (!auth.isAuthenticated || !auth.userId) {
+    return res.status(401).json({ error: "Unauthenticated" });
+  }
+  return next();
+}
 
 export function clerkId(req) {
   const auth = typeof req.auth === "function" ? req.auth() : req.auth;

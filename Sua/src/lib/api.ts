@@ -25,7 +25,19 @@ export async function apiRequest<T>(
       ...options.headers,
     },
   });
-  if (!response.ok) throw new Error(`API request failed (${response.status})`);
+  if (!response.ok) {
+    const body = await response.text();
+    let detail = "";
+    try {
+      const parsed = JSON.parse(body) as { error?: string };
+      detail = parsed.error ?? "";
+    } catch {
+      detail = body;
+    }
+    throw new Error(
+      `API request failed (${response.status})${detail ? `: ${detail}` : ""}`,
+    );
+  }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }

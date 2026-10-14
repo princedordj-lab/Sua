@@ -7,6 +7,7 @@ import {
   View,
 } from "react-native";
 import { router } from "expo-router";
+import * as AuthSession from "expo-auth-session";
 import * as WebBrowser from "expo-web-browser";
 import { useSignIn, useSignUp, useSSO } from "@clerk/expo";
 import { Apple, Globe2 } from "lucide-react-native";
@@ -39,12 +40,54 @@ export default function SignIn() {
     setCode("");
   };
 
+  const navigateAfterAuth = ({
+    session,
+    decorateUrl,
+  }: {
+    session?: { currentTask?: unknown } | null;
+    decorateUrl: (url: string) => string;
+  }) => {
+    if (session?.currentTask) return;
+    router.replace(decorateUrl("/") as never);
+  };
+
+  const finalizeVerifiedSignUp = async () => {
+    if (signUp.status === "missing_requirements") {
+      const missingFields = signUp.missingFields ?? [];
+      const needsName = missingFields.some((field) =>
+        ["first_name", "last_name"].includes(field),
+      );
+
+      if (needsName) {
+        const [firstName, ...rest] = fullName.trim().split(/\s+/);
+        const { error } = await signUp.update({
+          firstName: firstName || undefined,
+          lastName: rest.length ? rest.join(" ") : undefined,
+        });
+        if (error) throw error;
+      }
+    }
+
+    if (signUp.status !== "complete") {
+      const missing = signUp.missingFields?.join(", ") || "additional account details";
+      throw new Error(`Complete these requirements before continuing: ${missing}.`);
+    }
+
+    const { error } = await signUp.finalize({
+      navigate: navigateAfterAuth,
+    });
+    if (error) throw error;
+  };
+
   const submitEmailPassword = async () => {
     if (!email || !password)
       return Alert.alert(
         "Almost there",
         "Enter your email and password to continue.",
       );
+    if (mode === "sign-up" && !fullName.trim()) {
+      return Alert.alert("Almost there", "Enter your full name to continue.");
+    }
     if (mode === "sign-in") {
       setBusy(true);
       try {
@@ -54,9 +97,10 @@ export default function SignIn() {
         });
         if (error) throw error;
         if (signIn.status === "complete") {
-          const { error: finalizeError } = await signIn.finalize();
+          const { error: finalizeError } = await signIn.finalize({
+            navigate: navigateAfterAuth,
+          });
           if (finalizeError) throw finalizeError;
-          router.replace("/");
         } else {
           Alert.alert("Sign in incomplete", "Additional verification is required.");
         }
@@ -79,9 +123,10 @@ export default function SignIn() {
       });
       if (error) throw error;
       if (signUp.status === "complete") {
-        const { error: finalizeError } = await signUp.finalize();
+        const { error: finalizeError } = await signUp.finalize({
+          navigate: navigateAfterAuth,
+        });
         if (finalizeError) throw finalizeError;
-        router.replace("/");
         return;
       }
       const { error: verificationError } =
@@ -101,13 +146,7 @@ export default function SignIn() {
     try {
       const { error } = await signUp.verifications.verifyEmailCode({ code });
       if (error) throw error;
-      if (signUp.status === "complete") {
-        const { error: finalizeError } = await signUp.finalize();
-        if (finalizeError) throw finalizeError;
-        router.replace("/");
-      } else {
-        Alert.alert("Check the code", "That code did not verify. Try again.");
-      }
+      await finalizeVerifiedSignUp();
     } catch (error) {
       Alert.alert("Verification failed", messageFromError(error));
     } finally {
@@ -120,10 +159,20 @@ export default function SignIn() {
     try {
       const { createdSessionId, setActive } = await startSSOFlow({
         strategy: "oauth_google",
+        redirectUrl: AuthSession.makeRedirectUri({
+          scheme: "sua",
+          path: "oauth-callback",
+        }),
       });
       if (createdSessionId && setActive) {
-        await setActive({ session: createdSessionId });
-        router.replace("/");
+        await setActive({
+          session: createdSessionId,
+          navigate: navigateAfterAuth,
+        });
+      } else {
+        throw new Error(
+          "Google authentication completed without an active Clerk session. Check the mobile SSO redirect allowlist.",
+        );
       }
     } catch (error) {
       Alert.alert("Google sign-in failed", messageFromError(error));

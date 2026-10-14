@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "./config/env.js";
 import express from "express";
 import cors from "cors";
 import { clerkMiddleware } from "@clerk/express";
@@ -31,7 +31,11 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.use(clerkMiddleware());
+app.use(
+  clerkMiddleware({
+    publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+  }),
+);
 
 app.use("/api/me", authenticate, meRouter);
 app.use("/api/courses", authenticate, coursesRouter);

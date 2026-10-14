@@ -47,25 +47,22 @@ notesRouter.post("/sync", async (req, res) => {
       }
       const course = await tx.course.findFirst({ where: { id: change.courseId, userId: user.id } });
       if (!course) continue;
-      const note = await tx.note.upsert({
-        where: { id: change.id },
-        create: {
-          id: change.id,
-          userId: user.id,
-          courseId: change.courseId,
-          title: change.title,
-          body: change.body,
-          sourceType: change.sourceType || "typed",
-          ...(change.updatedAt ? { updatedAt: new Date(change.updatedAt) } : {}),
-        },
-        update: {
-          courseId: change.courseId,
-          title: change.title,
-          body: change.body,
-          sourceType: change.sourceType || "typed",
-          ...(change.updatedAt ? { updatedAt: new Date(change.updatedAt) } : {}),
-        },
-      });
+      const existing = await tx.note.findUnique({ where: { id: change.id } });
+      if (existing && existing.userId !== user.id) continue;
+      const parsedUpdatedAt = change.updatedAt ? new Date(change.updatedAt) : null;
+      if (parsedUpdatedAt && Number.isNaN(parsedUpdatedAt.getTime())) continue;
+      const data = {
+        courseId: change.courseId,
+        title: change.title,
+        body: change.body,
+        sourceType: change.sourceType || "typed",
+        ...(parsedUpdatedAt ? { updatedAt: parsedUpdatedAt } : {}),
+      };
+      const note = existing
+        ? await tx.note.update({ where: { id: existing.id }, data })
+        : await tx.note.create({
+            data: { id: change.id, userId: user.id, ...data },
+          });
       result.push(note);
     }
     return result;

@@ -16,12 +16,18 @@ function shapeCourse(course) {
   };
 }
 
+function parseDate(value) {
+  if (value === null || value === "") return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
 coursesRouter.get("/", async (req, res) => {
   const identity = await identityFromRequest(req);
   const courses = await withUser(identity.clerkId, async (tx) => {
-    await ensureUser(tx, identity);
+    const user = await ensureUser(tx, identity);
     return tx.course.findMany({
-      where: { archived: false },
+      where: { userId: user.id, archived: false },
       orderBy: { createdAt: "asc" },
     });
   });
@@ -34,6 +40,10 @@ coursesRouter.post("/", async (req, res) => {
   if (!name || typeof name !== "string" || !name.trim()) {
     return res.status(400).json({ error: "name is required" });
   }
+  const parsedExamDate = parseDate(examDate);
+  if (examDate !== undefined && parsedExamDate === undefined) {
+    return res.status(400).json({ error: "examDate must be a valid date" });
+  }
   const course = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
     return tx.course.create({
@@ -41,7 +51,7 @@ coursesRouter.post("/", async (req, res) => {
         userId: user.id,
         name: name.trim(),
         code: code || null,
-        examDate: examDate ? new Date(examDate) : null,
+        examDate: parsedExamDate,
         colour: colour || undefined,
       },
     });
@@ -58,26 +68,33 @@ coursesRouter.patch("/:id", async (req, res) => {
     if (key in (req.body ?? {})) changes[key] = req.body[key];
   }
   if ("examDate" in changes) {
-    changes.examDate = changes.examDate ? new Date(changes.examDate) : null;
+    const parsedExamDate = parseDate(changes.examDate);
+    if (changes.examDate !== undefined && parsedExamDate === undefined) {
+      return res.status(400).json({ error: "examDate must be a valid date" });
+    }
+    changes.examDate = parsedExamDate;
   }
-  const result = await withUser(identity.clerkId, (tx) =>
-    tx.course.updateMany({ where: { id }, data: changes }),
-  );
+  const result = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    return tx.course.updateMany({ where: { id, userId: user.id }, data: changes });
+  });
   if (result.count === 0) {
     return res.status(404).json({ error: "Course not found" });
   }
-  const course = await withUser(identity.clerkId, (tx) =>
-    tx.course.findUnique({ where: { id } }),
-  );
+  const course = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    return tx.course.findFirst({ where: { id, userId: user.id } });
+  });
   res.json(shapeCourse(course));
 });
 
 coursesRouter.delete("/:id", async (req, res) => {
   const identity = await identityFromRequest(req);
   const { id } = req.params;
-  const result = await withUser(identity.clerkId, (tx) =>
-    tx.course.deleteMany({ where: { id } }),
-  );
+  const result = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    return tx.course.deleteMany({ where: { id, userId: user.id } });
+  });
   if (result.count === 0) {
     return res.status(404).json({ error: "Course not found" });
   }

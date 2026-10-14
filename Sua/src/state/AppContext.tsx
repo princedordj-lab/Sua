@@ -89,10 +89,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const token = await getToken();
         if (!token || cancelled) return;
-        const [profile, serverCourses] = await Promise.all([
-          profileApi.get(token),
-          coursesApi.list(token),
-        ]);
+        // Bootstrap the local User row before loading dependent courses. Both
+        // endpoints lazily create the row, so running them concurrently can
+        // race on the users.clerkId unique constraint for a new account.
+        const profile = await profileApi.get(token);
+        const serverCourses = await coursesApi.list(token);
         if (cancelled) return;
         setHydrated({
           clerkId: userId,
@@ -134,20 +135,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
     async (nextProfile: UserProfile, firstCourse: Omit<Course, "id">) => {
       const token = await getToken();
       if (!token || !userId) throw new Error("Not signed in");
-      const [profile, course] = await Promise.all([
-        profileApi.update(token, {
-          name: nextProfile.name || null,
-          university: nextProfile.university || null,
-          programme: nextProfile.programme || null,
-          level: nextProfile.level || null,
-          onboardingCompleted: true,
-        }),
-        coursesApi.create(token, {
-          name: firstCourse.name,
-          code: firstCourse.code || null,
-          colour: firstCourse.color,
-        }),
-      ]);
+      // Ensure the User row is created before the course request. This avoids
+      // two first-login requests racing to create the same Clerk-backed user.
+      await profileApi.get(token);
+      const profile = await profileApi.update(token, {
+        name: nextProfile.name || null,
+        university: nextProfile.university || null,
+        programme: nextProfile.programme || null,
+        level: nextProfile.level || null,
+        onboardingCompleted: true,
+      });
+      const course = await coursesApi.create(token, {
+        name: firstCourse.name,
+        code: firstCourse.code || null,
+        colour: firstCourse.color,
+      });
       setHydrated((prev) => ({
         clerkId: userId,
         profile,
