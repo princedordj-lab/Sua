@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   KeyboardAvoidingView,
@@ -11,8 +11,9 @@ import {
   View,
 } from "react-native";
 import { useSQLiteContext } from "expo-sqlite";
+import type { SQLiteDatabase } from "expo-sqlite";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router, useLocalSearchParams } from "expo-router";
+import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import {
   AudioModule,
   RecordingPresets,
@@ -35,12 +36,13 @@ import {
   Save,
   Sparkles,
   Square,
+  Trash2,
   Undo2,
 } from "lucide-react-native";
 import { BottomSheet, CoursePickerSheet } from "../../../components/sheets";
 import { colors } from "../../../config/theme";
 import { courseInitials, courseStyle } from "../../../lib/course-style";
-import { countNotesBySource, saveNote } from "../../../lib/notes";
+import { countNotesBySource, deleteNote, getNote, saveNote } from "../../../lib/notes";
 import { useApp } from "../../../state/AppContext";
 import type { Course } from "../../../lib/types";
 
@@ -102,6 +104,23 @@ function usageBarWidth(ratio: number) {
   if (ratio >= 0.5) return "w-1/2";
   if (ratio >= 0.25) return "w-1/4";
   return "w-1/12";
+}
+
+// Fire-and-forget save for drafts that must not be lost outside an explicit
+// tap on Save (note switch, blur, Done). Errors are swallowed: the draft
+// stays in memory and the next explicit save retries.
+function saveDraftQuietly(
+  db: SQLiteDatabase,
+  draft: { id: string; courseId: string; title: string; body: string; dirty: boolean },
+) {
+  if (!draft.dirty || !draft.courseId) return;
+  void saveNote(db, {
+    id: draft.id,
+    courseId: draft.courseId,
+    title: draft.title.trim() || "Untitled note",
+    body: draft.body,
+    sourceType: "typed",
+  }).catch(() => {});
 }
 
 function SegmentedControl({
@@ -235,7 +254,7 @@ function UploadCard() {
 export default function Create() {
   const db = useSQLiteContext();
   const { courses } = useApp();
-  const params = useLocalSearchParams<{ mode?: string }>();
+  const params = useLocalSearchParams<{ mode?: string; noteId?: string; courseId?: string }>();
 
   const [mode, setMode] = useState<Mode>(
     params.mode === "typing" ? "typing" : "recording",
@@ -247,11 +266,13 @@ export default function Create() {
   const [wifiOnly, setWifiOnly] = useState(true);
 
   // Typing draft lives up here so switching modes never drops the text.
-  const [typedNoteId] = useState(() => `note-${Date.now()}`);
+  // The id is a fresh draft until an edit session swaps it for a stored note.
+  const [typedNoteId, setTypedNoteId] = useState(() => `note-${Date.now()}`);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [typedStatus, setTypedStatus] = useState<TypedStatus>("idle");
   const [savedAt, setSavedAt] = useState(nowLabel());
+  const [dirty, setDirty] = useState(false);
 
   const [usedRecordings, setUsedRecordings] = useState(0);
   const [recordPhase, setRecordPhase] = useState<
@@ -267,13 +288,28 @@ export default function Create() {
   });
   const recorderState = useAudioRecorderState(recorder);
 
-  // Re-read the route param when it changes (e.g. Home's Type tile pushing a
-  // second time) — the adjust-during-render pattern instead of an effect.
+  // Re-read the route params when they change (e.g. Home's Type tile or a
+  // course detail pushing a second time) — the adjust-during-render pattern
+  // instead of an effect.
   const [seenModeParam, setSeenModeParam] = useState(params.mode);
   if (params.mode !== seenModeParam) {
     setSeenModeParam(params.mode);
     if (params.mode === "typing") setMode("typing");
     else if (params.mode === "recording") setMode("recording");
+  }
+  const [seenNoteParam, setSeenNoteParam] = useState(params.noteId);
+  if (params.noteId !== seenNoteParam) {
+    setSeenNoteParam(params.noteId);
+    if (params.noteId) {
+      // Opening a stored note: force typing; the load effect swaps the
+      // content. The session reset (Done/Delete) happens in those handlers.
+      setMode("typing");
+    }
+  }
+  const [seenCourseParam, setSeenCourseParam] = useState(params.courseId);
+  if (params.courseId !== seenCourseParam) {
+    setSeenCourseParam(params.courseId);
+    if (params.courseId) setPickedCourseId(params.courseId);
   }
 
   // Follow the first loaded course until the user picks one explicitly.
@@ -283,10 +319,72 @@ export default function Create() {
     [courses, courseId],
   );
   const limitReached = usedRecordings >= FREE_RECORDING_LIMIT;
+  // A note requested by the route that this screen hasn't swapped in yet.
+  const targetNoteId =
+    params.noteId && params.noteId !== "new" ? params.noteId : null;
+  const noteLoading = Boolean(targetNoteId && targetNoteId !== typedNoteId);
   const canSave =
     Boolean(course) &&
     (title.trim().length > 0 || body.trim().length > 0) &&
-    typedStatus !== "saving";
+    typedStatus !== "saving" &&
+    !noteLoading;
+
+  const isEditing = Boolean(targetNoteId);
+
+  // Latest draft for fire-and-forget saves that run outside the render
+  // closure (note switch, blur, Done) without exhausting effect deps.
+  const draftRef = useRef({ id: typedNoteId, courseId, title, body, dirty });
+  useEffect(() => {
+    draftRef.current = { id: typedNoteId, courseId, title, body, dirty };
+  });
+
+  // Swap in an existing note when ?noteId= arrives (and silently save the
+  // outgoing draft first so nothing typed is lost). noteLoading is derived
+  // from targetNoteId !== typedNoteId, so this effect never flips state
+  // synchronously — it only completes the swap (or un-sticks on failure).
+  useEffect(() => {
+    const target = params.noteId;
+    if (!target || target === "new") return;
+    if (target === typedNoteId) return;
+    const outgoing = draftRef.current;
+    if (outgoing.id !== target) saveDraftQuietly(db, outgoing);
+    let cancelled = false;
+    getNote(db, target)
+      .then((note) => {
+        if (cancelled) return;
+        if (note) {
+          setTypedNoteId(note.id);
+          setTitle(note.title);
+          setBody(note.body);
+          setPickedCourseId(note.courseId);
+          setTypedStatus("idle");
+          setDirty(false);
+        } else {
+          // Unknown id: show an empty draft so Save can (re)create it.
+          setTypedNoteId(target);
+          setTitle("");
+          setBody("");
+          setTypedStatus("idle");
+          setDirty(false);
+        }
+      })
+      .catch(() => {
+        // Keep what's on screen but un-stick the derived loading state.
+        if (!cancelled) setTypedNoteId(target);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [db, params.noteId, typedNoteId]);
+
+  // Leaving the screen with unsaved edits keeps them: silent save on blur.
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        saveDraftQuietly(db, draftRef.current);
+      };
+    }, [db]),
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -384,14 +482,71 @@ export default function Create() {
       });
       setSavedAt(nowLabel());
       setTypedStatus(queueSummary ? "queued" : "saved");
+      setDirty(false);
     } catch {
       setTypedStatus("idle");
       Alert.alert("Couldn’t save the note", "Your text is still here — try saving again.");
     }
   };
 
-  const typedStatusLabel =
-    typedStatus === "saving"
+  // Shared session reset for Done and Delete. Runs in an event handler, so
+  // generating the fresh draft id here keeps render pure. The ref is marked
+  // clean immediately so a blur firing mid-navigation can't re-save (or
+  // resurrect a just-deleted note).
+  const resetDraftSession = () => {
+    draftRef.current = { ...draftRef.current, dirty: false };
+    setTypedNoteId(`note-${Date.now()}`);
+    setTitle("");
+    setBody("");
+    setTypedStatus("idle");
+    setDirty(false);
+  };
+
+  // Done: keep everything typed (quiet save) and drop back to a fresh draft,
+  // returning to whichever screen opened the note when there is one. Reads
+  // state directly — this closure is re-rendered with every keystroke.
+  const finishEditing = () => {
+    saveDraftQuietly(db, { id: typedNoteId, courseId, title, body, dirty });
+    resetDraftSession();
+    router.setParams({ noteId: "", courseId: "" });
+    if (router.canGoBack()) router.back();
+  };
+
+  const confirmDeleteNote = () => {
+    const target = params.noteId;
+    if (!target || target === "new") return;
+    const label = title.trim() || "this note";
+    Alert.alert(
+      `Delete ${label.length > 28 ? `${label.slice(0, 28)}…` : label}?`,
+      "This removes the note from this device and queues the deletion for sync.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            // Guard the window while delete is in flight: a blur in here
+            // must not quiet-save the draft back over the deleted row.
+            draftRef.current = { ...draftRef.current, dirty: false };
+            deleteNote(db, target)
+              .then(() => {
+                resetDraftSession();
+                router.setParams({ noteId: "", courseId: "" });
+                if (router.canGoBack()) router.back();
+              })
+              .catch(() => {
+                draftRef.current = { ...draftRef.current, dirty: true };
+                Alert.alert("Couldn’t delete the note", "Try again in a moment.");
+              });
+          },
+        },
+      ],
+    );
+  };
+
+  const typedStatusLabel = noteLoading
+    ? "Loading…"
+    : typedStatus === "saving"
       ? "Saving…"
       : typedStatus === "saved"
         ? `Saved ${savedAt}`
@@ -553,22 +708,51 @@ export default function Create() {
                   <View className="flex-row items-start justify-between gap-3">
                     <TextInput
                       value={title}
-                      onChangeText={setTitle}
+                      onChangeText={(value) => {
+                        setTitle(value);
+                        setDirty(true);
+                      }}
                       placeholder="Note title"
                       placeholderTextColor={colors.ink.faint}
                       className="flex-1 text-h3 font-sans-extrabold text-ink"
                       accessibilityLabel="Note title"
                     />
-                    <View className="flex-row items-center gap-1.5 rounded-chip bg-success-soft px-2.5 py-1.5">
-                      <CheckCircle2 size={14} color={colors.brand.DEFAULT} />
-                      <Text className="text-caption font-sans-bold text-brand">
-                        {typedStatusLabel}
-                      </Text>
+                    <View className="items-end gap-2">
+                      <View className="flex-row items-center gap-1.5 rounded-chip bg-success-soft px-2.5 py-1.5">
+                        <CheckCircle2 size={14} color={colors.brand.DEFAULT} />
+                        <Text className="text-caption font-sans-bold text-brand">
+                          {typedStatusLabel}
+                        </Text>
+                      </View>
+                      {isEditing ? (
+                        <View className="flex-row items-center gap-3">
+                          <Pressable
+                            onPress={finishEditing}
+                            accessibilityRole="button"
+                            accessibilityLabel="Done editing"
+                            className="min-h-8 flex-row items-center justify-center rounded-btn border border-brand px-3 active:opacity-80"
+                          >
+                            <Text className="text-caption font-sans-bold text-brand">Done</Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={confirmDeleteNote}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel="Delete note"
+                            className="h-8 w-8 items-center justify-center rounded-full active:opacity-80"
+                          >
+                            <Trash2 size={17} color={colors.danger} />
+                          </Pressable>
+                        </View>
+                      ) : null}
                     </View>
                   </View>
                   <TextInput
                     value={body}
-                    onChangeText={setBody}
+                    onChangeText={(value) => {
+                      setBody(value);
+                      setDirty(true);
+                    }}
                     placeholder="Start writing…"
                     placeholderTextColor={colors.ink.faint}
                     multiline

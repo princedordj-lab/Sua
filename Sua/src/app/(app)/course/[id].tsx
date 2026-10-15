@@ -1,6 +1,6 @@
 import { Alert, Pressable, ScrollView, Text, View } from "react-native";
-import { router, useLocalSearchParams } from "expo-router";
-import { useEffect, useState } from "react";
+import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { useCallback, useState } from "react";
 import {
   Archive,
   ArrowLeft,
@@ -34,12 +34,13 @@ export default function CourseDetail() {
   const [code, setCode] = useState("");
   const [moveNote, setMoveNote] = useState<Note | null>(null);
 
-  useEffect(() => {
-    listNotes(db, id).then(setNotes);
+  // Reload on focus so edits made in the Create editor show up on return.
+  const loadNotes = useCallback(() => {
+    listNotes(db, id)
+      .then(setNotes)
+      .catch(() => setNotes([]));
   }, [db, id]);
-  const reload = () => {
-    listNotes(db, id).then(setNotes);
-  };
+  useFocusEffect(loadNotes);
   const course = courses.find((item) => item.id === id);
   if (!course)
     return (
@@ -113,7 +114,7 @@ export default function CourseDetail() {
         body: note.body,
         sourceType: note.sourceType,
       });
-      reload();
+      loadNotes();
     } catch {
       Alert.alert("Could not move note", "Please try again.");
     }
@@ -178,7 +179,12 @@ export default function CourseDetail() {
         <View className="mt-8 flex-row items-center justify-between">
           <Text className="text-lg font-extrabold text-[#19152C]">Notes</Text>
           <Pressable
-            onPress={() => router.push({ pathname: "/note/[id]" as never, params: { id: "new", courseId: id } })}
+            onPress={() =>
+              router.push({
+                pathname: "/(app)/(tabs)/create",
+                params: { mode: "typing", courseId: id },
+              })
+            }
             className="min-h-11 flex-row items-center rounded-btn bg-brand px-4 active:opacity-80"
           >
             <Plus size={17} color="#FFBE1A" />
@@ -194,7 +200,12 @@ export default function CourseDetail() {
         ) : notes.map((note) => (
           <View key={note.id} className="mt-3 flex-row items-stretch overflow-hidden rounded-2xl bg-white">
             <Pressable
-              onPress={() => router.push({ pathname: "/note/[id]" as never, params: { id: note.id, courseId: id } })}
+              onPress={() =>
+                router.push({
+                  pathname: "/(app)/(tabs)/create",
+                  params: { mode: "typing", noteId: note.id, courseId: id },
+                })
+              }
               className="flex-1 p-4 active:opacity-80"
             >
               <Text className="font-extrabold text-[#19152C]">{note.title || "Untitled note"}</Text>

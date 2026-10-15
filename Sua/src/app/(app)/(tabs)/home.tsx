@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Image } from "expo-image";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { useUser } from "@clerk/expo";
 import { useSQLiteContext } from "expo-sqlite";
 import { Pressable, ScrollView, Text, View } from "react-native";
@@ -47,24 +47,27 @@ export default function Home() {
   const db = useSQLiteContext();
   const [notes, setNotes] = useState<Note[]>([]);
 
-  useEffect(() => {
-    let cancelled = false;
+  // Reload on focus so edits made in the Create editor show up on return.
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
 
-    async function loadNotes() {
-      const noteGroups = await Promise.all(courses.map((course) => listNotes(db, course.id)));
-      if (!cancelled) {
-        setNotes(noteGroups.flat().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+      async function loadNotes() {
+        const noteGroups = await Promise.all(courses.map((course) => listNotes(db, course.id)));
+        if (!cancelled) {
+          setNotes(noteGroups.flat().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+        }
       }
-    }
 
-    void loadNotes().catch(() => {
-      if (!cancelled) setNotes([]);
-    });
+      void loadNotes().catch(() => {
+        if (!cancelled) setNotes([]);
+      });
 
-    return () => {
-      cancelled = true;
-    };
-  }, [courses, db]);
+      return () => {
+        cancelled = true;
+      };
+    }, [courses, db]),
+  );
 
   const firstName = profile?.name?.split(" ")[0] || "Student";
   const userName = profile?.name || user?.fullName || user?.firstName || "Sua student";
@@ -214,7 +217,12 @@ export default function Home() {
                 return (
                   <Pressable
                     key={note.id}
-                    onPress={() => router.push({ pathname: "/note/[id]", params: { id: note.id, courseId: note.courseId } })}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/(app)/(tabs)/create",
+                        params: { mode: "typing", noteId: note.id, courseId: note.courseId },
+                      })
+                    }
                     className={`min-h-20 flex-row items-center px-4 active:opacity-80 ${index ? "border-t border-line" : ""}`}
                     accessibilityRole="button"
                     accessibilityLabel={`Open ${note.title || "untitled note"}`}

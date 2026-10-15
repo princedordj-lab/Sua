@@ -223,7 +223,7 @@ Complete milestones in order where dependencies require it. Each milestone can b
 - [x] Establish authenticated Express.js API conventions and connect frontend API client to backend routes.
 - [x] Configure Cloudinary file handling through the backend, including ownership checks and student deletion flows.
 - [x] Implement course create, rename, archive, delete confirmation, and move-note flow.
-- [ ] Add Sentry/PostHog foundations and analytics event definitions.(Skip) — skipped by decision; analytics move to a later milestone.
+- [] Add Sentry/PostHog foundations and analytics event definitions.(Skip) — skipped by decision; analytics move to a later milestone.
 
 > Frontend foundation and Clerk identity are complete. NeonDB + Prisma user/course schema is live with per-user row-level security, and the authenticated Express API (`/api/me`, `/api/courses`, Clerk webhook sync) is connected to the frontend client. Cloudinary is integrated via signed direct uploads (`/api/uploads/sign`, `/api/uploads/:id/complete`, protected asset URLs at `/api/assets/:id/url`, per-asset delete, and Cloudinary cleanup on account deletion) with an RLS-protected `assets` table. Course management is complete including archive persistence across restarts, delete confirmation with local note purge, and a two-tap move-note flow (course chip in the note editor and move action on the course screen). Sentry/PostHog foundations are explicitly skipped and tracked for a later milestone.
 
