@@ -44,7 +44,7 @@ import { countNotesBySource, saveNote } from "../../../lib/notes";
 import { useApp } from "../../../state/AppContext";
 import type { Course } from "../../../lib/types";
 
-const FREE_RECORDING_LIMIT = 3;
+const FREE_RECORDING_LIMIT = 9999;
 
 const MODES = [
   { key: "recording", label: "Recording", Icon: Mic },
