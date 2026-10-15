@@ -32,7 +32,7 @@ export default function OAuthCallback() {
 
   return (
     <View className="flex-1 items-center justify-center gap-3 bg-cream">
-      <ActivityIndicator color="#7C5CFC" />
+      <ActivityIndicator color="#005B45" />
       <Text className="font-semibold text-[#6E687D]">Finishing sign in...</Text>
     </View>
   );

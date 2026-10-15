@@ -34,7 +34,13 @@
       ],
       "expo-secure-store",
       "@clerk/expo",
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow $(PRODUCT_NAME) to record your lectures and classes."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

@@ -23,6 +23,7 @@ import { router } from "expo-router";
 import { Field, PrimaryButton } from "../../../components/ui";
 import { FormSheet } from "../../../components/sheets";
 import { colors } from "../../../config/theme";
+import { courseInitials, courseStyle } from "../../../lib/course-style";
 import { useApp } from "../../../state/AppContext";
 import type { Course } from "../../../lib/types";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -34,56 +35,6 @@ const FILTERS: { key: FilterKey; label: string }[] = [
   { key: "active", label: "This semester" },
   { key: "archived", label: "Archived" },
 ];
-
-// Known course colours map to token tints; unknown server colours fall back to
-// the raw value with a translucent tint so any colour renders safely.
-const COURSE_STYLES: Record<string, { accent: string; tint: string }> = {
-  [colors.course.ocean]: {
-    accent: colors.course.ocean,
-    tint: colors.courseTint.ocean,
-  },
-  [colors.course.forest]: {
-    accent: colors.course.forest,
-    tint: colors.courseTint.forest,
-  },
-  [colors.course.gold]: {
-    accent: colors.course.gold,
-    tint: colors.courseTint.gold,
-  },
-  [colors.course.coral]: {
-    accent: colors.course.coral,
-    tint: colors.courseTint.coral,
-  },
-  [colors.course.violet]: {
-    accent: colors.course.violet,
-    tint: colors.courseTint.violet,
-  },
-  [colors.course.sky]: {
-    accent: colors.course.sky,
-    tint: colors.courseTint.sky,
-  },
-  [colors.course.plum]: {
-    accent: colors.course.plum,
-    tint: colors.courseTint.plum,
-  },
-  [colors.course.slate]: {
-    accent: colors.course.slate,
-    tint: colors.courseTint.slate,
-  },
-  [colors.brand.DEFAULT]: {
-    accent: colors.brand.DEFAULT,
-    tint: colors.successSoft,
-  },
-};
-
-function courseStyle(color: string) {
-  return COURSE_STYLES[color] ?? { accent: color, tint: `${color}1F` };
-}
-
-function courseInitials(course: Course) {
-  const source = course.code.trim() || course.name.trim();
-  return source.slice(0, 2).toUpperCase() || "—";
-}
 
 function noteLabel(count: number) {
   if (count === 0) return "No notes yet";

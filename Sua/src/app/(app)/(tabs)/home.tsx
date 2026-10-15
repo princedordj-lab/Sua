@@ -87,8 +87,8 @@ export default function Home() {
   );
 
   const openCreate = (route: (typeof actionTiles)[number]["route"]) => {
-    if (route === "type" && courses[0]) {
-      router.push({ pathname: "/note/[id]", params: { id: "new", courseId: courses[0].id } });
+    if (route === "type") {
+      router.push({ pathname: "/(app)/(tabs)/create", params: { mode: "typing" } });
       return;
     }
     router.push("/(app)/(tabs)/create");

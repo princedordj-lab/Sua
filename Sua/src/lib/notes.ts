@@ -8,6 +8,8 @@ export type Note = {
   title: string;
   body: string;
   sourceType: "typed" | "audio" | "file";
+  // Local-only pointer to the raw file (e.g. a recording's uri). Never synced.
+  sourceRef: string | null;
   createdAt: string;
   updatedAt: string;
   syncState: "pending" | "synced";
@@ -45,6 +47,11 @@ export async function migrateDb(db: SQLiteDatabase) {
       created_at TEXT NOT NULL
     );
   `);
+  // Additive column for the raw file pointer; existing installs get it on launch.
+  const columns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(notes)");
+  if (!columns.some((column) => column.name === "source_ref")) {
+    await db.execAsync("ALTER TABLE notes ADD COLUMN source_ref TEXT");
+  }
 }
 
 function rowToNote(row: Record<string, unknown>): Note {
@@ -54,6 +61,7 @@ function rowToNote(row: Record<string, unknown>): Note {
     title: String(row.title),
     body: String(row.body),
     sourceType: row.source_type as Note["sourceType"],
+    sourceRef: row.source_ref == null ? null : String(row.source_ref),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     syncState: row.sync_state as Note["syncState"],
@@ -78,27 +86,39 @@ export async function getNote(db: SQLiteDatabase, id: string) {
 
 export async function saveNote(
   db: SQLiteDatabase,
-  input: Pick<Note, "id" | "courseId" | "title" | "body" | "sourceType">,
+  input: Pick<Note, "id" | "courseId" | "title" | "body" | "sourceType"> & {
+    sourceRef?: string | null;
+  },
 ) {
   const now = new Date().toISOString();
   await db.runAsync(
-    `INSERT INTO notes (id, course_id, title, body, source_type, created_at, updated_at, sync_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+    `INSERT INTO notes (id, course_id, title, body, source_type, source_ref, created_at, updated_at, sync_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
      ON CONFLICT(id) DO UPDATE SET course_id = excluded.course_id,
        title = excluded.title, body = excluded.body,
+       source_ref = COALESCE(excluded.source_ref, notes.source_ref),
        updated_at = excluded.updated_at, sync_state = 'pending'`,
     input.id,
     input.courseId,
     input.title,
     input.body,
     input.sourceType,
+    input.sourceRef ?? null,
     now,
     now,
   );
   await db.runAsync(
     "INSERT INTO sync_queue (entity, entity_id, operation, payload, created_at) VALUES ('note', ?, 'upsert', ?, ?)",
     input.id,
-    JSON.stringify({ ...input, updatedAt: now }),
+    // source_ref stays on the device: the server note shape has no field for it.
+    JSON.stringify({
+      id: input.id,
+      courseId: input.courseId,
+      title: input.title,
+      body: input.body,
+      sourceType: input.sourceType,
+      updatedAt: now,
+    }),
     now,
   );
   return getNote(db, input.id);
@@ -117,6 +137,17 @@ export async function deleteNote(db: SQLiteDatabase, id: string) {
 export async function pendingSyncCount(db: SQLiteDatabase) {
   const row = await db.getFirstAsync<{ count: number }>(
     "SELECT COUNT(*) as count FROM sync_queue",
+  );
+  return row?.count ?? 0;
+}
+
+export async function countNotesBySource(
+  db: SQLiteDatabase,
+  sourceType: Note["sourceType"],
+) {
+  const row = await db.getFirstAsync<{ count: number }>(
+    "SELECT COUNT(*) as count FROM notes WHERE source_type = ?",
+    sourceType,
   );
   return row?.count ?? 0;
 }
