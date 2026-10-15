@@ -157,12 +157,12 @@ export default function Home() {
           </View>
           <Pressable
             onPress={() => router.push("/(app)/(tabs)/study")}
-            className="mt-6 min-h-12 self-start flex-row items-center rounded-btn bg-gold px-5 active:opacity-80"
+            className="mt-6 min-h-12 self-start flex-row items-center rounded-btn border border-gold bg-brand-light px-5 active:opacity-80"
             accessibilityRole="button"
             accessibilityLabel="Start review"
           >
-            <Text className="text-body-lg font-sans-extrabold text-ink">Start review</Text>
-            <ArrowRight className="ml-3" size={22} color="#0E1F18" />
+            <Text className="text-body-lg font-sans-extrabold text-gold">Start review</Text>
+            <ArrowRight className="ml-3" size={22} color="#FFBE1A" />
           </Pressable>
         </View>
 

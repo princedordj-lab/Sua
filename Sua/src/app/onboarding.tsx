@@ -64,7 +64,7 @@ export default function Onboarding() {
               {step === slides.length - 1
                 ? "Let's set up your space"
                 : "Continue"}{" "}
-              <ChevronRight size={16} color="white" />
+              <ChevronRight size={16} color="#FFBE1A" />
             </PrimaryButton>
             <Pressable
               onPress={() => step > 0 && setStep(step - 1)}

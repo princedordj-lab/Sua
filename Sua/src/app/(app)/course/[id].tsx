@@ -75,10 +75,10 @@ export default function CourseDetail() {
           <Text className="text-lg font-extrabold text-[#19152C]">Notes</Text>
           <Pressable
             onPress={() => router.push({ pathname: "/note/[id]" as never, params: { id: "new", courseId: id } })}
-            className="flex-row items-center gap-1"
+            className="min-h-11 flex-row items-center rounded-btn bg-brand px-4 active:opacity-80"
           >
-            <Plus size={17} color="#7C5CFC" />
-            <Text className="font-bold text-[#7C5CFC]">Add note</Text>
+            <Plus size={17} color="#FFBE1A" />
+            <Text className="font-bold text-gold">Add note</Text>
           </Pressable>
         </View>
         {notes.length === 0 ? (

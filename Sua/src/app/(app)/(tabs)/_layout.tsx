@@ -38,8 +38,8 @@ export default function TabsLayout() {
         options={{
           title: "",
           tabBarIcon: () => (
-            <View className="-mt-7 h-16 w-16 items-center justify-center rounded-full border-4 border-cream bg-gold shadow-gold">
-              <Plus size={30} color={colors.ink.DEFAULT} strokeWidth={2.25} />
+            <View className="-mt-7 h-16 w-16 items-center justify-center rounded-full border-4 border-cream bg-brand shadow-gold">
+              <Plus size={30} color={colors.gold.DEFAULT} strokeWidth={2.25} />
             </View>
           ),
         }}

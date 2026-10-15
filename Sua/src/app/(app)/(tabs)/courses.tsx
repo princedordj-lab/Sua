@@ -34,7 +34,7 @@ export default function Courses() {
           name,
           code: code || "COURSE",
           lecturer: "",
-          color: "#7C5CFC",
+          color: "#005B45",
           noteCount: 0,
         });
       setEditing(null);
@@ -82,9 +82,9 @@ export default function Courses() {
           </View>
           <Pressable
             onPress={openNew}
-            className="h-12 w-12 items-center justify-center rounded-2xl bg-[#7C5CFC]"
+            className="h-12 w-12 items-center justify-center rounded-btn bg-brand active:opacity-80"
           >
-            <Plus color="white" size={22} />
+            <Plus color="#FFBE1A" size={22} />
           </Pressable>
         </View>
         <Text className="mb-6 mt-3 text-base text-[#6E687D]">
@@ -134,10 +134,10 @@ export default function Courses() {
                       setName(course.name);
                       setCode(course.code);
                     }}
-                    className="flex-1 flex-row items-center justify-center gap-2 rounded-xl bg-[#F8F6FF] py-3"
+                    className="min-h-11 flex-1 flex-row items-center justify-center gap-2 rounded-input bg-brand px-3 active:opacity-80"
                   >
-                    <Pencil size={15} color="#7C5CFC" />
-                    <Text className="text-sm font-bold text-[#6045D8]">
+                    <Pencil size={15} color="#FFBE1A" />
+                    <Text className="text-sm font-bold text-gold">
                       Rename
                     </Text>
                   </Pressable>
@@ -152,10 +152,10 @@ export default function Courses() {
                         ),
                       );
                     }}
-                    className="flex-1 flex-row items-center justify-center gap-2 rounded-xl bg-[#F8F6FF] py-3"
+                    className="min-h-11 flex-1 flex-row items-center justify-center gap-2 rounded-input bg-brand px-3 active:opacity-80"
                   >
-                    <Archive size={15} color="#7C5CFC" />
-                    <Text className="text-sm font-bold text-[#6045D8]">
+                    <Archive size={15} color="#FFBE1A" />
+                    <Text className="text-sm font-bold text-gold">
                       {course.archived ? "Restore" : "Archive"}
                     </Text>
                   </Pressable>
@@ -172,10 +172,10 @@ export default function Courses() {
         </View>
         <Pressable
           onPress={openNew}
-          className="mt-5 flex-row items-center justify-center gap-2 rounded-2xl border border-dashed border-[#CFC7F8] bg-[#F8F6FF] p-5"
+          className="mt-5 min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand px-5 active:opacity-80"
         >
-          <Plus size={18} color="#7C5CFC" />
-          <Text className="font-bold text-[#6045D8]">Add another course</Text>
+          <Plus size={18} color="#FFBE1A" />
+          <Text className="font-bold text-gold">Add another course</Text>
         </Pressable>
         <Modal
           visible={showNew || !!editing}

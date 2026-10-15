@@ -1,4 +1,5 @@
 import { type ReactNode } from "react";
+import { Image } from "expo-image";
 import {
   Pressable,
   Text,
@@ -7,6 +8,7 @@ import {
   type TextInputProps,
 } from "react-native";
 import { ChevronRight, Plus } from "lucide-react-native";
+
 
 export function Logo({
   compact = false,
@@ -17,12 +19,16 @@ export function Logo({
 }) {
   return (
     <View className="flex-row items-center gap-2">
-      <View className="h-9 w-9 items-center justify-center rounded-xl bg-[#7C5CFC]">
-        <Text className="text-lg font-black text-white">S</Text>
+      <View className="h-10 w-10 overflow-hidden rounded-xl">
+        <Image
+          source={require('@/assets/images/icons/icon.png')}
+          style={{ width: "100%", height: "100%" }}
+          accessibilityLabel="Sua"
+        />
       </View>
       {!compact && (
         <Text
-          className={`text-2xl font-extrabold tracking-tight ${light ? "text-white" : "text-[#19152C]"}`}
+          className={`text-2xl font-extrabold tracking-tight ${light ? "text-gold" : "text-brand"}`}
         >
           sua
         </Text>
@@ -41,21 +47,15 @@ export function PrimaryButton({
   variant?: "primary" | "secondary" | "danger";
 }) {
   const styles =
-    variant === "primary"
-      ? "bg-[#7C5CFC]"
-      : variant === "danger"
-        ? "bg-[#FEECEC]"
-        : "bg-[#F1EEFF]";
+    variant === "danger"
+      ? "bg-danger-soft"
+      : "bg-brand";
   const text =
-    variant === "primary"
-      ? "text-white"
-      : variant === "danger"
-        ? "text-[#D94A4A]"
-        : "text-[#6045D8]";
+    variant === "danger" ? "text-danger" : "text-gold";
   return (
     <Pressable
       onPress={onPress}
-      className={`min-h-14 items-center justify-center rounded-2xl px-5 ${styles}`}
+      className={`min-h-14 items-center justify-center rounded-btn px-5 active:opacity-80 ${styles}`}
     >
       <Text className={`text-base font-bold ${text}`}>{children}</Text>
     </Pressable>
@@ -65,11 +65,11 @@ export function PrimaryButton({
 export function Field({ label, ...props }: TextInputProps & { label: string }) {
   return (
     <View className="gap-2">
-      <Text className="text-sm font-semibold text-[#5B566A]">{label}</Text>
+      <Text className="text-label font-semibold text-ink-soft">{label}</Text>
       <TextInput
         {...props}
-        placeholderTextColor="#A9A4B8"
-        className="h-14 rounded-2xl border border-[#E9E5F2] bg-white px-4 text-base text-[#19152C]"
+        placeholderTextColor="#8A978F"
+        className="h-14 rounded-input border border-line bg-surface px-4 text-body text-ink"
       />
     </View>
   );
@@ -86,11 +86,11 @@ export function SectionHeader({
 }) {
   return (
     <View className="mb-3 flex-row items-center justify-between">
-      <Text className="text-lg font-extrabold text-[#19152C]">{title}</Text>
+      <Text className="text-title font-extrabold text-ink">{title}</Text>
       {action && (
-        <Pressable onPress={onAction} className="flex-row items-center gap-1">
-          <Text className="font-bold text-[#7C5CFC]">{action}</Text>
-          <ChevronRight size={16} color="#7C5CFC" />
+        <Pressable onPress={onAction} className="min-h-11 flex-row items-center gap-1 active:opacity-80">
+          <Text className="font-bold text-brand">{action}</Text>
+          <ChevronRight size={16} color="#005B45" />
         </Pressable>
       )}
     </View>
@@ -107,10 +107,10 @@ export function EmptyAction({
   return (
     <Pressable
       onPress={onPress}
-      className="flex-row items-center justify-center gap-2 rounded-2xl border border-dashed border-[#CFC7F8] bg-[#F8F6FF] p-5"
+      className="min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand px-5 active:opacity-80"
     >
-      <Plus size={18} color="#7C5CFC" />
-      <Text className="font-bold text-[#6045D8]">{title}</Text>
+      <Plus size={18} color="#FFBE1A" />
+      <Text className="font-bold text-gold">{title}</Text>
     </Pressable>
   );
 }

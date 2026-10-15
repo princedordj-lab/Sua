@@ -38,7 +38,7 @@ export default function Setup() {
           code: code || "COURSE 101",
           name: course || "My first course",
           lecturer: "",
-          color: "#7C5CFC",
+          color: "#005B45",
           noteCount: 0,
         },
       );
@@ -88,10 +88,10 @@ export default function Setup() {
                 <Pressable
                   key={item}
                   onPress={() => setLevel(item)}
-                  className={`rounded-xl px-4 py-3 ${level === item ? "bg-[#7C5CFC]" : "bg-white"} border border-[#E9E5F2]`}
+                  className={`min-h-11 rounded-input px-4 py-3 ${level === item ? "bg-brand" : "bg-surface"} border border-line active:opacity-80`}
                 >
                   <Text
-                    className={`font-semibold ${level === item ? "text-white" : "text-[#5B566A]"}`}
+                    className={`font-semibold ${level === item ? "text-gold" : "text-ink-soft"}`}
                   >
                     {item}
                   </Text>
@@ -99,10 +99,10 @@ export default function Setup() {
               ))}
             </View>
           </View>
-          <View className="mt-3 rounded-3xl bg-[#F1EEFF] p-5">
+          <View className="mt-3 rounded-card bg-success-soft p-5">
             <View className="flex-row items-center gap-2">
-              <CalendarDays size={18} color="#7C5CFC" />
-              <Text className="font-extrabold text-[#3D2D8A]">
+              <CalendarDays size={18} color="#005B45" />
+              <Text className="font-extrabold text-brand">
                 Add your first course
               </Text>
             </View>
@@ -128,14 +128,14 @@ export default function Setup() {
         <View className="mt-8 gap-3">
           <PrimaryButton onPress={() => finish(false)}>
             {saving ? "Saving..." : "Go to my Home"}{" "}
-            <ChevronRight size={16} color="white" />
+            <ChevronRight size={16} color="#FFBE1A" />
           </PrimaryButton>
           <Pressable
             onPress={() => finish(true)}
             disabled={saving}
             className="items-center py-3"
           >
-            <Text className="font-bold text-[#7C5CFC]">Skip for now</Text>
+            <Text className="font-bold text-brand">Skip for now</Text>
           </Pressable>
         </View>
       </ScrollView>

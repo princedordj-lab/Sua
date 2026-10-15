@@ -10,7 +10,8 @@ import { router } from "expo-router";
 import * as AuthSession from "expo-auth-session";
 import * as WebBrowser from "expo-web-browser";
 import { useSignIn, useSignUp, useSSO } from "@clerk/expo";
-import { Apple, Globe2 } from "lucide-react-native";
+import { Apple } from "lucide-react-native";
+import { Image } from "expo-image";
 import { Field, Logo, PrimaryButton } from "../components/ui";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -231,7 +232,7 @@ export default function SignIn() {
                 onPress={() => setPendingVerification(false)}
                 className="items-center py-2"
               >
-                <Text className="font-bold text-[#7C5CFC]">
+                <Text className="font-bold text-brand">
                   Use a different email
                 </Text>
               </Pressable>
@@ -264,7 +265,7 @@ export default function SignIn() {
                 />
                 {mode === "sign-in" && (
                   <Pressable className="items-end">
-                    <Text className="font-semibold text-[#7C5CFC]">
+                    <Text className="font-semibold text-brand">
                       Forgot password?
                     </Text>
                   </Pressable>
@@ -287,7 +288,7 @@ export default function SignIn() {
                   onPress={continueWithGoogle}
                   className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-[#E9E5F2] bg-white"
                 >
-                  <Globe2 size={18} color="#4285F4" />
+                  <Image source={require("@/assets/images/google.svg")} style={{ width: 18, height: 18 }} />
                   <Text className="font-bold text-[#393442]">Google</Text>
                 </Pressable>
                 {Platform.OS === "ios" && (
@@ -310,7 +311,7 @@ export default function SignIn() {
                   {mode === "sign-in"
                     ? "New to Sua? "
                     : "Already have an account? "}
-                  <Text className="font-bold text-[#7C5CFC]">
+                  <Text className="font-bold text-brand">
                     {mode === "sign-in" ? "Create account" : "Sign in"}
                   </Text>
                 </Text>

@@ -26,8 +26,8 @@ export default function Profile() {
       <ScrollView contentContainerClassName="px-5 pb-8 pt-6">
         <Text className="text-3xl font-black text-[#19152C]">Profile</Text>
         <View className="mt-6 flex-row items-center rounded-3xl bg-white p-5">
-          <View className="h-16 w-16 items-center justify-center rounded-full bg-[#EAE5FF]">
-            <Text className="text-2xl font-black text-[#7C5CFC]">
+          <View className="h-16 w-16 items-center justify-center rounded-full bg-success-soft">
+            <Text className="text-2xl font-black text-brand">
               {profile?.name?.charAt(0).toUpperCase() ?? "S"}
             </Text>
           </View>
@@ -64,13 +64,13 @@ export default function Profile() {
             <Text className="ml-3 font-bold text-[#D94A4A]">Sign out</Text>
           </Pressable>
         </View>
-        <View className="mt-8 rounded-3xl bg-[#19152C] p-5">
+        <View className="mt-8 rounded-card bg-brand p-5">
           <Text className="font-extrabold text-white">Sua Pro</Text>
-          <Text className="mt-1 text-sm leading-5 text-[#BDB6D3]">
+          <Text className="mt-1 text-sm leading-5 text-white/85">
             Unlimited study sets, Exam Mode, and faster AI help.
           </Text>
-          <Pressable className="mt-4 self-start rounded-xl bg-white px-4 py-3">
-            <Text className="font-bold text-[#6045D8]">Explore plans</Text>
+          <Pressable className="mt-4 min-h-11 self-start items-center justify-center rounded-btn border border-gold bg-brand-light px-4 active:opacity-80">
+            <Text className="font-bold text-gold">Explore plans</Text>
           </Pressable>
         </View>
       </ScrollView>

@@ -32,7 +32,7 @@ export default function Welcome() {
           </View>
           <View className="gap-3 pb-4">
             <PrimaryButton onPress={() => router.push("/onboarding")}>
-              Get started <ArrowRight size={16} color="white" />
+              Get started <ArrowRight size={16} color="#FFBE1A" />
             </PrimaryButton>
             <Pressable
               onPress={() => router.push("/sign-in")}
