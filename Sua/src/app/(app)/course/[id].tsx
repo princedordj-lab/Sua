@@ -1,4 +1,4 @@
-import { Alert, Modal, Pressable, ScrollView, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, Text, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
 import {
@@ -18,6 +18,7 @@ import { listNotes, saveNote, type Note } from "../../../lib/notes";
 import {
   BottomSheet,
   CoursePickerSheet,
+  FormSheet,
   SheetAction,
 } from "../../../components/sheets";
 import { Field, PrimaryButton } from "../../../components/ui";
@@ -251,44 +252,25 @@ export default function CourseDetail() {
         onSelect={move}
         onClose={() => setMoveNote(null)}
       />
-      <Modal
+      <FormSheet
         visible={renaming}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setRenaming(false)}
+        onClose={() => setRenaming(false)}
+        title="Rename course"
       >
-        <View className="flex-1 justify-end bg-black/30">
-          <View className="rounded-t-sheet bg-cream p-6">
-            <View className="mb-6 flex-row items-center justify-between">
-              <Text className="text-title font-sans-extrabold text-ink">
-                Rename course
-              </Text>
-              <Pressable
-                onPress={() => setRenaming(false)}
-                accessibilityRole="button"
-                accessibilityLabel="Close"
-              >
-                <MoreHorizontal color="#8A8498" />
-              </Pressable>
-            </View>
-            <View className="gap-4">
-              <Field
-                label="Course name"
-                value={name}
-                onChangeText={setName}
-                placeholder="e.g. Data Structures"
-              />
-              <Field
-                label="Course code"
-                value={code}
-                onChangeText={setCode}
-                placeholder="e.g. CS 241"
-              />
-              <PrimaryButton onPress={saveRename}>Save changes</PrimaryButton>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        <Field
+          label="Course name"
+          value={name}
+          onChangeText={setName}
+          placeholder="e.g. Data Structures"
+        />
+        <Field
+          label="Course code"
+          value={code}
+          onChangeText={setCode}
+          placeholder="e.g. CS 241"
+        />
+        <PrimaryButton onPress={saveRename}>Save changes</PrimaryButton>
+      </FormSheet>
     </SafeAreaView>
   );
 }

@@ -21,6 +21,7 @@ import {
 } from "lucide-react-native";
 import { router } from "expo-router";
 import { Field, PrimaryButton } from "../../../components/ui";
+import { FormSheet } from "../../../components/sheets";
 import { colors } from "../../../config/theme";
 import { useApp } from "../../../state/AppContext";
 import type { Course } from "../../../lib/types";
@@ -461,52 +462,30 @@ export default function Courses() {
             </Pressable>
           </Pressable>
         </Modal>
-        <Modal
+        <FormSheet
           visible={showNew || !!editing}
-          transparent
-          animationType="slide"
-          onRequestClose={() => {
+          onClose={() => {
             setShowNew(false);
             setEditing(null);
           }}
+          title={editing ? "Rename course" : "New course"}
         >
-          <View className="flex-1 justify-end bg-black/30">
-            <View className="rounded-t-sheet bg-cream p-6">
-              <View className="mb-6 flex-row items-center justify-between">
-                <Text className="text-title font-sans-extrabold text-ink">
-                  {editing ? "Rename course" : "New course"}
-                </Text>
-                <Pressable
-                  onPress={() => {
-                    setShowNew(false);
-                    setEditing(null);
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel="Close"
-                >
-                  <MoreHorizontal color={colors.ink.faint} />
-                </Pressable>
-              </View>
-              <View className="gap-4">
-                <Field
-                  label="Course name"
-                  value={name}
-                  onChangeText={setName}
-                  placeholder="e.g. Data Structures"
-                />
-                <Field
-                  label="Course code"
-                  value={code}
-                  onChangeText={setCode}
-                  placeholder="e.g. CS 241"
-                />
-                <PrimaryButton onPress={save}>
-                  {editing ? "Save changes" : "Create course"}
-                </PrimaryButton>
-              </View>
-            </View>
-          </View>
-        </Modal>
+          <Field
+            label="Course name"
+            value={name}
+            onChangeText={setName}
+            placeholder="e.g. Data Structures"
+          />
+          <Field
+            label="Course code"
+            value={code}
+            onChangeText={setCode}
+            placeholder="e.g. CS 241"
+          />
+          <PrimaryButton onPress={save}>
+            {editing ? "Save changes" : "Create course"}
+          </PrimaryButton>
+        </FormSheet>
       </ScrollView>
     </SafeAreaView>
   );

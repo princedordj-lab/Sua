@@ -1,6 +1,14 @@
 import { type ReactNode } from "react";
-import { Modal, Pressable, ScrollView, Text, View } from "react-native";
-import { Check } from "lucide-react-native";
+import {
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  Text,
+  View,
+} from "react-native";
+import { Check, X } from "lucide-react-native";
 import type { Course } from "../lib/types";
 
 export function BottomSheet({
@@ -34,6 +42,62 @@ export function BottomSheet({
           <View className="mt-4 gap-3">{children}</View>
         </Pressable>
       </Pressable>
+    </Modal>
+  );
+}
+
+// Bottom sheet for forms with text inputs. The keyboard must never cover the
+// fields: iOS shifts the sheet with padding, Android shrinks it with height
+// (the Modal's dialog window ignores the activity's resize mode).
+export function FormSheet({
+  visible,
+  onClose,
+  title,
+  children,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}
+    >
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        className="flex-1 justify-end bg-black/30"
+      >
+        <Pressable
+          onPress={onClose}
+          accessibilityRole="button"
+          accessibilityLabel="Close"
+          className="flex-1"
+        />
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          contentContainerClassName="rounded-t-sheet bg-cream p-6 pb-10"
+        >
+          <View className="mb-6 flex-row items-center justify-between">
+            <Text className="text-title font-sans-extrabold text-ink">
+              {title}
+            </Text>
+            <Pressable
+              onPress={onClose}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Close"
+              className="h-11 w-11 items-center justify-center active:opacity-80"
+            >
+              <X size={20} color="#8A8498" />
+            </Pressable>
+          </View>
+          <View className="gap-4">{children}</View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }

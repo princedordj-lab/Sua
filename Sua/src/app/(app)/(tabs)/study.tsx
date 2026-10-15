@@ -1,4 +1,4 @@
-import { Pressable, ScrollView, Text, View, Image } from "react-native";
+import { Pressable, ScrollView, Text, View} from "react-native";
 import {
   Brain,
   CheckCircle2,
