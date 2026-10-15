@@ -286,9 +286,9 @@ export default function SignIn() {
               <View className="flex-row gap-3">
                 <Pressable
                   onPress={continueWithGoogle}
-                  className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-[#E9E5F2] bg-white"
-                >
-                  <Image source={require("@/assets/images/google.svg")} style={{ width: 18, height: 18 }} />
+                    className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-full border border-[#E9E5F2] bg-white "
+                  >
+                  <Image source={require("@/assets/images/google.svg")} style={{ width: 20, height: 20 }} />
                   <Text className="font-bold text-[#393442]">Google</Text>
                 </Pressable>
                 {Platform.OS === "ios" && (
