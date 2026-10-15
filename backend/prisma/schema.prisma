@@ -7,9 +7,7 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "postgresql"
 }
 
 model User {
@@ -27,6 +25,7 @@ model User {
   updatedAt            DateTime  @updatedAt
   courses              Course[]
   notes                Note[]
+  assets               Asset[]
 
   @@map("users")
 }
@@ -63,4 +62,23 @@ model Note {
   @@index([userId, updatedAt])
   @@index([courseId, updatedAt])
   @@map("notes")
+}
+
+model Asset {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind         String
+  publicId     String
+  secureUrl    String?
+  bytes        Int      @default(0)
+  format       String?
+  resourceType String   @default("raw")
+  status       String   @default("pending")
+  noteId       String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([userId])
+  @@map("assets")
 }

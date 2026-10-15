@@ -7,6 +7,7 @@ import { meRouter } from "./routes/me.js";
 import { coursesRouter } from "./routes/courses.js";
 import { clerkWebhookRouter } from "./routes/webhooks.js";
 import { notesRouter } from "./routes/notes.js";
+import { assetsRouter, uploadsRouter } from "./routes/uploads.js";
 
 const app = express();
 
@@ -41,6 +42,8 @@ app.use(
 app.use("/api/me", authenticate, meRouter);
 app.use("/api/courses", authenticate, coursesRouter);
 app.use("/api/notes", authenticate, notesRouter);
+app.use("/api/uploads", authenticate, uploadsRouter);
+app.use("/api/assets", authenticate, assetsRouter);
 
 app.use((err, _req, res, _next) => {
   const status = err.status ?? 500;
@@ -52,6 +55,15 @@ app.listen(port, () => {
   if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
     console.warn(
       "CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY not set — authenticated routes will fail.",
+    );
+  }
+  if (
+    !process.env.CLOUDINARY_CLOUD_NAME ||
+    !process.env.CLOUDINARY_API_KEY ||
+    !process.env.CLOUDINARY_API_SECRET
+  ) {
+    console.warn(
+      "CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET not set — upload routes return 503.",
     );
   }
   console.log(`Sua API listening on port ${port}`);

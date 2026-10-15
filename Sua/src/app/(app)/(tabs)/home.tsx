@@ -15,7 +15,6 @@ import {
   Plus,
 } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import suaIcon from "../../../../assets/images/icons/icon.png";
 import { listNotes, type Note } from "../../../lib/notes";
 import { useApp } from "../../../state/AppContext";
 
@@ -124,7 +123,7 @@ export default function Home() {
               </Text>
               <View className="h-8 w-8 overflow-hidden rounded-lg">
                 <Image
-                  source={suaIcon}
+                  source={require('@/assets/images/icons/icon.png')}
                   className="-left-2 -top-2 h-12 w-12"
                   contentFit="contain"
                   accessibilityLabel="Sua"

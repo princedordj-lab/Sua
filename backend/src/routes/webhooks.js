@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { Webhook } from "svix";
 import { prisma } from "../config/prisma.js";
+import { cloudinary, cloudinaryConfigured } from "../config/cloudinary.js";
 import { withUser } from "../lib/db.js";
 
 export const clerkWebhookRouter = Router();
@@ -58,6 +59,30 @@ clerkWebhookRouter.post("/", async (req, res) => {
       }
       case "user.deleted": {
         if (data.id) {
+          // DB rows cascade on user delete, but Cloudinary files are not in
+          // Postgres — destroy them first so account deletion removes student
+          // data from storage too.
+          if (cloudinaryConfigured()) {
+            try {
+              const assets = await withUser(data.id, (tx) =>
+                tx.asset.findMany({
+                  where: {
+                    user: { clerkId: data.id },
+                    publicId: { not: "pending" },
+                  },
+                }),
+              );
+              await Promise.allSettled(
+                assets.map((asset) =>
+                  cloudinary.uploader.destroy(asset.publicId, {
+                    resource_type: asset.resourceType,
+                  }),
+                ),
+              );
+            } catch (err) {
+              console.error("Cloudinary cleanup failed on user.deleted", err);
+            }
+          }
           await withUser(data.id, (tx) =>
             tx.user.deleteMany({ where: { clerkId: data.id } }),
           );

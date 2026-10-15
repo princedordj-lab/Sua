@@ -1,24 +1,26 @@
 import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, Text, TextInput, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
-import { ArrowLeft, Check, Trash2 } from "lucide-react-native";
+import { ArrowLeft, Check, ChevronDown, Trash2 } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useSQLiteContext } from "expo-sqlite";
 import { deleteNote, getNote, saveNote } from "../../../lib/notes";
+import { CoursePickerSheet } from "../../../components/sheets";
 import { useApp } from "../../../state/AppContext";
 
 export default function NoteEditor() {
   const db = useSQLiteContext();
   const { courses } = useApp();
   const params = useLocalSearchParams<{ id: string; courseId?: string }>();
-  const courseId = params.courseId ?? "";
   const isNew = params.id === "new";
+  const [courseId, setCourseId] = useState(params.courseId ?? "");
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [noteId] = useState(() => (isNew ? `note-${Date.now()}` : params.id));
   const [ready, setReady] = useState(isNew);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [pickingCourse, setPickingCourse] = useState(false);
   const courseName = useMemo(
     () => courses.find((course) => course.id === courseId)?.name ?? "Course",
     [courseId, courses],
@@ -30,6 +32,7 @@ export default function NoteEditor() {
       if (note) {
         setTitle(note.title);
         setBody(note.body);
+        setCourseId(note.courseId);
       }
       setReady(true);
     });
@@ -61,10 +64,27 @@ export default function NoteEditor() {
   return (
     <SafeAreaView className="flex-1 bg-cream">
       <View className="flex-row items-center justify-between border-b border-[#E9E5F2] px-5 py-3">
-        <Pressable onPress={() => router.back()} className="flex-row items-center gap-2">
-          <ArrowLeft size={20} color="#19152C" />
-          <Text className="font-bold text-[#19152C]">{courseName}</Text>
-        </Pressable>
+        <View className="flex-row items-center gap-2">
+          <Pressable
+            onPress={() => router.back()}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
+          >
+            <ArrowLeft size={20} color="#19152C" />
+          </Pressable>
+          <Pressable
+            onPress={() => setPickingCourse(true)}
+            accessibilityRole="button"
+            accessibilityLabel={`Course: ${courseName}. Tap to move this note`}
+            className="flex-row items-center gap-1 rounded-chip border border-[#E9E5F2] bg-white px-3 py-1.5 active:opacity-80"
+          >
+            <Text className="max-w-40 text-xs font-bold text-[#19152C]" numberOfLines={1}>
+              {courseName}
+            </Text>
+            <ChevronDown size={14} color="#7C5CFC" />
+          </Pressable>
+        </View>
         <View className="flex-row items-center gap-3">
           <Text className="text-xs text-[#8A8498]">
             {saving ? "Saving…" : savedAt ? `Saved ${savedAt}` : "Offline note"}
@@ -95,6 +115,17 @@ export default function NoteEditor() {
           accessibilityLabel="Note body"
         />
       </View>
+      <CoursePickerSheet
+        visible={pickingCourse}
+        courses={courses}
+        currentCourseId={courseId}
+        heading="Move note to"
+        onSelect={(targetId) => {
+          setPickingCourse(false);
+          if (targetId !== courseId) setCourseId(targetId);
+        }}
+        onClose={() => setPickingCourse(false)}
+      />
     </SafeAreaView>
   );
 }

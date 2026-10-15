@@ -215,17 +215,17 @@ Complete milestones in order where dependencies require it. Each milestone can b
 
 **Exit criteria:** core data, file storage, and API architecture decisions are recorded and consistent across the project specifications.
 
-### Milestone 1 — App foundation, identity, and course model
+### [x] Milestone 1 — App foundation, identity, and course model
 
 - [x] Create Expo React Native app foundation, NativeWind styling conventions, navigation shell, and five-tab structure.
 - [x] Implement the frontend onboarding walkthrough, setup questions, skip paths, local sign-in flow, and automatic first course. Clerk integration complete (Google + email/password; Apple sign-in deferred until the Apple Developer account is ready).
 - [x] Configure NeonDB, Prisma, core schema, row-level security, and user/course ownership.
 - [x] Establish authenticated Express.js API conventions and connect frontend API client to backend routes.
-- [ ] Configure Cloudinary file handling through the backend, including ownership checks and student deletion flows.
-- [ ] Implement course create, rename, archive, delete confirmation, and move-note flow.
-- [ ] Add Sentry/PostHog foundations and analytics event definitions.
+- [x] Configure Cloudinary file handling through the backend, including ownership checks and student deletion flows.
+- [x] Implement course create, rename, archive, delete confirmation, and move-note flow.
+- [ ] Add Sentry/PostHog foundations and analytics event definitions.(Skip) — skipped by decision; analytics move to a later milestone.
 
-> Frontend foundation and Clerk identity are complete. NeonDB + Prisma user/course schema is live with per-user row-level security, and the authenticated Express API (`/api/me`, `/api/courses`, Clerk webhook sync) is connected to the frontend client. The milestone remains open until Cloudinary, analytics, and the move-note flow are implemented.
+> Frontend foundation and Clerk identity are complete. NeonDB + Prisma user/course schema is live with per-user row-level security, and the authenticated Express API (`/api/me`, `/api/courses`, Clerk webhook sync) is connected to the frontend client. Cloudinary is integrated via signed direct uploads (`/api/uploads/sign`, `/api/uploads/:id/complete`, protected asset URLs at `/api/assets/:id/url`, per-asset delete, and Cloudinary cleanup on account deletion) with an RLS-protected `assets` table. Course management is complete including archive persistence across restarts, delete confirmation with local note purge, and a two-tap move-note flow (course chip in the note editor and move action on the course screen). Sentry/PostHog foundations are explicitly skipped and tracked for a later milestone.
 
 **Exit criteria:** a new user can sign up, finish or skip onboarding, reach Home within 90 seconds, and manage courses with ownership protections in place.
 

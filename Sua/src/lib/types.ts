@@ -73,4 +73,29 @@ export type NoteSyncChange = {
   updatedAt?: string;
 };
 
+export type AssetKind = "audio" | "document" | "image";
+
+export type ServerAsset = {
+  id: string;
+  kind: AssetKind;
+  publicId: string;
+  secureUrl: string | null;
+  bytes: number;
+  format: string | null;
+  resourceType: string;
+  status: "pending" | "active";
+  noteId: string | null;
+  createdAt: string;
+};
+
+export type SignedUpload = ServerAsset & {
+  uploadUrl: string;
+  apiKey: string;
+  cloudName: string;
+  timestamp: number;
+  signature: string;
+  type: "restricted";
+  maxBytes: number;
+};
+
 export type Note = import("./notes").Note;

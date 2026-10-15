@@ -26,9 +26,11 @@ coursesRouter.get("/", async (req, res) => {
   const identity = await identityFromRequest(req);
   const courses = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
+    // Archived courses are included so the client's Archived filter survives
+    // a restart; screens pick active courses explicitly where needed.
     return tx.course.findMany({
-      where: { userId: user.id, archived: false },
-      orderBy: { createdAt: "asc" },
+      where: { userId: user.id },
+      orderBy: [{ archived: "asc" }, { createdAt: "asc" }],
     });
   });
   res.json(courses.map(shapeCourse));

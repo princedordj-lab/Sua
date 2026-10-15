@@ -1,10 +1,13 @@
 import type {
+  AssetKind,
   NoteSyncChange,
+  ServerAsset,
   ServerNote,
   ServerCourse,
   ServerCourseCreate,
   ServerProfile,
   ServerProfileUpdate,
+  SignedUpload,
 } from "./types";
 import { Platform } from "react-native";
 
@@ -83,4 +86,26 @@ export const notesApi = {
       token,
       body: JSON.stringify({ changes }),
     }),
+};
+
+export const uploadsApi = {
+  sign: (token: string, input: { kind: AssetKind; format: string; noteId?: string }) =>
+    apiRequest<SignedUpload>("/uploads/sign", {
+      method: "POST",
+      token,
+      body: JSON.stringify(input),
+    }),
+  complete: (token: string, id: string, publicId: string) =>
+    apiRequest<ServerAsset>(`/uploads/${id}/complete`, {
+      method: "POST",
+      token,
+      body: JSON.stringify({ publicId }),
+    }),
+};
+
+export const assetsApi = {
+  signedUrl: (token: string, id: string) =>
+    apiRequest<{ id: string; url: string }>(`/assets/${id}/url`, { token }),
+  remove: (token: string, id: string) =>
+    apiRequest<void>(`/assets/${id}`, { method: "DELETE", token }),
 };

@@ -84,7 +84,8 @@ export async function saveNote(
   await db.runAsync(
     `INSERT INTO notes (id, course_id, title, body, source_type, created_at, updated_at, sync_state)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-     ON CONFLICT(id) DO UPDATE SET title = excluded.title, body = excluded.body,
+     ON CONFLICT(id) DO UPDATE SET course_id = excluded.course_id,
+       title = excluded.title, body = excluded.body,
        updated_at = excluded.updated_at, sync_state = 'pending'`,
     input.id,
     input.courseId,
@@ -118,6 +119,18 @@ export async function pendingSyncCount(db: SQLiteDatabase) {
     "SELECT COUNT(*) as count FROM sync_queue",
   );
   return row?.count ?? 0;
+}
+
+// The server cascades note rows when a course is deleted; mirror that locally
+// and drop queued changes for those notes so nothing tries to sync orphans.
+export async function purgeCourseLocally(db: SQLiteDatabase, courseId: string) {
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      "DELETE FROM sync_queue WHERE entity = 'note' AND entity_id IN (SELECT id FROM notes WHERE course_id = ?)",
+      courseId,
+    );
+    await db.runAsync("DELETE FROM notes WHERE course_id = ?", courseId);
+  });
 }
 
 export async function syncPendingNotes(db: SQLiteDatabase, token: string) {

@@ -10,7 +10,7 @@ import {
 import { useAuth, useClerk, useUser } from "@clerk/expo";
 import { coursesApi, profileApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
-import { pullCourseNotes, syncPendingNotes } from "../lib/notes";
+import { purgeCourseLocally, pullCourseNotes, syncPendingNotes } from "../lib/notes";
 import type {
   Course,
   ServerCourse,
@@ -205,13 +205,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const token = await getToken();
       if (!token || !userId) throw new Error("Not signed in");
       await coursesApi.remove(token, id);
+      // Server cascades the course's notes; drop the local copies and their
+      // queued sync changes so nothing syncs orphans afterwards.
+      await purgeCourseLocally(db, id);
       setHydrated((prev) => ({
         ...prev,
         clerkId: userId,
         courses: prev.courses.filter((course) => course.id !== id),
       }));
     },
-    [getToken, userId],
+    [db, getToken, userId],
   );
 
   const profile = useMemo<UserProfile | null>(() => {
