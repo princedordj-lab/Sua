@@ -90,11 +90,8 @@ export default function Home() {
   );
 
   const openCreate = (route: (typeof actionTiles)[number]["route"]) => {
-    if (route === "type") {
-      router.push({ pathname: "/(app)/(tabs)/create", params: { mode: "typing" } });
-      return;
-    }
-    router.push("/(app)/(tabs)/create");
+    const mode = route === "type" ? "typing" : route === "upload" ? "upload" : "recording";
+    router.push({ pathname: "/(app)/(tabs)/create", params: { mode } });
   };
 
   return (

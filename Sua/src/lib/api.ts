@@ -8,6 +8,7 @@ import type {
   ServerProfile,
   ServerProfileUpdate,
   SignedUpload,
+  SyncResult,
 } from "./types";
 import { Platform } from "react-native";
 
@@ -81,7 +82,7 @@ export const notesApi = {
   listForCourse: (token: string, courseId: string) =>
     apiRequest<ServerNote[]>(`/notes/course/${courseId}`, { token }),
   sync: (token: string, changes: NoteSyncChange[]) =>
-    apiRequest<{ notes: ServerNote[] }>("/notes/sync", {
+    apiRequest<{ notes: ServerNote[]; results?: SyncResult[] }>("/notes/sync", {
       method: "POST",
       token,
       body: JSON.stringify({ changes }),

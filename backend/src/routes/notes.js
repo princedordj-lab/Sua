@@ -34,23 +34,50 @@ notesRouter.post("/sync", async (req, res) => {
   const changes = Array.isArray(req.body?.changes) ? req.body.changes : [];
   if (changes.length > 100) return res.status(400).json({ error: "Too many changes" });
 
-  const notes = await withUser(identity.clerkId, async (tx) => {
+  const { notes, results } = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
-    const result = [];
+    const notes = [];
+    const results = [];
     for (const change of changes) {
-      if (!change?.id || change.operation === "delete") {
-        if (change?.id) await tx.note.deleteMany({ where: { id: change.id, userId: user.id } });
+      if (!change?.id) {
+        results.push({ id: "", status: "rejected", reason: "missing id" });
+        continue;
+      }
+      if (change.operation === "delete") {
+        await tx.note.deleteMany({ where: { id: change.id, userId: user.id } });
+        // Idempotent: deleting a note that is already gone still succeeds.
+        results.push({ id: change.id, status: "accepted" });
         continue;
       }
       if (!change.courseId || typeof change.title !== "string" || typeof change.body !== "string") {
+        results.push({ id: change.id, status: "rejected", reason: "invalid payload" });
         continue;
       }
       const course = await tx.course.findFirst({ where: { id: change.courseId, userId: user.id } });
-      if (!course) continue;
+      if (!course) {
+        results.push({ id: change.id, status: "rejected", reason: "course not found" });
+        continue;
+      }
       const existing = await tx.note.findUnique({ where: { id: change.id } });
-      if (existing && existing.userId !== user.id) continue;
+      if (existing && existing.userId !== user.id) {
+        results.push({ id: change.id, status: "rejected", reason: "id not available" });
+        continue;
+      }
       const parsedUpdatedAt = change.updatedAt ? new Date(change.updatedAt) : null;
-      if (parsedUpdatedAt && Number.isNaN(parsedUpdatedAt.getTime())) continue;
+      if (parsedUpdatedAt && Number.isNaN(parsedUpdatedAt.getTime())) {
+        results.push({ id: change.id, status: "rejected", reason: "invalid updatedAt" });
+        continue;
+      }
+      // Timestamp guard: reject a write that is older than what the server
+      // already holds and hand the newer copy back so the device can adopt it.
+      if (
+        existing &&
+        parsedUpdatedAt &&
+        parsedUpdatedAt.getTime() < existing.updatedAt.getTime()
+      ) {
+        results.push({ id: change.id, status: "conflict", note: shapeNote(existing) });
+        continue;
+      }
       const data = {
         courseId: change.courseId,
         title: change.title,
@@ -63,9 +90,10 @@ notesRouter.post("/sync", async (req, res) => {
         : await tx.note.create({
             data: { id: change.id, userId: user.id, ...data },
           });
-      result.push(note);
+      notes.push(note);
+      results.push({ id: change.id, status: "accepted" });
     }
-    return result;
+    return { notes, results };
   });
-  res.json({ notes: notes.map(shapeNote) });
+  res.json({ notes: notes.map(shapeNote), results });
 });

@@ -4,13 +4,26 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { useAuth, useClerk, useUser } from "@clerk/expo";
+import NetInfo from "@react-native-community/netinfo";
+import { AppState } from "react-native";
 import { coursesApi, profileApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
-import { purgeCourseLocally, pullCourseNotes, syncPendingNotes } from "../lib/notes";
+import {
+  listLocalCourses,
+  pullCourseNotes,
+  purgeCourseLocally,
+  removeLocalCourse,
+  replaceLocalCourses,
+  syncPendingNotes,
+  upsertLocalCourse,
+  type LocalCourse,
+} from "../lib/notes";
+import { flushUploads } from "../lib/uploads";
 import type {
   Course,
   ServerCourse,
@@ -72,6 +85,28 @@ function serverProfileToLocal(profile: ServerProfile): UserProfile {
   };
 }
 
+function serverCourseToCache(course: ServerCourse): Omit<LocalCourse, "updatedAt"> {
+  return {
+    id: course.id,
+    name: course.name,
+    code: course.code ?? "",
+    colour: course.colour,
+    archived: course.archived,
+  };
+}
+
+function cachedCourseToApp(course: LocalCourse): Course {
+  return {
+    id: course.id,
+    code: course.code,
+    name: course.name,
+    lecturer: "",
+    color: course.colour,
+    noteCount: 0,
+    archived: course.archived,
+  };
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const { isLoaded, isSignedIn: isSignedInRaw, getToken, userId } = useAuth();
   const isSignedIn = Boolean(isSignedInRaw);
@@ -81,6 +116,58 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [hydrated, setHydrated] = useState<HydratedState>(EMPTY_HYDRATED);
 
   const getAuthToken = useCallback(() => getToken(), [getToken]);
+
+  // Re-runs hydration (profile + courses + note sync + pull) on demand.
+  // Connectivity and foreground events bump it; a failed sync schedules one
+  // bounded retry so queued edits resume without waiting for an app restart.
+  const [refreshTick, setRefreshTick] = useState(0);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestRefresh = useCallback((delayMs = 0) => {
+    if (delayMs <= 0) {
+      setRefreshTick((tick) => tick + 1);
+      return;
+    }
+    if (refreshTimer.current) return;
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null;
+      setRefreshTick((tick) => tick + 1);
+    }, delayMs);
+  }, []);
+  useEffect(
+    () => () => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    },
+    [],
+  );
+
+  // Flush the note queue and pull fresh copies whenever connectivity returns
+  // or the app returns to the foreground — the queue must not wait for a
+  // restart to drain.
+  useEffect(() => {
+    let sawInitialNetInfo = false;
+    const unsubscribeNet = NetInfo.addEventListener((state) => {
+      if (!sawInitialNetInfo) {
+        // The first event just reports the current state; the hydration
+        // effect already runs on mount.
+        sawInitialNetInfo = true;
+        return;
+      }
+      if (state.isConnected) {
+        requestRefresh();
+        void flushUploads({ db, getAuthToken });
+      }
+    });
+    const appState = AppState.addEventListener("change", (next) => {
+      if (next === "active") {
+        requestRefresh();
+        void flushUploads({ db, getAuthToken });
+      }
+    });
+    return () => {
+      unsubscribeNet();
+      appState.remove();
+    };
+  }, [db, getAuthToken, requestRefresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,26 +187,44 @@ export function AppProvider({ children }: { children: ReactNode }) {
           profile,
           courses: serverCourses.map(serverCourseToLocal),
         });
+        // Mirror courses into SQLite so an offline cold start can still list
+        // them (and therefore create notes) without the API.
+        void replaceLocalCourses(db, serverCourses.map(serverCourseToCache)).catch(() => {});
         try {
           await syncPendingNotes(db, token);
           await Promise.all(
             serverCourses.map((course) => pullCourseNotes(db, token, course.id)),
           );
         } catch {
-          // Notes remain in SQLite and the queue; retry on the next hydration.
+          // Reachable server but the sync/pull failed (transient): retry soon
+          // instead of waiting for the next reconnect or foreground event.
+          if (!cancelled) requestRefresh(15_000);
         }
+        // Notes first (a queued upload may reference a note still in the
+        // push queue), then drain the upload queue — both self-gate offline.
+        if (!cancelled) void flushUploads({ db, getAuthToken });
       } catch {
-        // Backend unreachable — record the attempt so guards do not hang;
-        // setup can retry persistence when connectivity returns.
-        if (!cancelled) {
-          setHydrated({ clerkId: userId, profile: null, courses: [] });
+        // Backend unreachable. Fall back to the cached course list so notes
+        // can still be created and viewed offline; keep any state already
+        // hydrated by an earlier successful pass.
+        if (cancelled) return;
+        let cached: LocalCourse[] = [];
+        try {
+          cached = await listLocalCourses(db);
+        } catch {
+          // Local cache unreadable — an empty course list is still safe.
         }
+        setHydrated((prev) =>
+          prev.clerkId === userId && prev.profile
+            ? prev
+            : { clerkId: userId, profile: null, courses: cached.map(cachedCourseToApp) },
+        );
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [db, getToken, isLoaded, isSignedIn, userId]);
+  }, [db, getAuthToken, getToken, isLoaded, isSignedIn, requestRefresh, refreshTick, userId]);
 
   // Derive per-user state from `hydrated` instead of clearing it in an
   // effect: switching/losing the session instantly hides stale data.
@@ -150,6 +255,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         code: firstCourse.code || null,
         colour: firstCourse.color,
       });
+      void upsertLocalCourse(db, serverCourseToCache(course)).catch(() => {});
       setHydrated((prev) => ({
         clerkId: userId,
         profile,
@@ -158,7 +264,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           : [...prev.courses, serverCourseToLocal(course)],
       }));
     },
-    [getToken, userId],
+    [db, getToken, userId],
   );
 
   const addCourse = useCallback(
@@ -170,13 +276,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         code: course.code || null,
         colour: course.color,
       });
+      void upsertLocalCourse(db, serverCourseToCache(created)).catch(() => {});
       setHydrated((prev) => ({
         ...prev,
         clerkId: userId,
         courses: [...prev.courses, serverCourseToLocal(created)],
       }));
     },
-    [getToken, userId],
+    [db, getToken, userId],
   );
 
   const updateCourse = useCallback(
@@ -189,6 +296,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const token = await getToken();
       if (!token || !userId) throw new Error("Not signed in");
       const updated = await coursesApi.update(token, id, payload);
+      void upsertLocalCourse(db, serverCourseToCache(updated)).catch(() => {});
       setHydrated((prev) => ({
         ...prev,
         clerkId: userId,
@@ -197,7 +305,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ),
       }));
     },
-    [getToken, userId],
+    [db, getToken, userId],
   );
 
   const deleteCourse = useCallback(
@@ -208,6 +316,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       // Server cascades the course's notes; drop the local copies and their
       // queued sync changes so nothing syncs orphans afterwards.
       await purgeCourseLocally(db, id);
+      await removeLocalCourse(db, id).catch(() => {});
       setHydrated((prev) => ({
         ...prev,
         clerkId: userId,

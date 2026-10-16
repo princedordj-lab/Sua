@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { cloudinary, cloudinaryConfigured } from "../config/cloudinary.js";
 import { withUser } from "../lib/db.js";
+import { extractDocumentText } from "../lib/extract.js";
 import { ensureUser } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
 
@@ -13,6 +14,9 @@ const MAX_BYTES = {
   // 60-minute Pro recordings at the ~0.5 MB/min compression target.
   audio: 50 * 1024 * 1024,
 };
+
+// Upper bound for files we attempt to parse on upload-complete.
+const MAX_EXTRACT_BYTES = 25 * 1024 * 1024;
 
 const ALLOWED_FORMATS = {
   document: ["pdf", "pptx", "ppt", "txt", "docx"],
@@ -38,8 +42,26 @@ function shapeAsset(asset) {
     resourceType: asset.resourceType,
     status: asset.status,
     noteId: asset.noteId,
+    extractedText: asset.extractedText ?? null,
     createdAt: asset.createdAt,
   };
+}
+
+// Downloads the confirmed bytes through a signed URL (the media itself never
+// travels through the API) and parses any text the format supports.
+async function extractFromStorage(asset) {
+  const url = cloudinary.url(asset.publicId, {
+    resource_type: asset.resourceType,
+    type: "restricted",
+    sign_url: true,
+    secure: true,
+  });
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`storage fetch failed (${response.status})`);
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return extractDocumentText(buffer, asset.format, asset.kind);
 }
 
 function requireStorage(res) {
@@ -65,9 +87,23 @@ uploadsRouter.post("/sign", async (req, res) => {
       error: `Unsupported ${kind} format. Allowed: ${ALLOWED_FORMATS[kind].join(", ")}`,
     });
   }
+  const noteId =
+    typeof req.body?.noteId === "string" && req.body.noteId ? req.body.noteId : null;
 
-  const asset = await withUser(identity.clerkId, async (tx) => {
+  const outcome = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
+    if (noteId) {
+      // Offline-first: a note that hasn't synced yet has no row here — its
+      // upload can legitimately race the note push. A note that does exist
+      // and belongs to someone else must never be referenced.
+      const note = await tx.note.findFirst({
+        where: { id: noteId },
+        select: { userId: true },
+      });
+      if (note && note.userId !== user.id) {
+        return { error: "noteId does not match one of your notes" };
+      }
+    }
     const created = await tx.asset.create({
       data: {
         userId: user.id,
@@ -76,13 +112,22 @@ uploadsRouter.post("/sign", async (req, res) => {
         resourceType: RESOURCE_TYPES[kind],
         format: normalizedFormat,
         status: "pending",
-        noteId: typeof req.body?.noteId === "string" && req.body.noteId ? req.body.noteId : null,
+        noteId,
       },
     });
     // Restricted assets are only retrievable through signed delivery URLs.
     const publicId = `sua/${user.id}/${created.id}`;
-    return tx.asset.update({ where: { id: created.id }, data: { publicId } });
+    const asset = await tx.asset.update({
+      where: { id: created.id },
+      data: { publicId },
+    });
+    return { asset };
   });
+
+  if (outcome.error) {
+    return res.status(400).json({ error: outcome.error });
+  }
+  const asset = outcome.asset;
 
   const timestamp = Math.floor(Date.now() / 1000);
   const params = { public_id: asset.publicId, timestamp, type: "restricted" };
@@ -139,7 +184,36 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
   });
 
   if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
-  res.status(outcome.status).json(shapeAsset(outcome.asset));
+
+  let asset = outcome.asset;
+  // Parse the document once its bytes are confirmed — outside the transaction
+  // so a slow download can't hold a database connection open. Re-runs only if
+  // a previous attempt failed (extractedText still null).
+  if (
+    asset.kind === "document" &&
+    !asset.extractedText &&
+    asset.bytes > 0 &&
+    asset.bytes <= MAX_EXTRACT_BYTES
+  ) {
+    try {
+      const text = await extractFromStorage(asset);
+      if (text) {
+        const targetId = asset.id;
+        asset = await withUser(identity.clerkId, (tx) =>
+          tx.asset.update({
+            where: { id: targetId },
+            data: { extractedText: text },
+          }),
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `Extraction failed for asset ${asset.id}:`,
+        error?.message ?? error,
+      );
+    }
+  }
+  res.status(outcome.status).json(shapeAsset(asset));
 });
 
 assetsRouter.get("/:id/url", async (req, res) => {

@@ -15,6 +15,7 @@ import { useApp } from "../../../state/AppContext";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useSQLiteContext } from "expo-sqlite";
 import { listNotes, saveNote, type Note } from "../../../lib/notes";
+import { stripMarkdown } from "../../../lib/markdown";
 import {
   BottomSheet,
   CoursePickerSheet,
@@ -209,7 +210,7 @@ export default function CourseDetail() {
               className="flex-1 p-4 active:opacity-80"
             >
               <Text className="font-extrabold text-[#19152C]">{note.title || "Untitled note"}</Text>
-              <Text numberOfLines={2} className="mt-1 text-sm leading-5 text-[#8A8498]">{note.body || "Empty note"}</Text>
+              <Text numberOfLines={2} className="mt-1 text-sm leading-5 text-[#8A8498]">{stripMarkdown(note.body || note.transcript || "") || "Empty note"}</Text>
               <Text className="mt-2 text-xs text-[#17B890]">{note.syncState === "pending" ? "Waiting to sync" : "Synced"}</Text>
             </Pressable>
             <Pressable

@@ -76,6 +76,7 @@ model Asset {
   resourceType String   @default("raw")
   status       String   @default("pending")
   noteId       String?
+  extractedText String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

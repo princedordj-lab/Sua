@@ -73,6 +73,17 @@ export type NoteSyncChange = {
   updatedAt?: string;
 };
 
+export type SyncResultStatus = "accepted" | "rejected" | "conflict";
+
+// Per-change acknowledgement from POST /notes/sync. A conflict carries the
+// newer server copy so the device can adopt it instead of retrying forever.
+export type SyncResult = {
+  id: string;
+  status: SyncResultStatus;
+  reason?: string;
+  note?: ServerNote;
+};
+
 export type AssetKind = "audio" | "document" | "image";
 
 export type ServerAsset = {
@@ -85,6 +96,7 @@ export type ServerAsset = {
   resourceType: string;
   status: "pending" | "active";
   noteId: string | null;
+  extractedText?: string | null;
   createdAt: string;
 };
 
