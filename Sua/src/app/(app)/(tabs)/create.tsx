@@ -21,8 +21,12 @@ import {
   useAudioRecorder,
 } from "expo-audio";
 import type { RecordingOptions } from "expo-audio";
-import DocumentPicker from "expo-document-picker";
-import ImagePicker from "expo-image-picker";
+import { getDocumentAsync } from "expo-document-picker";
+import {
+  launchCameraAsync,
+  launchImageLibraryAsync,
+  requestCameraPermissionsAsync,
+} from "expo-image-picker";
 import { File } from "expo-file-system";
 import {
   Bold,
@@ -426,7 +430,9 @@ export default function Create() {
   const segmentMsRef = useRef(0);
   const rotatingRef = useRef(false);
   const phaseRef = useRef<RecordPhase>(recordPhase);
-  phaseRef.current = recordPhase;
+  useEffect(() => {
+    phaseRef.current = recordPhase;
+  });
 
   const [uploadItems, setUploadItems] = useState<UploadQueueItem[]>([]);
 
@@ -784,13 +790,16 @@ export default function Create() {
     rotatingRef.current = false;
   };
 
-  // The interval reads these so its effect only depends on the phase.
+  // The interval reads these so its effect only depends on the phase. Updated
+  // in an effect (not during render) to always hold the latest closures.
   const recordActionsRef = useRef<{
     rotate: () => Promise<void>;
     stop: () => Promise<void>;
   }>({ rotate: async () => {}, stop: async () => {} });
-  recordActionsRef.current.rotate = rotateSegment;
-  recordActionsRef.current.stop = () => finishRecording();
+  useEffect(() => {
+    recordActionsRef.current.rotate = rotateSegment;
+    recordActionsRef.current.stop = () => finishRecording();
+  });
 
   useEffect(() => {
     if (recordPhase !== "recording") return;
@@ -1092,7 +1101,7 @@ export default function Create() {
 
   const pickDocument = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({
+      const result = await getDocumentAsync({
         type: DOCUMENT_TYPES,
         copyToCacheDirectory: true,
         multiple: false,
@@ -1113,7 +1122,7 @@ export default function Create() {
   const pickImage = async (source: "library" | "camera") => {
     try {
       if (source === "camera") {
-        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        const permission = await requestCameraPermissionsAsync();
         if (!permission.granted) {
           Alert.alert(
             "Camera access needed",
@@ -1124,8 +1133,8 @@ export default function Create() {
       }
       const result =
         source === "camera"
-          ? await ImagePicker.launchCameraAsync({ quality: 0.8 })
-          : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.8 });
+          ? await launchCameraAsync({ quality: 0.8 })
+          : await launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.8 });
       if (result.canceled) return;
       const asset = result.assets[0];
       await queueFile({

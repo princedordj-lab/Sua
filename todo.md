@@ -233,22 +233,17 @@ Complete milestones in order where dependencies require it. Each milestone can b
 
 - [x] Implement Expo SQLite local data layer and initial cloud sync strategy.
 - [x] Build typed-note editor with autosave and offline use.
-- [ ] Add rich-text formatting controls and conflict resolution after the authenticated API contract is finalized.
-- [ ] Build chunked offline audio recorder with pause/resume, timer, crash recovery, and recover-recording flow.
-- [ ] Implement audio compression, Wi-Fi-only default, resumable background upload, and recording limits.
-- [ ] Add PDF, PowerPoint, image, and text upload up to 25 MB; extract text from scans/images.
-- [ ] Ensure notes and source materials are tied to exactly one course.
+- [x] Add rich-text formatting controls and conflict resolution after the authenticated API contract is finalized.
+- [x] Build chunked offline audio recorder with pause/resume, timer, crash recovery, and recover-recording flow.
+- [x] Implement audio compression, Wi-Fi-only default, resumable background upload, and recording limits.
+- [x] Add PDF, PowerPoint, image, and text upload up to 25 MB; extract text from scans/images.
+- [x] Ensure notes and source materials are tied to exactly one course.
 
 **Exit criteria:** create and view notes offline; record survives interruption; queued changes/uploads resume on reconnection without losing data.
 
-#### Milestone 2 implementation plan and current slice
+**Deferral notes:** image OCR text extraction is deferred to Milestone 3 (Gemini) — PDF/DOCX/PPTX/TXT extraction is complete via pure-JS server-side parsing; the free-tier 3-audio-notes-per-month enforcement stays capped at 9999 until billing lands in Milestone 5 (monthly counting and the 60-minute recording cap are enforced now); orphaned Cloudinary assets from abandoned queues are cleaned up with account deletion (per-asset GC of expired pending rows is deferred to Milestone 5).
 
-- [x] Add a versioned local SQLite database with WAL mode, `notes`, and durable `sync_queue` tables.
-- [x] Tie every note to one `course_id`; expose course-scoped note listing and note editing routes.
-- [x] Add debounced note autosave so edits remain available after leaving the editor or losing connectivity.
-- [x] Surface pending-sync state in the course note list; leave queue delivery behind the authenticated Express sync contract.
-- [ ] Add rich-text formatting, chunked recording/recovery, and resumable upload once Expo audio/file APIs and backend endpoints are selected and verified.
-- [ ] Verify the full offline/reconnect flow on iOS and Android development builds, including crash recovery and 25 MB upload limits.
+> Local-first notes and capture are complete. The versioned SQLite layer (WAL, v1–v6 migrations) stores notes with `syncState`, recording sessions/segments, and an upload queue with attempt tracking; the sync contract pushes pending mutations with a timestamp conflict guard and pulls with pending-safe upserts so local offline edits are never clobbered. The Create tab supports three modes: typed notes (markdown toolbar, preview, debounced 1.5 s autosave), chunked audio recording (2-minute m4a segments at ~0.5 MB/min, pause/resume, 60-minute cap, crash-recovery banner that resumes or saves interrupted takes, unmount-safe finalization), and uploads (PDF/DOCX/PPTX/TXT/images up to 25 MB with a Wi-Fi-only toggle, sequential background upload with retry, and server-side text extraction stored on the asset and mirrored into the note transcript). Hydration is offline-tolerant, course mutations mirror locally, and connectivity changes drain the note then upload queues. Remaining M2 verification is on-device (development builds on Android/iOS).
 
 ### Milestone 3 — AI processing and study-set generation
 

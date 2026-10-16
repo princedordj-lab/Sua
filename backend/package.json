@@ -24,7 +24,7 @@
     "jszip": "^3.10.2",
     "pdf-parse": "^2.4.5",
     "pg": "^8.23.1",
-    "prisma": "7.10.0",
+    "prisma": "^7.10.0",
     "svix": "^2.8.0"
   },
   "devDependencies": {

@@ -459,7 +459,7 @@ function rowToCourse(row: Record<string, unknown>): LocalCourse {
 
 export async function replaceLocalCourses(
   db: SQLiteDatabase,
-  courses: Array<Omit<LocalCourse, "updatedAt">>,
+  courses: Omit<LocalCourse, "updatedAt">[],
 ) {
   const now = new Date().toISOString();
   await db.withTransactionAsync(async () => {
