@@ -245,6 +245,21 @@ const MIGRATIONS: ((db: SQLiteDatabase) => Promise<void>)[] = [
       CREATE INDEX IF NOT EXISTS generation_queue_state_idx ON generation_queue(state, id);
     `);
   },
+  // 8 — Ask Sua chat cache (server is source of truth; cache is read-only)
+  async (db) => {
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY NOT NULL,
+        course_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source_note_ids TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS chat_messages_course_idx
+        ON chat_messages(course_id, created_at);
+    `);
+  },
 ];
 
 export async function migrateDb(db: SQLiteDatabase) {
@@ -1004,3 +1019,87 @@ export async function updateGeneration(
     id,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Ask Sua chat cache
+// ---------------------------------------------------------------------------
+
+export type ChatMessageRow = {
+  id: string;
+  courseId: string;
+  role: "user" | "assistant";
+  content: string;
+  sourceNoteIds: string[];
+  createdAt: string;
+};
+
+function rowToChatMessage(row: Record<string, unknown>): ChatMessageRow {
+  let sourceNoteIds: string[] = [];
+  try {
+    const parsed = JSON.parse(String(row.source_note_ids ?? "[]"));
+    if (Array.isArray(parsed)) sourceNoteIds = parsed.map(String);
+  } catch {
+    sourceNoteIds = [];
+  }
+  return {
+    id: String(row.id),
+    courseId: String(row.course_id),
+    role: row.role === "user" ? "user" : "assistant",
+    content: String(row.content),
+    sourceNoteIds,
+    createdAt: String(row.created_at),
+  };
+}
+
+export async function listCourseMessages(db: SQLiteDatabase, courseId: string) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM chat_messages WHERE course_id = ? ORDER BY created_at ASC",
+    courseId,
+  );
+  return rows.map(rowToChatMessage);
+}
+
+// Server is the source of truth; a refresh replaces the course's cache.
+export async function replaceCourseMessages(
+  db: SQLiteDatabase,
+  courseId: string,
+  messages: ChatMessageRow[],
+) {
+  const now = new Date().toISOString();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync("DELETE FROM chat_messages WHERE course_id = ?", courseId);
+    for (const message of messages) {
+      await db.runAsync(
+        `INSERT OR REPLACE INTO chat_messages
+           (id, course_id, role, content, source_note_ids, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        message.id,
+        message.courseId,
+        message.role,
+        message.content,
+        JSON.stringify(message.sourceNoteIds ?? []),
+        message.createdAt || now,
+      );
+    }
+  });
+}
+
+export async function upsertChatMessage(
+  db: SQLiteDatabase,
+  message: ChatMessageRow,
+) {
+  await db.runAsync(
+    `INSERT OR REPLACE INTO chat_messages
+       (id, course_id, role, content, source_note_ids, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    message.id,
+    message.courseId,
+    message.role,
+    message.content,
+    JSON.stringify(message.sourceNoteIds ?? []),
+    message.createdAt || new Date().toISOString(),
+  );
+}
+
+// Last-used course so the chat screen opens where the student left off.
+export const ASK_SUA_COARSE_KEY = "ask_sua_course_id";

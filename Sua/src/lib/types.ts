@@ -165,3 +165,27 @@ export type ServerStudy = {
 export type ServerFeedback = { id: string };
 
 export type PushTokenStatus = { ok: boolean };
+
+export type ChatRole = "user" | "assistant";
+
+export type ChatQuickAction = "explain_simply" | "give_example" | "quiz_me";
+
+export type ChatMessageView = {
+  id: string;
+  courseId: string;
+  role: ChatRole;
+  content: string;
+  sourceNoteIds: string[];
+  createdAt: string;
+};
+
+export type ChatAskResponse = {
+  user: ChatMessageView;
+  assistant: ChatMessageView;
+  sources: { id: string; title: string }[];
+  model?: string;
+};
+
+export type ChatMessagesResponse = { messages: ChatMessageView[] };
+
+export type ChatTranscriptResponse = { text: string };

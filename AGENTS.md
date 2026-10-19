@@ -129,7 +129,7 @@ Local-only (SQLite, not synced as tables): recording sessions/segments, upload q
 -   [x] Onboarding & Authentication (Clerk)
 -   [x] Course Management (CRUD)
 -   [x] Content Creation (Record, Upload, Type)
--   [ ] AI Pipeline (Transcribe → Summary → Flashcards → Quiz) — Milestone 3
+-   [x] AI Pipeline (Transcribe → Summary → Flashcards → Quiz) — Milestone 3
 -   [x] Offline Sync (SQLite ↔ Postgres, conflict guard + pending-safe pulls)
 -   [x] Local-First Capture (chunked recorder with crash recovery, 25 MB uploads with server-side text extraction, markdown editor) — Milestone 2
 -   [ ] Billing (Paystack Integration)

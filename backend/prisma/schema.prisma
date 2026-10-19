@@ -32,6 +32,7 @@ model User {
   feedbacks            Feedback[]
   usages               Usage[]
   pushTokens           PushToken[]
+  chatMessages         ChatMessage[]
 
   @@map("users")
 }
@@ -48,6 +49,7 @@ model Course {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   notes     Note[]
+  chatMessages ChatMessage[]
 
   @@index([userId])
   @@map("courses")
@@ -227,6 +229,22 @@ model Usage {
 
   @@unique([userId, month])
   @@map("usages")
+}
+
+model ChatMessage {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  courseId      String
+  course        Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  // user | assistant
+  role          String
+  content       String   @db.Text
+  sourceNoteIds String[] @default([])
+  createdAt     DateTime @default(now())
+
+  @@index([userId, courseId, createdAt])
+  @@map("chat_messages")
 }
 
 model PushToken {

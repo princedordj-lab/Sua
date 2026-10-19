@@ -14,7 +14,7 @@ Students can record a lecture, upload learning materials, or type notes; turn th
 - [x] Free plan allows **10 flashcard and quiz sets per month** (updated from the 5-set proposal in the source documents).
 - [x] Semester Pass price is **GHS 150** (updated from the GHS 60 proposal). Confirm duration remains four months and validate pricing with students before launch.
 - [x] Retain original audio until the student deletes it. Provide a way to delete audio and associated data; account deletion removes the student's data.
-- [ ] Select and validate a secondary transcription provider for fallback.
+- [x] Transcription fallback resolved: **second Gemini tier** (`gemini-2.5-pro` → `gemini-2.5-flash`, same provider) per product decision; no secondary provider is selected unless real-lecture quality fails. Validation on Ghanaian English accents and technical lectures is pending (Milestone 3 eval).
 - [ ] Determine whether lecturer or department permission is required for recording at partner campuses; provide appropriate onboarding guidance.
 - [ ] Validate the AI cost target (under GHS 1.50 per free user per month) and refine limits/pricing with student research.
 
@@ -249,14 +249,18 @@ Complete milestones in order where dependencies require it. Each milestone can b
 
 - [ ] Prototype record → transcribe → summarize on 5 real lectures; review transcript and output quality.
 - [ ] Select and validate a secondary transcription provider; test on Ghanaian English accents and technical lectures.
-- [ ] Implement background job queue, offline request queue, progress states, retries (up to 3), and manual retry action.
-- [ ] Integrate Gemini transcription and selected fallback; implement text extraction and cleanup with course context.
-- [ ] Generate structured summaries, transcript display, flashcards, and mixed quizzes with explanations.
-- [ ] Handle long transcripts by sectioning and combining; validate output and retry malformed generations once.
-- [ ] Persist outputs, sync them to device, notify on completion, and add Report a mistake capture with source text.
-- [ ] Add configurable AI model routing, usage caps, caching, spend alerts, and cost tracking.
+- [x] Implement background job queue, offline request queue, progress states, retries (up to 3), and manual retry action.
+- [x] Integrate Gemini transcription and selected fallback; implement text extraction and cleanup with course context.
+- [x] Generate structured summaries, transcript display, flashcards, and mixed quizzes with explanations.
+- [x] Handle long transcripts by sectioning and combining; validate output and retry malformed generations once.
+- [x] Persist outputs, sync them to device, notify on completion, and add Report a mistake capture with source text.
+- [x] Add configurable AI model routing, usage caps, caching, spend alerts, and cost tracking.
 
 **Exit criteria:** the 30-minute recording median is under 8 minutes; at least 98% of jobs complete without manual retry; students can inspect transcript and results.
+
+**Deferral notes:** the 5-real-lecture evaluation and provider/quality validation are deferred until real lecture samples are supplied (samples go in `backend/scripts/eval-samples/`, run `npm run eval`); the transcription fallback is a second Gemini tier (`gemini-2.5-pro` → `gemini-2.5-flash`, same provider) per product decision, so no secondary provider is selected — external-provider fallback is revisited only if quality fails on real lectures; the free-tier usage caps are warn-only (`FREE_MONTHLY_SUMMARIES`/`FREE_MONTHLY_SETS`, enforced at Milestone 5); backgrounded jobs complete with an Expo push notification once a development build is installed (device step).
+
+> AI processing and study-set generation are implemented end to end. The backend gained an AI pipeline on BullMQ (Upstash Redis): `POST /api/jobs` enqueues a study-set job (deduped against active jobs, warn-only usage caps), a dedicated worker (`npm run worker`) runs `processStudySet` with 3 attempts and exponential backoff — ingest in asset order (typed body, server-side document extraction, Gemini OCR for images, Gemini transcription with a fallback tier), filler/term cleanup with course context, sectioned map/reduce summarising for transcripts over 15k chars, one single-JSON generation call (10–25 cards ~ per lecture hour, 5–10 mixed mcq/true-false/short-answer quiz with explanations) with one stricter retry on malformed output, validation gates (required summary sections, ≥5 cards, ≥3 questions), idempotent persistence (replace flashcards/quizzes, note.summary markdown), per-call cost recording (`AiCall`), daily spend alert in GHS, and an Expo push on completion. Results are read back through `GET /api/notes/:noteId/study`. Cached jobs short-circuit on a source hash when re-run on unchanged material. On the device, the SQLite layer is at v7 (notes + `ai_state`/`summary`, flashcard/quiz/local tables, generation queue); "Save and summarise" queues locally first, drains on connectivity/foreground, mirrors pipeline stages live (queued → transcribing → summarising → making cards → ready) with a 5 s local poll while the note is open, pulls the study set into local tables, raises a local notification, and offers Try again (with the pipeline error) plus a Report-a-mistake sheet that posts feedback with source text. The eval harness (`npm run eval`) is ready for the 5-lecture quality gate. Remaining verification: real 5-lecture eval, and on-device generation after a development rebuild (`npx expo prebuild`).
 
 ### Milestone 4 — Offline study loop and assistant
 
