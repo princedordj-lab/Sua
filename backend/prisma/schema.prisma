@@ -21,11 +21,17 @@ model User {
   plan                 String    @default("FREE")
   planExpiresAt        DateTime?
   onboardingCompletedAt DateTime?
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
   courses              Course[]
   notes                Note[]
   assets               Asset[]
+  jobs                 Job[]
+  flashcards           Flashcard[]
+  quizzes              Quiz[]
+  feedbacks            Feedback[]
+  usages               Usage[]
+  pushTokens           PushToken[]
 
   @@map("users")
 }
@@ -56,8 +62,16 @@ model Note {
   title      String   @default("")
   body       String   @default("")
   sourceType String   @default("typed")
+  // AI pipeline outputs; the server owns them, the device mirrors.
+  transcript String?
+  summary    String?
+  aiState    String   @default("none")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+
+  jobs       Job[]
+  flashcards Flashcard[]
+  quizzes    Quiz[]
 
   @@index([userId, updatedAt])
   @@index([courseId, updatedAt])
@@ -77,9 +91,153 @@ model Asset {
   status       String   @default("pending")
   noteId       String?
   extractedText String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([userId])
   @@map("assets")
+}
+
+model Job {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  noteId     String
+  note       Note      @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  kind       String    @default("study_set")
+  // queued | running | failed | done
+  state      String    @default("queued")
+  // queued | transcribing | summarising | making_cards — mirrored to note.aiState
+  stage      String    @default("queued")
+  attempts   Int       @default(0)
+  error      String?
+  // Hash of the cleaned source; identical requests reuse existing outputs.
+  sourceHash String?
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  aiCalls AiCall[]
+
+  @@index([userId, updatedAt])
+  @@index([noteId])
+  @@map("jobs")
+}
+
+model AiCall {
+  id               String   @id @default(cuid())
+  jobId            String
+  job              Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  step             String
+  model            String
+  promptTokens     Int      @default(0)
+  completionTokens Int      @default(0)
+  usdMicros        Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  @@index([jobId])
+  @@index([createdAt])
+  @@map("ai_calls")
+}
+
+model Flashcard {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  noteId       String
+  note         Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  courseId     String
+  front        String
+  back         String
+  dueAt        DateTime @default(now())
+  ease         Float    @default(2.5)
+  intervalDays Float    @default(0)
+  reps         Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([userId, updatedAt])
+  @@index([noteId])
+  @@map("flashcards")
+}
+
+model Quiz {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  courseId  String
+  noteId    String?
+  note      Note?          @relation(fields: [noteId], references: [id], onDelete: SetNull)
+  title     String
+  questions QuizQuestion[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@index([userId, updatedAt])
+  @@index([courseId])
+  @@map("quizzes")
+}
+
+model QuizQuestion {
+  id          String @id @default(cuid())
+  quizId      String
+  quiz        Quiz   @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  ordinal     Int
+  // mcq | true_false | short_answer
+  type        String
+  prompt      String
+  options     Json?
+  answer      String
+  explanation String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([quizId])
+  @@map("quiz_questions")
+}
+
+model Feedback {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  noteId     String?
+  // summary | flashcard | quiz_question | transcript
+  targetType String
+  targetId   String?
+  comment    String
+  sourceText String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+  @@map("feedback")
+}
+
+model Usage {
+  id               String   @id @default(cuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  month            String
+  summaries        Int      @default(0)
+  studySets        Int      @default(0)
+  assistantQueries Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([userId, month])
+  @@map("usages")
+}
+
+model PushToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  platform  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("push_tokens")
 }

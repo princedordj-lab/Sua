@@ -40,7 +40,8 @@
         {
           "microphonePermission": "Allow $(PRODUCT_NAME) to record your lectures and classes."
         }
-      ]
+      ],
+      "expo-notifications"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -29,6 +29,7 @@ import {
 } from "expo-image-picker";
 import { File } from "expo-file-system";
 import {
+  AlertTriangle,
   Bold,
   Camera,
   CheckCircle2,
@@ -36,15 +37,18 @@ import {
   CircleHelp,
   CloudUpload,
   FileText,
+  Flag,
   Heading2,
   Image as ImageIcon,
   Italic,
   List,
   ListOrdered,
+  Loader2,
   Mic,
   Pause,
   PenLine,
   Play,
+  RefreshCw,
   Save,
   Sparkles,
   Square,
@@ -64,6 +68,7 @@ import {
   createRecordingSession,
   deleteNote,
   discardRecordingSession,
+  enqueueGeneration,
   enqueueUpload,
   finalizeSegment,
   getNote,
@@ -79,12 +84,15 @@ import {
   updateUploadState,
 } from "../../../lib/notes";
 import type {
+  AiState,
   Note,
   RecordingSegment,
   RecordingSession,
   UploadKind,
   UploadQueueItem,
 } from "../../../lib/notes";
+import { drainGenerationQueue } from "../../../lib/generate";
+import { jobsApi } from "../../../lib/api";
 import { flushUploads } from "../../../lib/uploads";
 import { useApp } from "../../../state/AppContext";
 import type { Course } from "../../../lib/types";
@@ -403,6 +411,14 @@ export default function Create() {
   const [dirty, setDirty] = useState(false);
   const [noteSourceType, setNoteSourceType] = useState<Note["sourceType"] | null>(null);
   const [sourceTranscript, setSourceTranscript] = useState<string | null>(null);
+  // AI pipeline state for the loaded note; server-owned fields mirrored into SQLite.
+  const [aiState, setAiState] = useState<AiState>("none");
+  const [summaryMarkdown, setSummaryMarkdown] = useState<string | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportComment, setReportComment] = useState("");
+  const [reportSending, setReportSending] = useState(false);
+  const [reported, setReported] = useState(false);
+  const [summaryGenerationError, setSummaryGenerationError] = useState<string | null>(null);
 
   // Editor affordances: markdown toolbar with undo, plus a rendered preview.
   const bodyInputRef = useRef<TextInput>(null);
@@ -522,6 +538,8 @@ export default function Create() {
           setPickedCourseId(note.courseId);
           setNoteSourceType(note.sourceType);
           setSourceTranscript(note.transcript);
+          setAiState(note.aiState);
+          setSummaryMarkdown(note.summary);
           setTypedStatus("idle");
           setDirty(false);
         } else {
@@ -531,6 +549,8 @@ export default function Create() {
           setBody("");
           setNoteSourceType(null);
           setSourceTranscript(null);
+          setAiState("none");
+          setSummaryMarkdown(null);
           setTypedStatus("idle");
           setDirty(false);
         }
@@ -960,11 +980,67 @@ export default function Create() {
       setSavedAt(nowLabel());
       setTypedStatus(queueSummary ? "queued" : "saved");
       setDirty(false);
+      if (queueSummary) {
+        // Local-first: the note's ai_state flips immediately; the drain call
+        // self-gates on connectivity and mirrors pipeline stages to this UI.
+        await enqueueGeneration(db, typedNoteId);
+        setAiState("queued");
+        void drainGenerationQueue({
+          db,
+          getAuthToken,
+          onNoteChange: () => {
+            void refreshAiState();
+          },
+        }).catch(() => {});
+      }
     } catch {
       setTypedStatus("idle");
       Alert.alert("Couldn’t save the note", "Your text is still here — try saving again.");
     }
   };
+
+  // Re-read the AI columns (stage changes and results are written by the
+  // generation drain, not by this screen's own saves).
+  const refreshAiState = useCallback(async () => {
+    const note = await getNote(db, typedNoteId).catch(() => null);
+    if (!note) return;
+    setAiState(note.aiState);
+    setSummaryMarkdown(note.summary);
+    if (note.aiState === "failed") {
+      const generation = await db
+        .getFirstAsync<{ error: string }>(
+          "SELECT error FROM generation_queue WHERE note_id = ? AND state = 'failed' ORDER BY updated_at DESC LIMIT 1",
+          note.id,
+        )
+        .catch(() => null);
+      setSummaryGenerationError(generation?.error ?? null);
+    } else {
+      setSummaryGenerationError(null);
+    }
+  }, [db, typedNoteId]);
+
+  // While a generation is in flight, poll the local row so returning to this
+  // screen picks up stage changes and the finished study set.
+  const aiActive =
+    aiState === "queued" ||
+    aiState === "transcribing" ||
+    aiState === "summarising" ||
+    aiState === "making_cards";
+  useEffect(() => {
+    if (!aiActive) return;
+    const timer = setInterval(() => {
+      void refreshAiState();
+      // Dropped connectivity resumes the drain on the next foreground/reconnect.
+      void drainGenerationQueue({
+        db,
+        getAuthToken,
+        onNoteChange: () => {
+          void refreshAiState();
+        },
+      }).catch(() => {});
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [aiActive, db, getAuthToken, refreshAiState]);
 
   // Shared session reset for Done and Delete. Runs in an event handler, so
   // generating the fresh draft id here keeps render pure. The ref is marked
@@ -977,6 +1053,10 @@ export default function Create() {
     setBody("");
     setNoteSourceType(null);
     setSourceTranscript(null);
+    setAiState("none");
+    setSummaryMarkdown(null);
+    setReportComment("");
+    setReported(false);
     setTypedStatus("idle");
     setDirty(false);
     setPreviewing(false);
@@ -1659,6 +1739,83 @@ export default function Create() {
                   </View>
                 ) : null}
 
+                {aiState === "failed" ? (
+                  <View className="mt-4 rounded-card border border-warning bg-warning-soft p-card">
+                    <View className="flex-row items-center gap-2">
+                      <AlertTriangle size={18} color={colors.warning} />
+                      <Text className="text-body-lg font-sans-extrabold text-ink">
+                        Couldn’t finish the summary
+                      </Text>
+                    </View>
+                    <Text className="mt-1 text-small leading-5 text-ink-soft">
+                      {summaryGenerationError ||
+                        "Try again while you’re connected. Your note is safe."}
+                    </Text>
+                    <View className="mt-3 flex-row gap-2">
+                      <Pressable
+                        onPress={() => {
+                          void (async () => {
+                            await enqueueGeneration(db, typedNoteId);
+                            setAiState("queued");
+                            void drainGenerationQueue({
+                              db,
+                              getAuthToken,
+                              onNoteChange: () => {
+                                void refreshAiState();
+                              },
+                            }).catch(() => {});
+                          })();
+                        }}
+                        accessibilityRole="button"
+                        accessibilityLabel="Try generating the summary again"
+                        className="min-h-10 flex-row items-center justify-center gap-2 rounded-btn bg-brand px-4 active:opacity-80"
+                      >
+                        <RefreshCw size={15} color={colors.ink.inverse} />
+                        <Text className="text-label font-sans-bold text-ink-inverse">
+                          Try again
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : aiActive ? (
+                  <View className="mt-4 flex-row items-center gap-2.5 rounded-card bg-surface p-card shadow-card">
+                    <Loader2 size={17} color={colors.brand.DEFAULT} />
+                    <Text className="text-body font-sans-bold text-ink">
+                      {aiState === "queued"
+                        ? "Waiting to be processed…"
+                        : aiState === "transcribing"
+                          ? "Transcribing your lecture…"
+                          : aiState === "summarising"
+                            ? "Writing your summary…"
+                            : "Making flashcards and a quiz…"}
+                    </Text>
+                  </View>
+                ) : summaryMarkdown ? (
+                  <View className="mt-4 rounded-card bg-surface p-card-lg shadow-card">
+                    <View className="flex-row items-center justify-between">
+                      <View className="flex-row items-center gap-2">
+                        <Sparkles size={18} color={colors.brand.DEFAULT} />
+                        <Text className="text-body-lg font-sans-extrabold text-ink">
+                          AI Study Summary
+                        </Text>
+                      </View>
+                      <Pressable
+                        onPress={() => setReportOpen(true)}
+                        hitSlop={8}
+                        accessibilityRole="button"
+                        accessibilityLabel="Report a mistake in the summary"
+                        className="h-9 w-9 items-center justify-center rounded-full active:opacity-80"
+                      >
+                        <Flag size={17} color={colors.ink.faint} />
+                      </Pressable>
+                    </View>
+                    <Markdown text={summaryMarkdown} className="mt-3" />
+                    <Text className="mt-2 text-caption text-ink-faint">
+                      AI study aid — verify important facts against your textbook.
+                    </Text>
+                  </View>
+                ) : null}
+
                 <View className="mt-4 flex-row gap-3">
                   <Pressable
                     onPress={() => persistNote(false)}
@@ -1722,6 +1879,66 @@ export default function Create() {
             </View>
           </View>
         ))}
+      </BottomSheet>
+
+      <BottomSheet
+        visible={reportOpen}
+        onClose={() => setReportOpen(false)}
+        title="Report a mistake"
+        subtitle="Tell us what the AI got wrong — it helps improve Sua."
+      >
+        {reported ? (
+          <View className="rounded-input bg-success-soft p-4">
+            <Text className="text-body font-sans-bold text-ink">Thanks — report sent.</Text>
+          </View>
+        ) : (
+          <View className="gap-3">
+            <TextInput
+              value={reportComment}
+              onChangeText={setReportComment}
+              placeholder="What was wrong?"
+              placeholderTextColor={colors.ink.faint}
+              multiline
+              textAlignVertical="top"
+              className="min-h-24 rounded-input border border-line bg-surface p-3 text-body leading-6 text-ink"
+              accessibilityLabel="Report comment"
+            />
+            <Pressable
+              onPress={() => {
+                if (!reportComment.trim() || reportSending) return;
+                setReportSending(true);
+                void (async () => {
+                  try {
+                    const token = await getAuthToken();
+                    if (!token) throw new Error("Not signed in");
+                    await jobsApi.feedback(token, {
+                      targetType: "summary",
+                      noteId: typedNoteId,
+                      comment: reportComment.trim(),
+                      sourceText: sourceTranscript ?? undefined,
+                    });
+                    setReported(true);
+                    setReportComment("");
+                  } catch {
+                    Alert.alert("Couldn’t send the report", "Try again when you’re connected.");
+                  } finally {
+                    setReportSending(false);
+                  }
+                })();
+              }}
+              disabled={!reportComment.trim() || reportSending}
+              accessibilityRole="button"
+              accessibilityLabel="Send report"
+              className={`min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand active:opacity-80 ${
+                !reportComment.trim() || reportSending ? "opacity-50" : ""
+              }`}
+            >
+              <Text className="text-label font-sans-bold text-ink-inverse">
+                {reportSending ? "Sending…" : "Send report"}
+              </Text>
+            </Pressable>
+          </View>
+        )}
       </BottomSheet>
     </SafeAreaView>
   );

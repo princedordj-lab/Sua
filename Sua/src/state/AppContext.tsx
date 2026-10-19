@@ -11,7 +11,7 @@ import {
 import { useAuth, useClerk, useUser } from "@clerk/expo";
 import NetInfo from "@react-native-community/netinfo";
 import { AppState } from "react-native";
-import { coursesApi, profileApi } from "../lib/api";
+import { coursesApi, profileApi, pushApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
 import {
   listLocalCourses,
@@ -24,6 +24,8 @@ import {
   type LocalCourse,
 } from "../lib/notes";
 import { flushUploads } from "../lib/uploads";
+import { drainGenerationQueue } from "../lib/generate";
+import { registerForPushAndReport } from "../lib/notifications";
 import type {
   Course,
   ServerCourse,
@@ -155,12 +157,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (state.isConnected) {
         requestRefresh();
         void flushUploads({ db, getAuthToken });
+        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
       }
     });
     const appState = AppState.addEventListener("change", (next) => {
       if (next === "active") {
         requestRefresh();
         void flushUploads({ db, getAuthToken });
+        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
       }
     });
     return () => {
@@ -168,6 +172,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
       appState.remove();
     };
   }, [db, getAuthToken, requestRefresh]);
+
+  // Register the Expo push token once per session; the backend notifies when
+  // backgrounded generation finishes. Needs a development build (Expo Go
+  // skips it silently).
+  const pushRegistered = useRef(false);
+  useEffect(() => {
+    if (!isSignedIn || userId || pushRegistered.current) return;
+    void (async () => {
+      const expoToken = await registerForPushAndReport();
+      if (!expoToken) return;
+      pushRegistered.current = true;
+      const token = await getToken();
+      if (!token) return;
+      pushApi.registerToken(token, expoToken).catch(() => {});
+    })();
+  }, [isSignedIn, userId, getToken]);
 
   useEffect(() => {
     let cancelled = false;
@@ -202,7 +222,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         // Notes first (a queued upload may reference a note still in the
         // push queue), then drain the upload queue — both self-gate offline.
-        if (!cancelled) void flushUploads({ db, getAuthToken });
+        if (!cancelled) {
+          void flushUploads({ db, getAuthToken });
+          void drainGenerationQueue({
+            db,
+            getAuthToken,
+            onNoteChange: () => requestRefresh(2_000),
+          }).catch(() => {});
+        }
       } catch {
         // Backend unreachable. Fall back to the cached course list so notes
         // can still be created and viewed offline; keep any state already

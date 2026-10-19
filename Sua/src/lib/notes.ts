@@ -5,6 +5,15 @@ import type { ServerNote, SyncResult } from "./types";
 
 export type NoteSyncState = "pending" | "synced" | "error";
 
+export type AiState =
+  | "none"
+  | "queued"
+  | "transcribing"
+  | "summarising"
+  | "making_cards"
+  | "ready"
+  | "failed";
+
 export type Note = {
   id: string;
   courseId: string;
@@ -15,6 +24,9 @@ export type Note = {
   sourceRef: string | null;
   // Local-only text extracted from an uploaded file (server keeps its copy on the asset).
   transcript: string | null;
+  // AI outputs on the note itself; server-owned after the pipeline writes them.
+  aiState: AiState;
+  summary: string | null;
   createdAt: string;
   updatedAt: string;
   syncState: NoteSyncState;
@@ -190,6 +202,49 @@ const MIGRATIONS: ((db: SQLiteDatabase) => Promise<void>)[] = [
       CREATE INDEX IF NOT EXISTS upload_queue_state_idx ON upload_queue(state, id);
     `);
   },
+  // 7 — AI pipeline outputs and the local generation request queue
+  async (db) => {
+    await db.execAsync(`
+      ALTER TABLE notes ADD COLUMN ai_state TEXT NOT NULL DEFAULT 'none';
+      ALTER TABLE notes ADD COLUMN summary TEXT;
+      CREATE TABLE IF NOT EXISTS flashcards (
+        id TEXT PRIMARY KEY NOT NULL,
+        note_id TEXT NOT NULL,
+        front TEXT NOT NULL,
+        back TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS flashcards_note_idx ON flashcards(note_id);
+      CREATE TABLE IF NOT EXISTS quizzes (
+        id TEXT PRIMARY KEY NOT NULL,
+        note_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS quiz_questions (
+        id TEXT PRIMARY KEY NOT NULL,
+        quiz_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL DEFAULT 0,
+        type TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        options TEXT,
+        answer TEXT NOT NULL,
+        explanation TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS quiz_questions_quiz_idx ON quiz_questions(quiz_id, ordinal);
+      CREATE TABLE IF NOT EXISTS generation_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        note_id TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'queued',
+        job_id TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS generation_queue_state_idx ON generation_queue(state, id);
+    `);
+  },
 ];
 
 export async function migrateDb(db: SQLiteDatabase) {
@@ -216,6 +271,8 @@ function rowToNote(row: Record<string, unknown>): Note {
     sourceType: row.source_type as Note["sourceType"],
     sourceRef: row.source_ref == null ? null : String(row.source_ref),
     transcript: row.transcript == null ? null : String(row.transcript),
+    aiState: (row.ai_state as AiState) ?? "none",
+    summary: row.summary == null ? null : String(row.summary),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     syncState: row.sync_state as NoteSyncState,
@@ -420,18 +477,21 @@ export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
     if (local.updatedAt > note.updatedAt) return;
   }
   await db.runAsync(
-    `INSERT INTO notes (id, course_id, title, body, source_type, transcript, created_at, updated_at, sync_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+    `INSERT INTO notes (id, course_id, title, body, source_type, transcript, ai_state, summary, created_at, updated_at, sync_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
      ON CONFLICT(id) DO UPDATE SET course_id = excluded.course_id,
        title = excluded.title, body = excluded.body, source_type = excluded.source_type,
+       ai_state = excluded.ai_state, summary = COALESCE(excluded.summary, notes.summary),
        updated_at = excluded.updated_at, sync_state = 'synced'`,
     note.id,
     note.courseId,
     note.title,
     note.body,
     note.sourceType,
-    // Server notes carry no transcript: keep whatever was extracted locally.
-    local?.transcript ?? null,
+    // The server's transcript (pipeline output) wins; keep locally extracted text otherwise.
+    note.transcript ?? local?.transcript ?? null,
+    note.aiState ?? "none",
+    note.summary ?? local?.summary ?? null,
     note.createdAt,
     note.updatedAt,
   );
@@ -713,6 +773,231 @@ export async function updateUploadState(
        attempts = attempts + ?, updated_at = ? WHERE id = ?`,
     patch.state,
     patch.assetId ?? null,
+    patch.error ?? null,
+    patch.bumpAttempts ? 1 : 0,
+    now,
+    id,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AI study sets (server-owned outputs cached locally) + generation queue
+// ---------------------------------------------------------------------------
+
+export type LocalFlashcard = {
+  id: string;
+  noteId: string;
+  front: string;
+  back: string;
+};
+
+export type LocalQuizQuestion = {
+  id: string;
+  quizId: string;
+  type: "mcq" | "true_false" | "short_answer";
+  prompt: string;
+  options: string[] | null;
+  answer: string;
+  explanation: string;
+  ordinal?: number;
+};
+
+// Server-generated study set replaces local flashcards/quizzes wholesale.
+export async function storeStudySet(
+  db: SQLiteDatabase,
+  noteId: string,
+  study: {
+    flashcards: { id: string; front: string; back: string }[];
+    quizzes: {
+      id: string;
+      title: string;
+      questions: LocalQuizQuestion[];
+    }[];
+  },
+) {
+  const now = new Date().toISOString();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync("DELETE FROM flashcards WHERE note_id = ?", noteId);
+    for (const card of study.flashcards) {
+      await db.runAsync(
+        "INSERT OR REPLACE INTO flashcards (id, note_id, front, back, created_at) VALUES (?, ?, ?, ?, ?)",
+        card.id,
+        noteId,
+        card.front,
+        card.back,
+        now,
+      );
+    }
+    for (const quiz of study.quizzes) {
+      await db.runAsync(
+        "DELETE FROM quiz_questions WHERE quiz_id = ?",
+        quiz.id,
+      );
+      await db.runAsync(
+        "INSERT OR REPLACE INTO quizzes (id, note_id, title, created_at) VALUES (?, ?, ?, ?)",
+        quiz.id,
+        noteId,
+        quiz.title,
+        now,
+      );
+      for (const question of quiz.questions) {
+        await db.runAsync(
+          "INSERT OR REPLACE INTO quiz_questions (id, quiz_id, ordinal, type, prompt, options, answer, explanation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          question.id,
+          quiz.id,
+          question.ordinal ?? 0,
+          question.type,
+          question.prompt,
+          question.options ? JSON.stringify(question.options) : null,
+          question.answer,
+          question.explanation ?? "",
+        );
+      }
+    }
+  });
+}
+
+export async function listFlashcards(db: SQLiteDatabase, noteId: string) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM flashcards WHERE note_id = ? ORDER BY created_at ASC",
+    noteId,
+  );
+  return rows.map(
+    (row): LocalFlashcard => ({
+      id: String(row.id),
+      noteId: String(row.note_id),
+      front: String(row.front),
+      back: String(row.back),
+    }),
+  );
+}
+
+export type LocalQuiz = {
+  id: string;
+  noteId: string;
+  title: string;
+  questions: LocalQuizQuestion[];
+};
+
+export async function listQuizzes(db: SQLiteDatabase, noteId: string) {
+  const quizRows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM quizzes WHERE note_id = ? ORDER BY created_at ASC",
+    noteId,
+  );
+  const quizzes: LocalQuiz[] = [];
+  for (const quiz of quizRows) {
+    const id = String(quiz.id);
+    const questions = (
+      await db.getAllAsync<Record<string, unknown>>(
+        "SELECT * FROM quiz_questions WHERE quiz_id = ? ORDER BY ordinal ASC",
+        id,
+      )
+    ).map(
+      (row): LocalQuizQuestion => ({
+        id: String(row.id),
+        quizId: String(row.quiz_id),
+        type: row.type as LocalQuizQuestion["type"],
+        prompt: String(row.prompt),
+        options: row.options ? (JSON.parse(String(row.options)) as string[]) : null,
+        answer: String(row.answer),
+        explanation: String(row.explanation ?? ""),
+      }),
+    );
+    quizzes.push({
+      id,
+      noteId: String(quiz.note_id),
+      title: String(quiz.title ?? ""),
+      questions,
+    });
+  }
+  return quizzes;
+}
+
+export async function countQuizzes(db: SQLiteDatabase, noteId: string) {
+  const row = await db.getFirstAsync<{ count: number }>(
+    "SELECT COUNT(*) as count FROM quizzes WHERE note_id = ?",
+    noteId,
+  );
+  return row?.count ?? 0;
+}
+
+export async function setNoteAiState(db: SQLiteDatabase, id: string, aiState: AiState) {
+  await db.runAsync("UPDATE notes SET ai_state = ? WHERE id = ?", aiState, id);
+}
+
+export async function setNoteSummary(db: SQLiteDatabase, id: string, summary: string) {
+  await db.runAsync("UPDATE notes SET summary = ? WHERE id = ?", summary, id);
+}
+
+// ---------------------------------------------------------------------------
+// Generation request queue (offline-first: requests queue until connectivity)
+// ---------------------------------------------------------------------------
+
+export type GenerationQueueItem = {
+  id: number;
+  noteId: string;
+  state: "queued" | "active" | "done" | "failed";
+  jobId: string | null;
+  attempts: number;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function rowToGeneration(row: Record<string, unknown>): GenerationQueueItem {
+  return {
+    id: Number(row.id),
+    noteId: String(row.note_id),
+    state: row.state as GenerationQueueItem["state"],
+    jobId: row.job_id == null ? null : String(row.job_id),
+    attempts: Number(row.attempts),
+    error: row.error == null ? null : String(row.error),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+// One live request per note; re-queuing a failed note replaces the row.
+export async function enqueueGeneration(db: SQLiteDatabase, noteId: string) {
+  const now = new Date().toISOString();
+  const existing = await db.getFirstAsync<{ id: number }>(
+    "SELECT id FROM generation_queue WHERE note_id = ? AND state IN ('queued', 'active')",
+    noteId,
+  );
+  if (existing) return existing.id;
+  await setNoteAiState(db, noteId, "queued");
+  const result = await db.runAsync(
+    "INSERT INTO generation_queue (note_id, state, attempts, created_at, updated_at) VALUES (?, 'queued', 0, ?, ?)",
+    noteId,
+    now,
+    now,
+  );
+  return Number(result.lastInsertRowId);
+}
+
+export async function listGenerationQueue(db: SQLiteDatabase) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM generation_queue WHERE state IN ('queued', 'active') ORDER BY id ASC",
+  );
+  return rows.map(rowToGeneration);
+}
+
+export async function updateGeneration(
+  db: SQLiteDatabase,
+  id: number,
+  patch: {
+    state: "queued" | "active" | "done" | "failed";
+    jobId?: string | null;
+    error?: string | null;
+    bumpAttempts?: boolean;
+  },
+) {
+  const now = new Date().toISOString();
+  await db.runAsync(
+    `UPDATE generation_queue SET state = ?, job_id = COALESCE(?, job_id), error = ?,
+       attempts = attempts + ?, updated_at = ? WHERE id = ?`,
+    patch.state,
+    patch.jobId ?? null,
     patch.error ?? null,
     patch.bumpAttempts ? 1 : 0,
     now,

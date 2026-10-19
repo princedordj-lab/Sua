@@ -8,6 +8,7 @@ import { coursesRouter } from "./routes/courses.js";
 import { clerkWebhookRouter } from "./routes/webhooks.js";
 import { notesRouter } from "./routes/notes.js";
 import { assetsRouter, uploadsRouter } from "./routes/uploads.js";
+import { jobsRouter } from "./routes/jobs.js";
 
 const app = express();
 
@@ -44,6 +45,7 @@ app.use("/api/courses", authenticate, coursesRouter);
 app.use("/api/notes", authenticate, notesRouter);
 app.use("/api/uploads", authenticate, uploadsRouter);
 app.use("/api/assets", authenticate, assetsRouter);
+app.use("/api/jobs", authenticate, jobsRouter);
 
 app.use((err, _req, res, _next) => {
   const status = err.status ?? 500;

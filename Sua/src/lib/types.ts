@@ -53,12 +53,24 @@ export type ServerProfileUpdate = {
   onboardingCompleted?: boolean;
 };
 
+export type AiState =
+  | "none"
+  | "queued"
+  | "transcribing"
+  | "summarising"
+  | "making_cards"
+  | "ready"
+  | "failed";
+
 export type ServerNote = {
   id: string;
   courseId: string;
   title: string;
   body: string;
   sourceType: "typed" | "audio" | "file";
+  aiState?: AiState;
+  transcript?: string | null;
+  summary?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -111,3 +123,45 @@ export type SignedUpload = ServerAsset & {
 };
 
 export type Note = import("./notes").Note;
+
+export type ServerJob = {
+  id: string;
+  noteId: string;
+  kind: string;
+  state: "queued" | "running" | "done" | "failed";
+  stage: AiState;
+  attempts: number;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+};
+
+export type ServerQuizQuestion = {
+  id: string;
+  quizId: string;
+  ordinal: number;
+  type: "mcq" | "true_false" | "short_answer";
+  prompt: string;
+  options: string[] | null;
+  answer: string;
+  explanation: string;
+};
+
+export type ServerQuiz = {
+  id: string;
+  noteId: string;
+  title: string;
+  questions: ServerQuizQuestion[];
+};
+
+// GET /api/notes/:noteId/study — everything generated for one note.
+export type ServerStudy = {
+  summaryMarkdown: string;
+  flashcards: { id: string; front: string; back: string }[];
+  quizzes: ServerQuiz[];
+};
+
+export type ServerFeedback = { id: string };
+
+export type PushTokenStatus = { ok: boolean };

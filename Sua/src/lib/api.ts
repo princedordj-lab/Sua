@@ -1,12 +1,16 @@
 import type {
   AssetKind,
   NoteSyncChange,
+  PushTokenStatus,
   ServerAsset,
+  ServerFeedback,
+  ServerJob,
   ServerNote,
   ServerCourse,
   ServerCourseCreate,
   ServerProfile,
   ServerProfileUpdate,
+  ServerStudy,
   SignedUpload,
   SyncResult,
 } from "./types";
@@ -109,4 +113,45 @@ export const assetsApi = {
     apiRequest<{ id: string; url: string }>(`/assets/${id}/url`, { token }),
   remove: (token: string, id: string) =>
     apiRequest<void>(`/assets/${id}`, { method: "DELETE", token }),
+};
+
+export const jobsApi = {
+  create: (token: string, noteId: string) =>
+    apiRequest<ServerJob | null>("/jobs", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ noteId }),
+    }),
+  get: (token: string, id: string) => apiRequest<ServerJob>(`/jobs/${id}`, { token }),
+  latestForNote: (token: string, noteId: string) =>
+    apiRequest<ServerJob | null>(`/jobs/note/${noteId}`, { token }),
+  feedback: (
+    token: string,
+    input: {
+      targetType: "summary" | "flashcard" | "quiz_question" | "transcript";
+      targetId?: string;
+      noteId?: string;
+      comment: string;
+      sourceText?: string;
+    },
+  ) =>
+    apiRequest<ServerFeedback>("/jobs/feedback", {
+      method: "POST",
+      token,
+      body: JSON.stringify(input),
+    }),
+};
+
+export const studyApi = {
+  forNote: (token: string, noteId: string) =>
+    apiRequest<ServerStudy>(`/notes/${noteId}/study`, { token }),
+};
+
+export const pushApi = {
+  registerToken: (token: string, expoPushToken: string) =>
+    apiRequest<PushTokenStatus>("/me/push-token", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ token: expoPushToken }),
+    }),
 };

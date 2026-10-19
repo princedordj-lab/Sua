@@ -12,6 +12,9 @@ function shapeNote(note) {
     title: note.title,
     body: note.body,
     sourceType: note.sourceType,
+    aiState: note.aiState,
+    transcript: note.transcript,
+    summary: note.summary,
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
   };
@@ -96,4 +99,51 @@ notesRouter.post("/sync", async (req, res) => {
     return { notes, results };
   });
   res.json({ notes: notes.map(shapeNote), results });
+});
+
+// Everything the pipeline generated for one note. The client caches this into
+// its local study tables after a generation job completes (or offline pull).
+notesRouter.get("/:noteId/study", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const study = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    const note = await tx.note.findFirst({
+      where: { id: req.params.noteId, userId: user.id },
+    });
+    if (!note) return null;
+    const flashcards = await tx.flashcard.findMany({
+      where: { noteId: note.id },
+      orderBy: { createdAt: "asc" },
+    });
+    const quizzes = await tx.quiz.findMany({
+      where: { noteId: note.id },
+      include: { questions: { orderBy: { ordinal: "asc" } } },
+      orderBy: { createdAt: "asc" },
+    });
+    return {
+      summaryMarkdown: note.summary ?? "",
+      flashcards: flashcards.map((card) => ({
+        id: card.id,
+        front: card.front,
+        back: card.back,
+      })),
+      quizzes: quizzes.map((quiz) => ({
+        id: quiz.id,
+        noteId: quiz.noteId,
+        title: quiz.title,
+        questions: quiz.questions.map((question) => ({
+          id: question.id,
+          quizId: question.quizId,
+          ordinal: question.ordinal,
+          type: question.type,
+          prompt: question.prompt,
+          options: question.options,
+          answer: question.answer,
+          explanation: question.explanation,
+        })),
+      })),
+    };
+  });
+  if (!study) return res.status(404).json({ error: "Note not found" });
+  res.json(study);
 });

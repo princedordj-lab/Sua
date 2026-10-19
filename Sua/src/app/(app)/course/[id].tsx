@@ -211,7 +211,16 @@ export default function CourseDetail() {
             >
               <Text className="font-extrabold text-[#19152C]">{note.title || "Untitled note"}</Text>
               <Text numberOfLines={2} className="mt-1 text-sm leading-5 text-[#8A8498]">{stripMarkdown(note.body || note.transcript || "") || "Empty note"}</Text>
-              <Text className="mt-2 text-xs text-[#17B890]">{note.syncState === "pending" ? "Waiting to sync" : "Synced"}</Text>
+              <View className="mt-2 flex-row items-center gap-2">
+                <Text className="text-xs text-[#17B890]">{note.syncState === "pending" ? "Waiting to sync" : "Synced"}</Text>
+                {note.aiState !== "none" && note.aiState !== "ready" && note.aiState !== "failed" ? (
+                  <Text className="text-xs font-semibold text-[#7C5CFC]">AI working…</Text>
+                ) : note.aiState === "ready" ? (
+                  <Text className="text-xs font-semibold text-[#7C5CFC]">AI ready</Text>
+                ) : note.aiState === "failed" ? (
+                  <Text className="text-xs font-semibold text-[#D64545]">AI failed</Text>
+                ) : null}
+              </View>
             </Pressable>
             <Pressable
               onPress={() => setMoveNote(note)}
