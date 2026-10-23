@@ -3,6 +3,7 @@ import { Stack } from "expo-router";
 import { ClerkProvider } from "@clerk/expo";
 import { tokenCache } from "../lib/tokenCache";
 import { AppProvider } from "../state/AppContext";
+import { AppearanceProvider } from "../state/appearance";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { SQLiteProvider, type SQLiteDatabase } from "expo-sqlite";
 import { migrateDb } from "../lib/notes";
@@ -22,7 +23,9 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <SQLiteProvider databaseName="sua.db" onInit={initializeDatabase}>
           <AppProvider>
-            <Stack screenOptions={{ headerShown: false }} />
+            <AppearanceProvider>
+              <Stack screenOptions={{ headerShown: false }} />
+            </AppearanceProvider>
           </AppProvider>
         </SQLiteProvider>
       </SafeAreaProvider>

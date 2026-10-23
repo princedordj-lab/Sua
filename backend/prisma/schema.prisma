@@ -33,6 +33,8 @@ model User {
   usages               Usage[]
   pushTokens           PushToken[]
   chatMessages         ChatMessage[]
+  reviewLogs           ReviewLog[]
+  quizAttempts         QuizAttempt[]
 
   @@map("users")
 }
@@ -68,12 +70,15 @@ model Note {
   transcript String?
   summary    String?
   aiState    String   @default("none")
+  // note = study note; reference = AI course reference sheet
+  noteKind   String   @default("note")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   jobs       Job[]
   flashcards Flashcard[]
   quizzes    Quiz[]
+  assets     Asset[]
 
   @@index([userId, updatedAt])
   @@index([courseId, updatedAt])
@@ -92,11 +97,15 @@ model Asset {
   resourceType String   @default("raw")
   status       String   @default("pending")
   noteId       String?
+  note         Note?    @relation(fields: [noteId], references: [id], onDelete: SetNull)
+  // none = plain upload; lecture_note / course_reference = auto AI conversion
+  task         String   @default("none")
   extractedText String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([userId])
+  @@index([noteId])
   @@map("assets")
 }
 
@@ -111,6 +120,8 @@ model Job {
   state      String    @default("queued")
   // queued | transcribing | summarising | making_cards — mirrored to note.aiState
   stage      String    @default("queued")
+  // JSON payload for kinds that carry extra inputs (quiz_marking answers).
+  payload    String?   @db.Text
   attempts   Int       @default(0)
   error      String?
   // Hash of the cleaned source; identical requests reuse existing outputs.
@@ -158,6 +169,7 @@ model Flashcard {
   reps         Int      @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  reviewLogs  ReviewLog[]
 
   @@index([userId, updatedAt])
   @@index([noteId])
@@ -173,6 +185,7 @@ model Quiz {
   note      Note?          @relation(fields: [noteId], references: [id], onDelete: SetNull)
   title     String
   questions QuizQuestion[]
+  attempts  QuizAttempt[]
   createdAt DateTime       @default(now())
   updatedAt DateTime       @updatedAt
 
@@ -197,6 +210,47 @@ model QuizQuestion {
 
   @@index([quizId])
   @@map("quiz_questions")
+}
+
+model ReviewLog {
+  id               String   @id
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cardId           String
+  card             Flashcard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  // again | hard | good | easy
+  grade            String
+  reviewedAt       DateTime
+  prevIntervalDays Float
+  newIntervalDays  Float
+  createdAt        DateTime @default(now())
+
+  @@index([userId, reviewedAt])
+  @@index([cardId])
+  @@map("review_logs")
+}
+
+model QuizAttempt {
+  id        String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  quizId    String
+  quiz      Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  startedAt DateTime
+  finishedAt DateTime
+  total     Int
+  correct   Int      @default(0)
+  // local | pending_marking | marked | marking_failed
+  state     String   @default("local")
+  // details Per-question results: [{questionId, answer, correct, comment}]
+  details   Json?
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, finishedAt])
+  @@index([quizId])
+  @@map("quiz_attempts")
 }
 
 model Feedback {

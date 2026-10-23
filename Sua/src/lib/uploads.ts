@@ -2,7 +2,14 @@ import NetInfo, { NetInfoStateType } from "@react-native-community/netinfo";
 import { File, UploadType } from "expo-file-system";
 import type { SQLiteDatabase } from "expo-sqlite";
 import { uploadsApi } from "./api";
-import { getSetting, listUploadQueue, setNoteTranscript, updateUploadState } from "./notes";
+import {
+  getSetting,
+  listUploadQueue,
+  resetUploadProgress,
+  setNoteTranscript,
+  updateUploadProgress,
+  updateUploadState,
+} from "./notes";
 import type { UploadQueueItem } from "./notes";
 
 // Cloudinary is strict about MIME types on raw/image uploads; map the
@@ -32,13 +39,17 @@ function mimeFor(item: UploadQueueItem) {
 
 let flushRunning = false;
 
+export type FlushProgress = (item: UploadQueueItem) => void;
+
 // Pushes queued files straight to storage (client → Cloudinary, then the API
 // confirms), honouring the Wi-Fi-only preference. Safe to call from anywhere:
 // concurrent calls no-op, and any failure leaves the row queued for the next
-// connectivity or foreground event.
+// connectivity or foreground event. `onProgress` gives a foreground screen
+// live updates; background flushes only persist progress to SQLite.
 export async function flushUploads(opts: {
   db: SQLiteDatabase;
   getAuthToken: () => Promise<string | null>;
+  onProgress?: FlushProgress;
 }): Promise<void> {
   if (flushRunning) return;
   flushRunning = true;
@@ -53,6 +64,7 @@ export async function flushUploads(opts: {
     for (const item of initial) {
       if (item.state === "uploading") {
         await updateUploadState(db, item.id, { state: "pending", error: null });
+        await resetUploadProgress(db, item.id);
       }
     }
 
@@ -60,7 +72,7 @@ export async function flushUploads(opts: {
       const state = await NetInfo.fetch();
       if (state.isConnected === false) return;
       if (wifiOnly && state.type !== NetInfoStateType.wifi) return;
-      await uploadOne(db, token, item);
+      await uploadOne(db, token, item, opts.onProgress);
     }
   } catch {
     // Connectivity or auth hiccup — rows stay queued for the next trigger.
@@ -69,31 +81,52 @@ export async function flushUploads(opts: {
   }
 }
 
-async function uploadOne(db: SQLiteDatabase, token: string, item: UploadQueueItem) {
+async function uploadOne(
+  db: SQLiteDatabase,
+  token: string,
+  item: UploadQueueItem,
+  onProgress?: FlushProgress,
+) {
   const file = new File(item.localPath);
   if (!file.exists) {
     await updateUploadState(db, item.id, {
       state: "failed",
       error: "File no longer exists on this device",
     });
+    onProgress?.(item);
     return;
   }
   await updateUploadState(db, item.id, { state: "uploading", error: null });
+  await resetUploadProgress(db, item.id);
   let release = () => {};
+  const announce = (next: UploadQueueItem) => {
+    onProgress?.(next);
+  };
   try {
+    // The auto-generate preference (Data & AI settings) applies at sign time:
+    // with generation set to manual the upload still carries the note kind
+    // locally, but the server must not auto-start an AI job for it.
+    const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
     const sign = await uploadsApi.sign(token, {
       kind: item.kind,
       format: item.format,
       noteId: item.noteId,
+      task: autoGenerate ? item.target ?? "none" : "none",
     });
     const size = file.size ?? 0;
     if (size > sign.maxBytes) {
-      await updateUploadState(db, item.id, {
+      const failed: UploadQueueItem = {
+        ...item,
         state: "failed",
+        progress: 0,
+        sentBytes: 0,
         error: `Over the ${Math.round(sign.maxBytes / (1024 * 1024))} MB upload limit`,
-      });
+      };
+      await updateUploadState(db, item.id, failed);
+      announce(failed);
       return;
     }
+    let lastPersisted = -1;
     const task = file.createUploadTask(sign.uploadUrl, {
       httpMethod: "POST",
       uploadType: UploadType.MULTIPART,
@@ -106,6 +139,18 @@ async function uploadOne(db: SQLiteDatabase, token: string, item: UploadQueueIte
         public_id: sign.publicId,
         type: sign.type,
       },
+      // Progress ticks stay std-light: persist every ~5% (or the final byte)
+      // so a killed app resumes an approximately-placed bar.
+      onProgress: ({ bytesSent, totalBytes }) => {
+        if (!totalBytes || !size) return;
+        const progress = Math.min(100, Math.round((bytesSent / size) * 100));
+        if (progress <= lastPersisted) return;
+        lastPersisted = progress;
+        if (progress % 5 === 0 || bytesSent >= size) {
+          void updateUploadProgress(db, item.id, { sentBytes: bytesSent, progress });
+          announce({ ...item, state: "uploading", sentBytes: bytesSent, progress });
+        }
+      },
     });
     release = () => task.release();
     const result = await task.uploadAsync();
@@ -113,11 +158,13 @@ async function uploadOne(db: SQLiteDatabase, token: string, item: UploadQueueIte
       throw new Error(`Storage upload failed (${result.status})`);
     }
     const asset = await uploadsApi.complete(token, sign.id, sign.publicId);
+    await updateUploadProgress(db, item.id, { sentBytes: size, progress: 100 });
     await updateUploadState(db, item.id, {
       state: "uploaded",
       assetId: asset.id,
       error: null,
     });
+    announce({ ...item, state: "uploaded", sentBytes: size, progress: 100 });
     // Documents come back with their extracted text (server-side parsing);
     // mirror it into the local note so it reads without another round trip.
     if (asset.extractedText && item.kind !== "audio") {
@@ -130,6 +177,8 @@ async function uploadOne(db: SQLiteDatabase, token: string, item: UploadQueueIte
       error: message,
       bumpAttempts: true,
     });
+    await resetUploadProgress(db, item.id);
+    announce({ ...item, state: "failed", progress: 0, sentBytes: 0, error: message });
   } finally {
     release();
   }

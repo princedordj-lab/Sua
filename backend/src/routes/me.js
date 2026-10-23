@@ -1,7 +1,9 @@
 import { Router } from "express";
+import { clerkClient } from "@clerk/express";
 import { withUser } from "../lib/db.js";
 import { ensureUser, toProfile } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
+import { deleteAccountData } from "../lib/account.js";
 
 export const meRouter = Router();
 
@@ -36,6 +38,21 @@ meRouter.post("/push-token", async (req, res) => {
   res.status(201).json({ ok: true });
 });
 
+// The device opts out of server pushes (notification settings); the Expo
+// token arrives in the body (or query for transport quirks).
+meRouter.delete("/push-token", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const token = String(req.body?.token ?? req.query?.token ?? "").trim();
+  if (!token) {
+    return res.status(400).json({ error: "A push token is required" });
+  }
+  await withUser(identity.clerkId, async (tx) => {
+    await ensureUser(tx, identity);
+    await tx.pushToken.deleteMany({ where: { token, user: { clerkId: identity.clerkId } } });
+  });
+  res.status(200).json({ ok: true });
+});
+
 const updatable = ["name", "university", "programme", "level"];
 
 meRouter.patch("/", async (req, res) => {
@@ -55,4 +72,21 @@ meRouter.patch("/", async (req, res) => {
     });
   });
   res.json(toProfile(profile));
+});
+
+// Delete the student's account and data: our rows + Cloudinary files first,
+// then the Clerk user itself (which revokes every session and triggers the
+// user.deleted webhook for an idempotent second pass). A Clerk API failure is
+// best-effort logged — the student's data is already gone, and the next sign
+// in would simply start a fresh profile.
+meRouter.post("/delete", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  await deleteAccountData(identity.clerkId);
+  try {
+    await clerkClient.users.deleteUser(identity.clerkId);
+    res.status(204).end();
+  } catch (err) {
+    console.error("Clerk user deletion failed", err);
+    res.status(204).end();
+  }
 });

@@ -2,7 +2,7 @@ import "./config/env.js";
 import { Worker } from "bullmq";
 import Ioredis from "ioredis";
 import { prisma } from "./config/prisma.js";
-import { processStudySet } from "./lib/pipeline.js";
+import { processJob } from "./lib/pipeline.js";
 import { STUDY_QUEUE } from "./lib/queue.js";
 
 if (!process.env.REDIS_URL) {
@@ -27,7 +27,7 @@ const worker = new Worker(
     const { jobId } = bullJob.data;
     const started = Date.now();
     try {
-      await processStudySet(jobId);
+      await processJob(jobId);
       console.log(`job ${jobId} completed in ${Date.now() - started}ms`);
     } catch (error) {
       console.warn(

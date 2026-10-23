@@ -2,6 +2,7 @@ import { Router } from "express";
 import { cloudinary, cloudinaryConfigured } from "../config/cloudinary.js";
 import { withUser } from "../lib/db.js";
 import { extractDocumentText } from "../lib/extract.js";
+import { maybeEnqueueGeneration } from "../lib/pipeline.js";
 import { ensureUser } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
 
@@ -14,6 +15,9 @@ const MAX_BYTES = {
   // 60-minute Pro recordings at the ~0.5 MB/min compression target.
   audio: 50 * 1024 * 1024,
 };
+
+// Where the student wants a document/photo converted once it lands.
+const TASKS = new Set(["lecture_note", "course_reference"]);
 
 // Upper bound for files we attempt to parse on upload-complete.
 const MAX_EXTRACT_BYTES = 25 * 1024 * 1024;
@@ -42,6 +46,7 @@ function shapeAsset(asset) {
     resourceType: asset.resourceType,
     status: asset.status,
     noteId: asset.noteId,
+    task: asset.task ?? "none",
     extractedText: asset.extractedText ?? null,
     createdAt: asset.createdAt,
   };
@@ -89,6 +94,16 @@ uploadsRouter.post("/sign", async (req, res) => {
   }
   const noteId =
     typeof req.body?.noteId === "string" && req.body.noteId ? req.body.noteId : null;
+  // Destination the student picked in the app; audio segments never carry one.
+  const task =
+    typeof req.body?.task === "string" && TASKS.has(req.body.task)
+      ? req.body.task
+      : "none";
+  if (task !== "none" && !(kind in { document: 1, image: 1 })) {
+    return res.status(400).json({
+      error: "AI conversion is only available for documents and images",
+    });
+  }
 
   const outcome = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
@@ -104,17 +119,18 @@ uploadsRouter.post("/sign", async (req, res) => {
         return { error: "noteId does not match one of your notes" };
       }
     }
-    const created = await tx.asset.create({
-      data: {
-        userId: user.id,
-        kind,
-        publicId: "pending",
-        resourceType: RESOURCE_TYPES[kind],
-        format: normalizedFormat,
-        status: "pending",
-        noteId,
-      },
-    });
+      const created = await tx.asset.create({
+        data: {
+          userId: user.id,
+          kind,
+          publicId: "pending",
+          resourceType: RESOURCE_TYPES[kind],
+          format: normalizedFormat,
+          status: "pending",
+          noteId,
+          task,
+        },
+      });
     // Restricted assets are only retrievable through signed delivery URLs.
     const publicId = `sua/${user.id}/${created.id}`;
     const asset = await tx.asset.update({
@@ -209,6 +225,19 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     } catch (error) {
       console.warn(
         `Extraction failed for asset ${asset.id}:`,
+        error?.message ?? error,
+      );
+    }
+  }
+  // A conversion-marked upload starts its AI job as soon as both halves are
+  // on the server (extraction may offset the note-sync race either way; the
+  // sync route triggers the other direction).
+  if (asset.noteId && asset.task && asset.task !== "none") {
+    try {
+      await maybeEnqueueGeneration(identity.clerkId, asset.noteId);
+    } catch (error) {
+      console.warn(
+        `Generation enqueue failed for asset ${asset.id}:`,
         error?.message ?? error,
       );
     }

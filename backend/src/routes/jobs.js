@@ -9,6 +9,8 @@ import { warnIfOverCaps } from "../lib/pipeline.js";
 export const jobsRouter = Router();
 
 const ACTIVE_STATES = ["queued", "running"];
+// Mirrors the pipeline's dispatcher (processJob) — anything else is a 400.
+const KINDS = new Set(["study_set", "course_reference"]);
 // What the client reads to drive status UI.
 function shapeJob(job) {
   return {
@@ -33,14 +35,19 @@ function requirePipeline(res) {
   return true;
 }
 
-// Enqueue a study-set generation for a note. Local-first clients call this
-// when connectivity returns or when the student taps Save and summarise.
-// Active (queued/running) jobs dedupe; failed jobs can be re-submitted.
+// Enqueue a generation for a note (study set or course reference). Local-first
+// clients call this when connectivity returns or when the student picks a
+// destination after saving. Active (queued/running) jobs dedupe; failed jobs
+// can be re-submitted.
 jobsRouter.post("/", async (req, res) => {
   if (!requirePipeline(res)) return;
   const identity = await identityFromRequest(req);
   const noteId = String(req.body?.noteId ?? "");
   if (!noteId) return res.status(400).json({ error: "noteId is required" });
+  const kind = req.body?.kind ?? "study_set";
+  if (!KINDS.has(kind)) {
+    return res.status(400).json({ error: `kind must be one of: ${[...KINDS].join(", ")}` });
+  }
 
   const outcome = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
@@ -52,9 +59,11 @@ jobsRouter.post("/", async (req, res) => {
     const active = await tx.job.findFirst({
       where: { noteId: note.id, state: { in: ACTIVE_STATES } },
     });
+    // A differently-destinationed request while one is running wins nothing:
+    // the active job still owns the note until it settles.
     if (active) return { existing: active };
     const created = await tx.job.create({
-      data: { userId: user.id, noteId: note.id },
+      data: { userId: user.id, noteId: note.id, kind },
     });
     return { job: created };
   });

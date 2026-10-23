@@ -2,12 +2,15 @@ import { type ReactNode } from "react";
 import { Image } from "expo-image";
 import {
   Pressable,
+  Switch,
   Text,
   TextInput,
   View,
   type TextInputProps,
 } from "react-native";
 import { ChevronRight, Plus } from "lucide-react-native";
+import { colors } from "../config/theme";
+import { usePalette } from "../state/appearance";
 
 
 export function Logo({
@@ -63,12 +66,13 @@ export function PrimaryButton({
 }
 
 export function Field({ label, ...props }: TextInputProps & { label: string }) {
+  const pv = usePalette();
   return (
     <View className="gap-2">
       <Text className="text-label font-semibold text-ink-soft">{label}</Text>
       <TextInput
         {...props}
-        placeholderTextColor="#8A978F"
+        placeholderTextColor={pv.ink.faint}
         className="h-14 rounded-input border border-line bg-surface px-4 text-body text-ink"
       />
     </View>
@@ -90,7 +94,7 @@ export function SectionHeader({
       {action && (
         <Pressable onPress={onAction} className="min-h-11 flex-row items-center gap-1 active:opacity-80">
           <Text className="font-bold text-brand">{action}</Text>
-          <ChevronRight size={16} color="#005B45" />
+          <ChevronRight size={16} color={colors.brand.DEFAULT} />
         </Pressable>
       )}
     </View>
@@ -109,8 +113,99 @@ export function EmptyAction({
       onPress={onPress}
       className="min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand px-5 active:opacity-80"
     >
-      <Plus size={18} color="#FFBE1A" />
+      <Plus size={18} color={colors.gold.DEFAULT} />
       <Text className="font-bold text-gold">{title}</Text>
     </Pressable>
+  );
+}
+
+// Navigation row for settings screens (icon + label + optional subtitle + chevron).
+export function SettingsRow({
+  Icon,
+  title,
+  subtitle,
+  onPress,
+  danger = false,
+  nextValue,
+}: {
+  Icon: React.ComponentType<{ size?: number; color?: string }>;
+  title: string;
+  subtitle?: string;
+  onPress: () => void;
+  danger?: boolean;
+  nextValue?: string;
+}) {
+  const pv = usePalette();
+  const textColor = danger ? colors.danger : pv.ink.DEFAULT;
+  const iconColor = danger ? colors.danger : colors.brand.DEFAULT;
+  return (
+    <Pressable
+      onPress={onPress}
+      className="min-h-12 flex-row items-center px-card active:opacity-80"
+      accessibilityRole="button"
+    >
+      <Icon size={19} color={iconColor} />
+      <View className="ml-3 flex-1">
+        <Text
+          className="font-sans-bold text-body"
+          style={{ color: textColor }}
+        >
+          {title}
+        </Text>
+        {subtitle ? (
+          <Text className="mt-0.5 text-small leading-5 text-ink-soft">
+            {subtitle}
+          </Text>
+        ) : null}
+      </View>
+      {nextValue ? (
+        <Text className="mr-1 text-small text-ink-soft">{nextValue}</Text>
+      ) : null}
+      <ChevronRight size={18} color={pv.ink.faint} />
+    </Pressable>
+  );
+}
+
+// Label + switch row (the switch carries the annotation, not a chevron).
+export function SwitchRow({
+  Icon,
+  title,
+  subtitle,
+  value,
+  onChange,
+  danger = false,
+}: {
+  Icon?: React.ComponentType<{ size?: number; color?: string }>;
+  title: string;
+  subtitle?: string;
+  value: boolean;
+  onChange: (next: boolean) => void;
+  danger?: boolean;
+}) {
+  const pv = usePalette();
+  return (
+    <View className="min-h-12 flex-row items-center px-card py-2">
+      {Icon ? <Icon size={19} color={danger ? colors.danger : colors.brand.DEFAULT} /> : null}
+      <View className="flex-1 px-3">
+        <Text
+          className="font-sans-bold text-body"
+          style={{ color: danger ? colors.danger : pv.ink.DEFAULT }}
+        >
+          {title}
+        </Text>
+        {subtitle ? (
+          <Text className="mt-0.5 text-small leading-5 text-ink-soft">
+            {subtitle}
+          </Text>
+        ) : null}
+      </View>
+      <Switch
+        value={value}
+        onValueChange={onChange}
+        trackColor={{ true: colors.brand.DEFAULT, false: pv.line }}
+        thumbColor={colors.surface}
+        accessibilityLabel={title}
+      />
+    </View>
   );
 }

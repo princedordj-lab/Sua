@@ -10,6 +10,7 @@ import { notesRouter } from "./routes/notes.js";
 import { assetsRouter, uploadsRouter } from "./routes/uploads.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { chatRouter } from "./routes/chat.js";
+import { studyRouter } from "./routes/study.js";
 
 const app = express();
 
@@ -47,6 +48,7 @@ app.use("/api/notes", authenticate, notesRouter);
 app.use("/api/uploads", authenticate, uploadsRouter);
 app.use("/api/assets", authenticate, assetsRouter);
 app.use("/api/jobs", authenticate, jobsRouter);
+app.use("/api/study", authenticate, studyRouter);
 // Voice clips post raw audio bodies; express.json ignores non-JSON content.
 app.use("/api/chat/speech", express.raw({ type: "audio/*", limit: "8mb" }));
 app.use("/api/chat", authenticate, chatRouter);

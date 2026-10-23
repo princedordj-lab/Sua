@@ -2,23 +2,25 @@ import { Tabs } from "expo-router";
 import { BookOpen, Home, Plus, Sparkles, UserRound } from "lucide-react-native";
 import { View } from "react-native";
 import { colors } from "../../../config/theme";
+import { usePalette } from "../../../state/appearance";
 
 export default function TabsLayout() {
+  const pv = usePalette();
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.brand.DEFAULT,
-        tabBarInactiveTintColor: colors.ink.faint,
+        tabBarInactiveTintColor: pv.ink.faint,
         tabBarLabelStyle: { fontSize: 12, fontFamily: "PlusJakartaSans_700Bold" },
         tabBarStyle: {
           height: 86,
           paddingTop: 9,
           paddingBottom: 14,
           borderTopWidth: 0,
-          backgroundColor: colors.surface,
+          backgroundColor: pv.surface,
           elevation: 12,
-          shadowColor: colors.ink.DEFAULT,
+          shadowColor: pv.ink.DEFAULT,
           shadowOffset: { width: 0, height: -4 },
           shadowOpacity: 0.08,
           shadowRadius: 18,

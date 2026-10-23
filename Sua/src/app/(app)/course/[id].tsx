@@ -5,6 +5,7 @@ import {
   Archive,
   ArrowLeft,
   ArrowRightLeft,
+  BookOpen,
   FileText,
   MoreHorizontal,
   Pencil,
@@ -49,6 +50,9 @@ export default function CourseDetail() {
         <Text>Course not found.</Text>
       </SafeAreaView>
     );
+
+  const references = notes.filter((note) => note.noteKind === "reference");
+  const studyNotes = notes.filter((note) => note.noteKind !== "reference");
 
   const openActions = () => {
     setName(course.name);
@@ -169,7 +173,7 @@ export default function CourseDetail() {
           <View className="flex-1 rounded-2xl bg-white p-4">
             <Text className="text-sm text-[#8A8498]">Notes</Text>
             <Text className="mt-1 text-2xl font-black text-[#19152C]">
-              {notes.length}
+              {studyNotes.length}
             </Text>
           </View>
           <View className="flex-1 rounded-2xl bg-white p-4">
@@ -192,19 +196,19 @@ export default function CourseDetail() {
             <Text className="font-bold text-gold">Add note</Text>
           </Pressable>
         </View>
-        {notes.length === 0 ? (
+        {studyNotes.length === 0 ? (
           <View className="mt-3 items-center rounded-3xl border border-dashed border-[#CFC7F8] bg-[#F8F6FF] px-6 py-10">
             <FileText size={28} color="#7C5CFC" />
             <Text className="mt-3 text-base font-extrabold text-[#19152C]">No notes yet</Text>
             <Text className="mt-2 text-center text-sm leading-5 text-[#8A8498]">Record, upload, or type your first note. It stays available offline.</Text>
           </View>
-        ) : notes.map((note) => (
+        ) : studyNotes.map((note) => (
           <View key={note.id} className="mt-3 flex-row items-stretch overflow-hidden rounded-2xl bg-white">
             <Pressable
               onPress={() =>
                 router.push({
-                  pathname: "/(app)/(tabs)/create",
-                  params: { mode: "typing", noteId: note.id, courseId: id },
+                  pathname: "/(app)/note/[id]",
+                  params: { id: note.id },
                 })
               }
               className="flex-1 p-4 active:opacity-80"
@@ -233,6 +237,38 @@ export default function CourseDetail() {
             </Pressable>
           </View>
         ))}
+
+        {references.length ? (
+          <View className="mt-8">
+            <Text className="text-lg font-extrabold text-[#19152C]">Reference</Text>
+            <Text className="mt-0.5 text-sm text-[#8A8498]">
+              Condensed key points from your uploaded slides and photos.
+            </Text>
+            {references.map((note) => (
+              <Pressable
+                key={note.id}
+                onPress={() =>
+                  router.push({
+                    pathname: "/(app)/note/[id]",
+                    params: { id: note.id },
+                  })
+                }
+                className="mt-3 rounded-2xl border border-[#E5E1F5] bg-[#F3F0FF] p-4 active:opacity-80"
+              >
+                <View className="flex-row items-center gap-2">
+                  <BookOpen size={16} color="#7C5CFC" />
+                  <Text className="font-extrabold text-[#19152C]">{note.title || "Untitled reference"}</Text>
+                </View>
+                <Text numberOfLines={3} className="mt-1 text-sm leading-5 text-[#8A8498]">
+                  {stripMarkdown(note.body || note.transcript || "") || "Waiting for the AI to summarise this file…"}
+                </Text>
+                {note.aiState !== "none" && note.aiState !== "ready" && note.aiState !== "failed" ? (
+                  <Text className="mt-2 text-xs font-semibold text-[#7C5CFC]">AI working…</Text>
+                ) : null}
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
       </ScrollView>
       <BottomSheet
         visible={showActions}

@@ -5,17 +5,20 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        cream: "#FFF8E8",
-        surface: "#FFFFFF",
+        // Neutral tokens are CSS variables so the dark theme can re-map them
+        // at the app root (see src/state/appearance.tsx). Light defaults are
+        // declared below so the app renders light before the preference loads.
+        cream: "rgb(var(--color-cream) / <alpha-value>)",
+        surface: "rgb(var(--color-surface) / <alpha-value>)",
         brand: { DEFAULT: "#005B45", light: "#087A5B" },
         gold: { DEFAULT: "#FFBE1A", soft: "#FFF1BF" },
         ink: {
-          DEFAULT: "#0E1F18",
-          soft: "#5C6B63",
-          faint: "#8A978F",
+          DEFAULT: "rgb(var(--color-ink) / <alpha-value>)",
+          soft: "rgb(var(--color-ink-soft) / <alpha-value>)",
+          faint: "rgb(var(--color-ink-faint) / <alpha-value>)",
           inverse: "#FFFFFF",
         },
-        line: "#E8E0C9",
+        line: "rgb(var(--color-line) / <alpha-value>)",
         success: "#1E9E6A",
         danger: "#D64545",
         warning: "#E8870E",
@@ -88,5 +91,19 @@ module.exports = {
       },
     },
   },
-  plugins: [],
+  plugins: [
+    // Light defaults so the first paint before the appearance preference
+    // loads is the shipped light theme.
+    ({ addBase }) =>
+      addBase({
+        ":root": {
+          "--color-cream": "255 248 232",
+          "--color-surface": "255 255 255",
+          "--color-ink": "14 31 24",
+          "--color-ink-soft": "92 107 99",
+          "--color-ink-faint": "138 151 143",
+          "--color-line": "232 224 201",
+        },
+      }),
+  ],
 };

@@ -1,18 +1,23 @@
 import type {
   AssetKind,
+  GenerationKind,
   NoteSyncChange,
   PushTokenStatus,
   ServerAsset,
+  ServerCard,
   ServerFeedback,
+  ServerAttempt,
   ServerJob,
   ServerNote,
   ServerCourse,
   ServerCourseCreate,
   ServerProfile,
   ServerProfileUpdate,
+  ServerReviewSyncResponse,
   ServerStudy,
   SignedUpload,
   SyncResult,
+  UploadTask,
 } from "./types";
 import { Platform } from "react-native";
 
@@ -80,6 +85,14 @@ export const profileApi = {
       token,
       body: JSON.stringify(changes),
     }),
+  deletePushToken: (token: string, expoToken: string) =>
+    apiRequest<void>("/me/push-token", {
+      method: "DELETE",
+      token,
+      body: JSON.stringify({ token: expoToken }),
+    }),
+  deleteAccount: (token: string) =>
+    apiRequest<void>("/me/delete", { method: "POST", token }),
 };
 
 export const notesApi = {
@@ -94,7 +107,7 @@ export const notesApi = {
 };
 
 export const uploadsApi = {
-  sign: (token: string, input: { kind: AssetKind; format: string; noteId?: string }) =>
+  sign: (token: string, input: { kind: AssetKind; format: string; noteId?: string; task?: UploadTask | "none" }) =>
     apiRequest<SignedUpload>("/uploads/sign", {
       method: "POST",
       token,
@@ -116,11 +129,11 @@ export const assetsApi = {
 };
 
 export const jobsApi = {
-  create: (token: string, noteId: string) =>
+  create: (token: string, noteId: string, kind?: GenerationKind) =>
     apiRequest<ServerJob | null>("/jobs", {
       method: "POST",
       token,
-      body: JSON.stringify({ noteId }),
+      body: JSON.stringify({ noteId, kind }),
     }),
   get: (token: string, id: string) => apiRequest<ServerJob>(`/jobs/${id}`, { token }),
   latestForNote: (token: string, noteId: string) =>
@@ -145,6 +158,50 @@ export const jobsApi = {
 export const studyApi = {
   forNote: (token: string, noteId: string) =>
     apiRequest<ServerStudy>(`/notes/${noteId}/study`, { token }),
+  postReviews: (token: string, logs: { id: string; cardId: string; grade: string; reviewedAt: string; prevIntervalDays: number; newIntervalDays: number }[]) =>
+    apiRequest<ServerReviewSyncResponse>("/study/sync/reviews", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ logs }),
+    }),
+  postAttempts: (token: string, attempts: unknown[]) =>
+    apiRequest<{ ok: boolean }>("/study/sync/quiz-attempts", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ attempts }),
+    }),
+  submitAttempt: (
+    token: string,
+    input: {
+      id: string;
+      quizId: string;
+      total: number;
+      startedAt: string;
+      finishedAt: string;
+      details: { questionId: string; answer?: string; verdict?: boolean | null }[];
+    },
+  ) =>
+    apiRequest<{ attempt: ServerAttempt; job: string | null }>("/study/attempts", {
+      method: "POST",
+      token,
+      body: JSON.stringify(input),
+    }),
+  getAttempt: (token: string, id: string) =>
+    apiRequest<ServerAttempt>(`/study/attempts/${id}`, { token }),
+  createCard: (token: string, noteId: string, input: { id: string; front: string; back: string }) =>
+    apiRequest<ServerCard>(`/study/notes/${noteId}/cards`, {
+      method: "POST",
+      token,
+      body: JSON.stringify(input),
+    }),
+  updateCard: (token: string, cardId: string, input: { front: string; back: string }) =>
+    apiRequest<ServerCard>(`/study/cards/${cardId}`, {
+      method: "PATCH",
+      token,
+      body: JSON.stringify(input),
+    }),
+  deleteCard: (token: string, cardId: string) =>
+    apiRequest<{ ok: boolean }>(`/study/cards/${cardId}`, { method: "DELETE", token }),
 };
 
 export const pushApi = {

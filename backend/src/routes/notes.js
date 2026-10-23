@@ -2,8 +2,11 @@ import { Router } from "express";
 import { withUser } from "../lib/db.js";
 import { ensureUser } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
+import { maybeEnqueueGeneration } from "../lib/pipeline.js";
 
 export const notesRouter = Router();
+
+const NOTE_KINDS = new Set(["note", "reference"]);
 
 function shapeNote(note) {
   return {
@@ -15,6 +18,7 @@ function shapeNote(note) {
     aiState: note.aiState,
     transcript: note.transcript,
     summary: note.summary,
+    noteKind: note.noteKind ?? "note",
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
   };
@@ -86,6 +90,10 @@ notesRouter.post("/sync", async (req, res) => {
         title: change.title,
         body: change.body,
         sourceType: change.sourceType || "typed",
+        // A reference stays a reference across edits; new notes default plain.
+        noteKind: NOTE_KINDS.has(change.noteKind)
+          ? change.noteKind
+          : existing?.noteKind ?? "note",
         ...(parsedUpdatedAt ? { updatedAt: parsedUpdatedAt } : {}),
       };
       const note = existing
@@ -99,6 +107,19 @@ notesRouter.post("/sync", async (req, res) => {
     return { notes, results };
   });
   res.json({ notes: notes.map(shapeNote), results });
+
+  // A pushed note may be the missing half of a conversion-marked upload that
+  // landed first (the /complete route covers the reverse order). Idempotent.
+  for (const note of notes) {
+    try {
+      await maybeEnqueueGeneration(identity.clerkId, note.id);
+    } catch (error) {
+      console.warn(
+        `Generation enqueue failed for note ${note.id}:`,
+        error?.message ?? error,
+      );
+    }
+  }
 });
 
 // Everything the pipeline generated for one note. The client caches this into
@@ -126,6 +147,10 @@ notesRouter.get("/:noteId/study", async (req, res) => {
         id: card.id,
         front: card.front,
         back: card.back,
+        dueAt: card.dueAt,
+        ease: card.ease,
+        intervalDays: card.intervalDays,
+        reps: card.reps,
       })),
       quizzes: quizzes.map((quiz) => ({
         id: quiz.id,

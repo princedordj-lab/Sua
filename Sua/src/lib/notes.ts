@@ -1,7 +1,11 @@
 import * as Crypto from "expo-crypto";
+import { File } from "expo-file-system";
 import type { SQLiteDatabase } from "expo-sqlite";
 import { notesApi } from "./api";
-import type { ServerNote, SyncResult } from "./types";
+import { nextDueMs, nextState, type CardGrade } from "./srs";
+import type { GenerationKind, NoteKind, ServerNote, SyncResult } from "./types";
+
+export type { GenerationKind, NoteKind };
 
 export type NoteSyncState = "pending" | "synced" | "error";
 
@@ -11,6 +15,7 @@ export type AiState =
   | "transcribing"
   | "summarising"
   | "making_cards"
+  | "writing"
   | "ready"
   | "failed";
 
@@ -27,6 +32,7 @@ export type Note = {
   // AI outputs on the note itself; server-owned after the pipeline writes them.
   aiState: AiState;
   summary: string | null;
+  noteKind: NoteKind;
   createdAt: string;
   updatedAt: string;
   syncState: NoteSyncState;
@@ -74,6 +80,7 @@ export type RecordingSegment = {
 
 export type UploadKind = "audio" | "document" | "image";
 export type UploadState = "pending" | "uploading" | "uploaded" | "failed";
+export type UploadTarget = "lecture_note" | "course_reference";
 
 export type UploadQueueItem = {
   id: number;
@@ -85,6 +92,11 @@ export type UploadQueueItem = {
   state: UploadState;
   attempts: number;
   assetId: string | null;
+  // lecture_note | course_reference for documents/photos; null = plain upload.
+  target: UploadTarget | null;
+  // Live progress (0-100); persisted so a killed app still shows where it was.
+  sentBytes: number;
+  progress: number;
   error: string | null;
   createdAt: string;
   updatedAt: string;
@@ -260,6 +272,95 @@ const MIGRATIONS: ((db: SQLiteDatabase) => Promise<void>)[] = [
         ON chat_messages(course_id, created_at);
     `);
   },
+  // 9 — note kind (study note vs AI course reference), upload destination and
+  // live upload progress
+  async (db) => {
+    const noteColumns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(notes)");
+    if (!noteColumns.some((column) => column.name === "note_kind")) {
+      await db.execAsync(
+        "ALTER TABLE notes ADD COLUMN note_kind TEXT NOT NULL DEFAULT 'note'",
+      );
+    }
+    const queueColumns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(upload_queue)");
+    if (!queueColumns.some((column) => column.name === "target")) {
+      await db.execAsync("ALTER TABLE upload_queue ADD COLUMN target TEXT");
+    }
+    if (!queueColumns.some((column) => column.name === "sent_bytes")) {
+      await db.execAsync(
+        "ALTER TABLE upload_queue ADD COLUMN sent_bytes INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+    if (!queueColumns.some((column) => column.name === "progress")) {
+      await db.execAsync(
+        "ALTER TABLE upload_queue ADD COLUMN progress INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+  },
+  // 10 — generation destination (full study set vs condensed course reference)
+  async (db) => {
+    const generationColumns = await db.getAllAsync<{ name: string }>(
+      "PRAGMA table_info(generation_queue)",
+    );
+    if (!generationColumns.some((column) => column.name === "kind")) {
+      await db.execAsync(
+        "ALTER TABLE generation_queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'study_set'",
+      );
+    }
+  },
+  // 11 — personal study progress: card scheduling, review logs, quiz attempts
+  // and the manual card mutation queue (all client-owned, synced when online).
+  async (db) => {
+    await db.execAsync(`
+      ALTER TABLE flashcards ADD COLUMN due_at TEXT;
+      ALTER TABLE flashcards ADD COLUMN interval_days REAL NOT NULL DEFAULT 0;
+      ALTER TABLE flashcards ADD COLUMN ease REAL NOT NULL DEFAULT 2.5;
+      ALTER TABLE flashcards ADD COLUMN reps INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE flashcards ADD COLUMN lapses INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX IF NOT EXISTS flashcards_due_idx ON flashcards(due_at);
+
+      CREATE TABLE IF NOT EXISTS reviews (
+        id TEXT PRIMARY KEY NOT NULL,
+        card_id TEXT NOT NULL,
+        note_id TEXT NOT NULL,
+        grade TEXT NOT NULL,
+        reviewed_at TEXT NOT NULL,
+        prev_interval_days REAL NOT NULL,
+        new_interval_days REAL NOT NULL,
+        synced INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS reviews_card_idx ON reviews(card_id, reviewed_at);
+
+      CREATE TABLE IF NOT EXISTS quiz_attempts (
+        id TEXT PRIMARY KEY NOT NULL,
+        quiz_id TEXT NOT NULL,
+        note_id TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT NOT NULL,
+        total INTEGER NOT NULL,
+        correct INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'marked',
+        details TEXT,
+        error TEXT,
+        synced INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS quiz_attempts_quiz_idx ON quiz_attempts(quiz_id);
+
+      CREATE TABLE IF NOT EXISTS card_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        op TEXT NOT NULL,
+        op_id TEXT NOT NULL,
+        card_id TEXT NOT NULL,
+        note_id TEXT,
+        payload TEXT,
+        state TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS card_queue_state_idx ON card_queue(state, id);
+    `);
+  },
 ];
 
 export async function migrateDb(db: SQLiteDatabase) {
@@ -288,6 +389,7 @@ function rowToNote(row: Record<string, unknown>): Note {
     transcript: row.transcript == null ? null : String(row.transcript),
     aiState: (row.ai_state as AiState) ?? "none",
     summary: row.summary == null ? null : String(row.summary),
+    noteKind: (row.note_kind as NoteKind) ?? "note",
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     syncState: row.sync_state as NoteSyncState,
@@ -314,15 +416,17 @@ export async function saveNote(
   db: SQLiteDatabase,
   input: Pick<Note, "id" | "courseId" | "title" | "body" | "sourceType"> & {
     sourceRef?: string | null;
+    noteKind?: NoteKind;
   },
 ) {
   const now = new Date().toISOString();
   await db.runAsync(
-    `INSERT INTO notes (id, course_id, title, body, source_type, source_ref, created_at, updated_at, sync_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    `INSERT INTO notes (id, course_id, title, body, source_type, source_ref, note_kind, created_at, updated_at, sync_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
      ON CONFLICT(id) DO UPDATE SET course_id = excluded.course_id,
        title = excluded.title, body = excluded.body,
        source_ref = COALESCE(excluded.source_ref, notes.source_ref),
+       note_kind = COALESCE(?, notes.note_kind),
        updated_at = excluded.updated_at, sync_state = 'pending'`,
     input.id,
     input.courseId,
@@ -330,8 +434,10 @@ export async function saveNote(
     input.body,
     input.sourceType,
     input.sourceRef ?? null,
+    input.noteKind ?? "note",
     now,
     now,
+    input.noteKind ?? null,
   );
   await db.runAsync(
     "INSERT INTO sync_queue (entity, entity_id, operation, payload, created_at) VALUES ('note', ?, 'upsert', ?, ?)",
@@ -343,6 +449,7 @@ export async function saveNote(
       title: input.title,
       body: input.body,
       sourceType: input.sourceType,
+      noteKind: input.noteKind,
       updatedAt: now,
     }),
     now,
@@ -492,11 +599,12 @@ export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
     if (local.updatedAt > note.updatedAt) return;
   }
   await db.runAsync(
-    `INSERT INTO notes (id, course_id, title, body, source_type, transcript, ai_state, summary, created_at, updated_at, sync_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+    `INSERT INTO notes (id, course_id, title, body, source_type, transcript, ai_state, summary, note_kind, created_at, updated_at, sync_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
      ON CONFLICT(id) DO UPDATE SET course_id = excluded.course_id,
        title = excluded.title, body = excluded.body, source_type = excluded.source_type,
        ai_state = excluded.ai_state, summary = COALESCE(excluded.summary, notes.summary),
+       note_kind = excluded.note_kind,
        updated_at = excluded.updated_at, sync_state = 'synced'`,
     note.id,
     note.courseId,
@@ -507,6 +615,7 @@ export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
     note.transcript ?? local?.transcript ?? null,
     note.aiState ?? "none",
     note.summary ?? local?.summary ?? null,
+    note.noteKind ?? local?.noteKind ?? "note",
     note.createdAt,
     note.updatedAt,
   );
@@ -737,6 +846,9 @@ function rowToUpload(row: Record<string, unknown>): UploadQueueItem {
     state: row.state as UploadState,
     attempts: Number(row.attempts),
     assetId: row.asset_id == null ? null : String(row.asset_id),
+    target: row.target == null ? null : (String(row.target) as UploadTarget),
+    sentBytes: Number(row.sent_bytes ?? 0),
+    progress: Number(row.progress ?? 0),
     error: row.error == null ? null : String(row.error),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -745,7 +857,14 @@ function rowToUpload(row: Record<string, unknown>): UploadQueueItem {
 
 export async function enqueueUpload(
   db: SQLiteDatabase,
-  input: { noteId: string; kind: UploadKind; localPath: string; format: string; bytes: number },
+  input: {
+    noteId: string;
+    kind: UploadKind;
+    localPath: string;
+    format: string;
+    bytes: number;
+    target?: UploadTarget | null;
+  },
 ) {
   const now = new Date().toISOString();
   // Same file queued twice (e.g. retry racing a save) stays a single row.
@@ -756,12 +875,13 @@ export async function enqueueUpload(
   );
   if (existing) return existing.id;
   const result = await db.runAsync(
-    "INSERT INTO upload_queue (note_id, kind, local_path, format, bytes, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)",
+    "INSERT INTO upload_queue (note_id, kind, local_path, format, bytes, target, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)",
     input.noteId,
     input.kind,
     input.localPath,
     input.format,
     input.bytes,
+    input.target ?? null,
     now,
     now,
   );
@@ -777,22 +897,85 @@ export async function listUploadQueue(db: SQLiteDatabase) {
   return rows.map(rowToUpload);
 }
 
+// Everything ever queued, newest first — feeds the Uploads screen history.
+export async function listUploadHistory(db: SQLiteDatabase) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM upload_queue ORDER BY updated_at DESC, id DESC",
+  );
+  return rows.map(rowToUpload);
+}
+
+// Progress-only write; kept separate from updateUploadState and not touching
+// updated_at so frequent progress ticks do not reshuffle history ordering.
+export async function updateUploadProgress(
+  db: SQLiteDatabase,
+  id: number,
+  { sentBytes, progress }: { sentBytes: number; progress: number },
+) {
+  await db.runAsync(
+    "UPDATE upload_queue SET sent_bytes = ?, progress = ? WHERE id = ?",
+    sentBytes,
+    progress,
+    id,
+  );
+}
+
 export async function updateUploadState(
   db: SQLiteDatabase,
   id: number,
-  patch: { state: UploadState; assetId?: string | null; error?: string | null; bumpAttempts?: boolean },
+  patch: {
+    state?: UploadState;
+    assetId?: string | null;
+    error?: string | null;
+    bumpAttempts?: boolean;
+  },
 ) {
   const now = new Date().toISOString();
+  const updates: string[] = [];
+  const values: (string | number | null)[] = [];
+  if (patch.state) {
+    updates.push("state = ?");
+    values.push(patch.state);
+  }
+  if (patch.assetId !== undefined) {
+    updates.push("asset_id = ?"); // plain set: an explicit null clears the pointer
+    values.push(patch.assetId);
+  }
+  updates.push("error = ?");
+  values.push(patch.error ?? null);
+  updates.push("attempts = attempts + ?");
+  values.push(patch.bumpAttempts ? 1 : 0);
+  updates.push("updated_at = ?");
+  values.push(now);
+  values.push(id);
   await db.runAsync(
-    `UPDATE upload_queue SET state = ?, asset_id = COALESCE(?, asset_id), error = ?,
-       attempts = attempts + ?, updated_at = ? WHERE id = ?`,
-    patch.state,
-    patch.assetId ?? null,
-    patch.error ?? null,
-    patch.bumpAttempts ? 1 : 0,
-    now,
+    `UPDATE upload_queue SET ${updates.join(", ")} WHERE id = ?`,
+    ...values,
+  );
+}
+
+// Progress resets whenever a row leaves its in-flight state, so a resumed
+// retry always starts its bar from zero.
+export async function resetUploadProgress(db: SQLiteDatabase, id: number) {
+  await db.runAsync(
+    "UPDATE upload_queue SET sent_bytes = 0, progress = 0 WHERE id = ?",
     id,
   );
+}
+
+// True while any of a note's queued files are still unsettled. Recording
+// generations wait for this: the job would otherwise transcribe an incomplete
+// take. Files that keep failing (3+ attempts) stop blocking so the queue can
+// surface an honest "no usable source" error instead of hanging forever.
+export async function countPendingUploads(db: SQLiteDatabase, noteId: string) {
+  const row = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(*) as count FROM upload_queue
+     WHERE note_id = ? AND (
+       state IN ('pending', 'uploading') OR (state = 'failed' AND attempts < 3)
+     )`,
+    noteId,
+  );
+  return row?.count ?? 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -804,6 +987,11 @@ export type LocalFlashcard = {
   noteId: string;
   front: string;
   back: string;
+  dueAt: string | null;
+  intervalDays: number;
+  ease: number;
+  reps: number;
+  lapses: number;
 };
 
 export type LocalQuizQuestion = {
@@ -818,11 +1006,21 @@ export type LocalQuizQuestion = {
 };
 
 // Server-generated study set replaces local flashcards/quizzes wholesale.
+// Scheduling columns are personal: a redeployed card keeps the student's
+// local scheduling if their reviews for it have not synced yet.
 export async function storeStudySet(
   db: SQLiteDatabase,
   noteId: string,
   study: {
-    flashcards: { id: string; front: string; back: string }[];
+    flashcards: {
+      id: string;
+      front: string;
+      back: string;
+      dueAt?: string;
+      ease?: number;
+      intervalDays?: number;
+      reps?: number;
+    }[];
     quizzes: {
       id: string;
       title: string;
@@ -832,14 +1030,44 @@ export async function storeStudySet(
 ) {
   const now = new Date().toISOString();
   await db.withTransactionAsync(async () => {
+    const keepScheduling = new Set(
+      (
+        await db.getAllAsync<{ card_id: string }>(
+          "SELECT DISTINCT card_id FROM reviews WHERE note_id = ? AND synced = 0",
+          noteId,
+        )
+      ).map((row) => row.card_id),
+    );
+    const previous = new Map(
+      (
+        await db.getAllAsync<Record<string, unknown>>(
+          "SELECT * FROM flashcards WHERE note_id = ?",
+          noteId,
+        )
+      ).map((row) => [String(row.id), row]),
+    );
     await db.runAsync("DELETE FROM flashcards WHERE note_id = ?", noteId);
     for (const card of study.flashcards) {
+      const prior = previous.get(card.id);
+      const preserve = keepScheduling.has(card.id) && prior != null;
+      const dueAt =
+        preserve && prior
+          ? String(prior.due_at ?? card.dueAt ?? null)
+          : (card.dueAt ?? null);
+      const ease = preserve && prior ? Number(prior.ease ?? 2.5) : (card.ease ?? 2.5);
+      const intervalDays = preserve && prior ? Number(prior.interval_days ?? 0) : (card.intervalDays ?? 0);
+      const reps = preserve && prior ? Number(prior.reps ?? 0) : (card.reps ?? 0);
       await db.runAsync(
-        "INSERT OR REPLACE INTO flashcards (id, note_id, front, back, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO flashcards (id, note_id, front, back, due_at, interval_days, ease, reps, lapses, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         card.id,
         noteId,
         card.front,
         card.back,
+        dueAt,
+        intervalDays,
+        ease,
+        reps,
+        prior ? Number(prior.lapses ?? 0) : 0,
         now,
       );
     }
@@ -877,14 +1105,21 @@ export async function listFlashcards(db: SQLiteDatabase, noteId: string) {
     "SELECT * FROM flashcards WHERE note_id = ? ORDER BY created_at ASC",
     noteId,
   );
-  return rows.map(
-    (row): LocalFlashcard => ({
-      id: String(row.id),
-      noteId: String(row.note_id),
-      front: String(row.front),
-      back: String(row.back),
-    }),
-  );
+  return rows.map(rowToFlashcard);
+}
+
+function rowToFlashcard(row: Record<string, unknown>): LocalFlashcard {
+  return {
+    id: String(row.id),
+    noteId: String(row.note_id),
+    front: String(row.front),
+    back: String(row.back),
+    dueAt: row.due_at == null ? null : String(row.due_at),
+    intervalDays: Number(row.interval_days ?? 0),
+    ease: Number(row.ease ?? 2.5),
+    reps: Number(row.reps ?? 0),
+    lapses: Number(row.lapses ?? 0),
+  };
 }
 
 export type LocalQuiz = {
@@ -952,6 +1187,8 @@ export type GenerationQueueItem = {
   id: number;
   noteId: string;
   state: "queued" | "active" | "done" | "failed";
+  // What the server job should produce (passed through on submit).
+  kind: GenerationKind;
   jobId: string | null;
   attempts: number;
   error: string | null;
@@ -964,6 +1201,7 @@ function rowToGeneration(row: Record<string, unknown>): GenerationQueueItem {
     id: Number(row.id),
     noteId: String(row.note_id),
     state: row.state as GenerationQueueItem["state"],
+    kind: (row.kind as GenerationKind) ?? "study_set",
     jobId: row.job_id == null ? null : String(row.job_id),
     attempts: Number(row.attempts),
     error: row.error == null ? null : String(row.error),
@@ -973,7 +1211,11 @@ function rowToGeneration(row: Record<string, unknown>): GenerationQueueItem {
 }
 
 // One live request per note; re-queuing a failed note replaces the row.
-export async function enqueueGeneration(db: SQLiteDatabase, noteId: string) {
+export async function enqueueGeneration(
+  db: SQLiteDatabase,
+  noteId: string,
+  kind: GenerationKind = "study_set",
+) {
   const now = new Date().toISOString();
   const existing = await db.getFirstAsync<{ id: number }>(
     "SELECT id FROM generation_queue WHERE note_id = ? AND state IN ('queued', 'active')",
@@ -982,8 +1224,9 @@ export async function enqueueGeneration(db: SQLiteDatabase, noteId: string) {
   if (existing) return existing.id;
   await setNoteAiState(db, noteId, "queued");
   const result = await db.runAsync(
-    "INSERT INTO generation_queue (note_id, state, attempts, created_at, updated_at) VALUES (?, 'queued', 0, ?, ?)",
+    "INSERT INTO generation_queue (note_id, kind, state, attempts, created_at, updated_at) VALUES (?, ?, 'queued', 0, ?, ?)",
     noteId,
+    kind,
     now,
     now,
   );
@@ -1103,3 +1346,520 @@ export async function upsertChatMessage(
 
 // Last-used course so the chat screen opens where the student left off.
 export const ASK_SUA_COARSE_KEY = "ask_sua_course_id";
+
+// ---------------------------------------------------------------------------
+// Study progress: SM-2-lite flashcard scheduling, review logs, quiz attempts
+// and the manual card mutation queue (offline-first; flushed when online).
+// ---------------------------------------------------------------------------
+
+
+export type LocalQuizAttempt = {
+  id: string;
+  quizId: string;
+  noteId: string;
+  startedAt: string;
+  finishedAt: string;
+  total: number;
+  correct: number;
+  state: "marked" | "pending_marking" | "marking_failed";
+  details: {
+    questionId: string;
+    answer?: string;
+    verdict?: boolean;
+    partial?: boolean;
+    comment?: string;
+  }[];
+  error: string | null;
+  synced: boolean;
+};
+
+export type LocalCardOp = {
+  id: number;
+  op: "create" | "update" | "delete";
+  opId: string;
+  cardId: string;
+  noteId: string | null;
+  payload: { front?: string; back?: string } | null;
+  attempts: number;
+};
+
+function rowToAttempt(row: Record<string, unknown>): LocalQuizAttempt {
+  return {
+    id: String(row.id),
+    quizId: String(row.quiz_id),
+    noteId: String(row.note_id),
+    startedAt: String(row.started_at),
+    finishedAt: String(row.finished_at),
+    total: Number(row.total ?? 0),
+    correct: Number(row.correct ?? 0),
+    state: (row.state as LocalQuizAttempt["state"]) ?? "marked",
+    details: row.details ? JSON.parse(String(row.details)) : [],
+    error: row.error == null ? null : String(row.error),
+    synced: Number(row.synced ?? 0) === 1,
+  };
+}
+
+/** Cards due at or before the ISO cutoff, across every deck. */
+export async function listDueCards(db: SQLiteDatabase, cutoffIso: string) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM flashcards WHERE (due_at IS NULL OR due_at <= ?) ORDER BY due_at IS NULL DESC, due_at ASC",
+    cutoffIso,
+  );
+  return rows.map(rowToFlashcard);
+}
+
+export async function countDueCards(db: SQLiteDatabase, cutoffIso: string) {
+  const row = await db.getFirstAsync<{ count: number }>(
+    "SELECT COUNT(*) as count FROM flashcards WHERE (due_at IS NULL OR due_at <= ?)",
+    cutoffIso,
+  );
+  return row?.count ?? 0;
+}
+
+export async function getNextDueAt(db: SQLiteDatabase) {
+  const row = await db.getFirstAsync<{ next: string | null }>(
+    "SELECT MIN(due_at) as next FROM flashcards WHERE due_at > ?",
+    new Date().toISOString(),
+  );
+  return row?.next ?? null;
+}
+
+/**
+ * Apply one grade to a card, storing its scheduling locally and appending an
+ * (unsynced) review log. Returns the updated card.
+ */
+export async function gradeCard(db: SQLiteDatabase, cardId: string, grade: CardGrade) {
+  const row = await db.getFirstAsync<Record<string, unknown>>(
+    "SELECT * FROM flashcards WHERE id = ?",
+    cardId,
+  );
+  if (!row) throw new Error("Card not found");
+  const card = rowToFlashcard(row);
+  const now = Date.now();
+  const state = { ease: card.ease, intervalDays: card.intervalDays, reps: card.reps };
+  const next = nextState(state, grade, now);
+  const dueAtIso = new Date(nextDueMs(state, grade, now)).toISOString();
+  const lapses = grade === "again" ? card.lapses + 1 : card.lapses;
+  await db.runAsync(
+    "UPDATE flashcards SET due_at = ?, ease = ?, interval_days = ?, reps = ?, lapses = ? WHERE id = ?",
+    dueAtIso,
+    next.ease,
+    next.intervalDays,
+    next.reps,
+    lapses,
+    cardId,
+  );
+  await db.runAsync(
+    "INSERT INTO reviews (id, card_id, note_id, grade, reviewed_at, prev_interval_days, new_interval_days, synced) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+    newId(),
+    cardId,
+    card.noteId,
+    grade,
+    new Date(now).toISOString(),
+    card.intervalDays,
+    next.intervalDays,
+  );
+  return { ...card, dueAt: dueAtIso, ease: next.ease, intervalDays: next.intervalDays, reps: next.reps, lapses };
+}
+
+export async function listDeckCards(db: SQLiteDatabase, noteId: string) {
+  return listFlashcards(db, noteId);
+}
+
+export async function countDeckDue(db: SQLiteDatabase, noteId: string, cutoffIso: string) {
+  const row = await db.getFirstAsync<{ count: number }>(
+    "SELECT COUNT(*) as count FROM flashcards WHERE note_id = ? AND (due_at IS NULL OR due_at <= ?)",
+    noteId,
+    cutoffIso,
+  );
+  return row?.count ?? 0;
+}
+
+export type StudyLog = {
+  id: string;
+  cardId: string;
+  grade: CardGrade;
+  reviewedAt: string;
+  prevIntervalDays: number;
+  newIntervalDays: number;
+};
+
+export async function listUnsyncedReviews(db: SQLiteDatabase, limit = 500) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM reviews WHERE synced = 0 ORDER BY reviewed_at ASC LIMIT ?",
+    limit,
+  );
+  return rows.map(
+    (row): StudyLog => ({
+      id: String(row.id),
+      cardId: String(row.card_id),
+      grade: row.grade as CardGrade,
+      reviewedAt: String(row.reviewed_at),
+      prevIntervalDays: Number(row.prev_interval_days ?? 0),
+      newIntervalDays: Number(row.new_interval_days ?? 0),
+    }),
+  );
+}
+
+export async function markReviewsSynced(db: SQLiteDatabase, ids: string[]) {
+  for (const id of ids) {
+    await db.runAsync("UPDATE reviews SET synced = 1 WHERE id = ?", id);
+  }
+}
+
+/** Apply server-replayed scheduling back onto the local cards. */
+export async function applyDeckScheduling(
+  db: SQLiteDatabase,
+  cards: { id: string; dueAt: string; ease: number; intervalDays: number; reps: number }[],
+) {
+  for (const card of cards) {
+    await db.runAsync(
+      "UPDATE flashcards SET due_at = ?, ease = ?, interval_days = ?, reps = ? WHERE id = ?",
+      card.dueAt,
+      card.ease,
+      card.intervalDays,
+      card.reps,
+      card.id,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Quiz attempts
+// ---------------------------------------------------------------------------
+
+export async function recordQuizAttempt(
+  db: SQLiteDatabase,
+  attempt: Omit<LocalQuizAttempt, "synced">,
+) {
+  await db.runAsync(
+    `INSERT OR REPLACE INTO quiz_attempts
+       (id, quiz_id, note_id, started_at, finished_at, total, correct, state, details, error, synced)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    attempt.id,
+    attempt.quizId,
+    attempt.noteId,
+    attempt.startedAt,
+    attempt.finishedAt,
+    attempt.total,
+    attempt.correct,
+    attempt.state,
+    attempt.details.length ? JSON.stringify(attempt.details) : null,
+    attempt.error,
+    0,
+  );
+}
+
+export async function listQuizAttempts(db: SQLiteDatabase, quizId: string) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM quiz_attempts WHERE quiz_id = ? ORDER BY finished_at DESC",
+    quizId,
+  );
+  return rows.map(rowToAttempt);
+}
+
+export async function getQuizAttempt(db: SQLiteDatabase, id: string) {
+  const row = await db.getFirstAsync<Record<string, unknown>>(
+    "SELECT * FROM quiz_attempts WHERE id = ?",
+    id,
+  );
+  return row ? rowToAttempt(row) : null;
+}
+
+/** Settle the AI marking result (or the next poll of a held attempt). */
+export async function updateAttemptResult(
+  db: SQLiteDatabase,
+  attempt: {
+    id: string;
+    state: LocalQuizAttempt["state"];
+    correct: number;
+    details: LocalQuizAttempt["details"];
+    error?: string | null;
+  },
+) {
+  await db.runAsync(
+    "UPDATE quiz_attempts SET state = ?, correct = ?, details = ?, error = ? WHERE id = ?",
+    attempt.state,
+    attempt.correct,
+    attempt.details.length ? JSON.stringify(attempt.details) : null,
+    attempt.error ?? null,
+    attempt.id,
+  );
+}
+
+export async function listAttemptsWithState(
+  db: SQLiteDatabase,
+  states: LocalQuizAttempt["state"][],
+) {
+  const placeholders = states.map(() => "?").join(", ");
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    `SELECT * FROM quiz_attempts WHERE state IN (${placeholders})`,
+    states,
+  );
+  return rows.map(rowToAttempt);
+}
+
+export async function markAttemptSynced(db: SQLiteDatabase, id: string) {
+  await db.runAsync("UPDATE quiz_attempts SET synced = 1 WHERE id = ?", id);
+}
+
+// ---------------------------------------------------------------------------
+// Manual card mutation queue (add/edit/delete flashcards, offline-first)
+// ---------------------------------------------------------------------------
+
+export type CardOpInput = {
+  op: "create" | "update" | "delete";
+  cardId: string;
+  noteId?: string | null;
+  front?: string;
+  back?: string;
+};
+
+export async function enqueueCardOp(db: SQLiteDatabase, input: CardOpInput) {
+  const now = new Date().toISOString();
+  await db.runAsync(
+    `INSERT INTO card_queue (op, op_id, card_id, note_id, payload, state, attempts, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+    input.op,
+    newId(),
+    input.cardId,
+    input.noteId ?? null,
+    input.front || input.back ? JSON.stringify({ front: input.front, back: input.back }) : null,
+    now,
+    now,
+  );
+}
+
+export async function listPendingCardOps(db: SQLiteDatabase, limit = 100) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM card_queue WHERE state = 'pending' ORDER BY id ASC LIMIT ?",
+    limit,
+  );
+  return rows.map((row): LocalCardOp => ({
+    id: Number(row.id),
+    op: row.op as LocalCardOp["op"],
+    opId: String(row.op_id),
+    cardId: String(row.card_id),
+    noteId: row.note_id == null ? null : String(row.note_id),
+    payload: row.payload ? JSON.parse(String(row.payload)) : null,
+    attempts: Number(row.attempts ?? 0),
+  }));
+}
+
+export async function markCardOpDone(db: SQLiteDatabase, id: number) {
+  await db.runAsync(
+    "UPDATE card_queue SET state = 'done', updated_at = ? WHERE id = ?",
+    new Date().toISOString(),
+    id,
+  );
+}
+
+export async function markCardOpFailed(
+  db: SQLiteDatabase,
+  id: number,
+  error: string,
+  attempts: number,
+) {
+  // Three failed attempts retire the op; study-set pulls can still repair it.
+  await db.runAsync(
+    "UPDATE card_queue SET state = ?, attempts = ?, error = ?, updated_at = ? WHERE id = ?",
+    attempts >= 3 ? "failed" : "pending",
+    attempts,
+    error,
+    new Date().toISOString(),
+    id,
+  );
+}
+
+/**
+ * Insert or edit a flashcard locally, then queue the matching server op.
+ * New cards are due tomorrow; edits keep the scheduling untouched.
+ */
+export async function upsertLocalCard(
+  db: SQLiteDatabase,
+  input: {
+    id: string;
+    noteId: string;
+    front: string;
+    back: string;
+    op: "create" | "update";
+  },
+) {
+  const existing = await db.getFirstAsync<{ id: string }>(
+    "SELECT id FROM flashcards WHERE id = ?",
+    input.id,
+  );
+  const op = input.op === "create" && existing ? ("update" as const) : input.op;
+  if (op === "create") {
+    await db.runAsync(
+      `INSERT INTO flashcards (id, note_id, front, back, due_at, interval_days, ease, reps, lapses, created_at)
+       VALUES (?, ?, ?, ?, ?, 0, 2.5, 0, 0, ?)`,
+      input.id,
+      input.noteId,
+      input.front,
+      input.back,
+      new Date(Date.now() + 86_400_000).toISOString(),
+      new Date().toISOString(),
+    );
+  } else {
+    await db.runAsync(
+      "UPDATE flashcards SET front = ?, back = ? WHERE id = ?",
+      input.front,
+      input.back,
+      input.id,
+    );
+  }
+  await enqueueCardOp(db, {
+    op,
+    cardId: input.id,
+    noteId: input.noteId,
+    front: input.front,
+    back: input.back,
+  });
+}
+
+export async function deleteLocalCard(db: SQLiteDatabase, cardId: string, noteId: string) {
+  await db.runAsync("DELETE FROM flashcards WHERE id = ?", cardId);
+  await enqueueCardOp(db, { op: "delete", cardId, noteId });
+}
+
+// ---------------------------------------------------------------------------
+// Study tab aggregates (all local, offline-safe)
+// ---------------------------------------------------------------------------
+
+export type LocalStudySetRef = {
+  noteId: string;
+  courseId: string;
+  noteTitle: string;
+  flashcardCount: number;
+  quizCount: number;
+};
+
+export async function listStudySetNotes(db: SQLiteDatabase) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(`
+    SELECT n.id AS note_id, n.course_id AS course_id, n.title AS note_title,
+      (SELECT COUNT(*) FROM flashcards f WHERE f.note_id = n.id) AS flashcards,
+      (SELECT COUNT(*) FROM quizzes q WHERE q.note_id = n.id) AS quizzes
+    FROM notes n
+    WHERE EXISTS (SELECT 1 FROM flashcards f WHERE f.note_id = n.id)
+       OR EXISTS (SELECT 1 FROM quizzes q WHERE q.note_id = n.id)
+    ORDER BY n.updated_at DESC
+  `);
+  return rows.map((row): LocalStudySetRef => ({
+    noteId: String(row.note_id),
+    courseId: String(row.course_id),
+    noteTitle: String(row.note_title),
+    flashcardCount: Number(row.flashcards ?? 0),
+    quizCount: Number(row.quizzes ?? 0),
+  }));
+}
+
+function dayKey(iso: string) {
+  // Local-day bucket (the student's reminder timezone, not UTC).
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${date.getDate()}`;
+}
+
+/** Consecutive study days ending today or yesterday, from reviews + attempts. */
+export async function computeStreak(db: SQLiteDatabase) {
+  const reviewRows = await db.getAllAsync<{ reviewed_at: string }>(
+    "SELECT reviewed_at FROM reviews",
+  );
+  const attemptRows = await db.getAllAsync<{ finished_at: string }>(
+    "SELECT finished_at FROM quiz_attempts WHERE state IN ('marked', 'pending_marking')",
+  );
+  const days = new Set<string>();
+  for (const row of reviewRows) {
+    const key = dayKey(row.reviewed_at);
+    if (key) days.add(key);
+  }
+  for (const row of attemptRows) {
+    const key = dayKey(row.finished_at);
+    if (key) days.add(key);
+  }
+  let streak = 0;
+  const cursor = new Date();
+  // A streak survives until yesterday; today only breaks it if it passes.
+  for (let index = 0; index < 365; index += 1) {
+    const month = String(cursor.getMonth() + 1).padStart(2, "0");
+    const key = `${cursor.getFullYear()}-${month}-${String(cursor.getDate()).padStart(2, "0")}`;
+    if (days.has(key)) {
+      streak += 1;
+    } else if (index > 0) {
+      break;
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
+/** Last-7-days cards reviewed and recall rate (non-lapse grades / graded). */
+export async function computeWeeklyProgress(db: SQLiteDatabase) {
+  const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const reviewed = await db.getFirstAsync<{ count: number }>(
+    "SELECT COUNT(*) as count FROM reviews WHERE reviewed_at >= ?",
+    cutoff,
+  );
+  const graded = await db.getFirstAsync<{ total: number; kept: number }>(
+    "SELECT COUNT(*) as total, SUM(CASE WHEN grade != 'again' THEN 1 ELSE 0 END) as kept FROM reviews WHERE reviewed_at >= ?",
+    cutoff,
+  );
+  const quizzes = await db.getFirstAsync<{ count: number }>(
+    "SELECT COUNT(*) as count FROM quiz_attempts WHERE finished_at >= ?",
+    cutoff,
+  );
+  const total = graded?.total ?? 0;
+  const kept = graded?.kept ?? 0;
+  return {
+    cardsReviewed: reviewed?.count ?? 0,
+    recallPercent: total ? Math.round((kept / total) * 100) : 0,
+    quizzesTaken: quizzes?.count ?? 0,
+  };
+}
+
+/**
+ * Account deletion (Privacy-first): remove every trace of the signed-out
+ * student from the device. Recording segments and queued uploads reference
+ * their files, so those are deleted from disk first, and only then is every
+ * local table emptied — a hard reset of the study data while keeping the
+ * database itself (and its migrations) intact for a future login.
+ */
+export async function wipeLocalData(db: SQLiteDatabase) {
+  const paths = new Set<string>();
+  for (const row of await db.getAllAsync<{ path: string }>(
+    "SELECT path FROM recording_segments",
+  )) {
+    if (row.path) paths.add(row.path);
+  }
+  for (const row of await db.getAllAsync<{ local_path: string }>(
+    "SELECT local_path FROM upload_queue",
+  )) {
+    if (row.local_path) paths.add(row.local_path);
+  }
+  for (const path of paths) {
+    try {
+      new File(path).delete();
+    } catch {
+      // Already gone — nothing to clean up.
+    }
+  }
+  await db.execAsync(`
+    DELETE FROM card_queue;
+    DELETE FROM reviews;
+    DELETE FROM quiz_attempts;
+    DELETE FROM quiz_questions;
+    DELETE FROM quizzes;
+    DELETE FROM flashcards;
+    DELETE FROM generation_queue;
+    DELETE FROM chat_messages;
+    DELETE FROM upload_queue;
+    DELETE FROM recording_segments;
+    DELETE FROM recording_sessions;
+    DELETE FROM sync_queue;
+    DELETE FROM notes;
+    DELETE FROM courses;
+    DELETE FROM settings;
+  `);
+}

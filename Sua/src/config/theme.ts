@@ -1,4 +1,5 @@
 import type { ViewStyle } from "react-native";
+import { vars } from "nativewind";
 
 /**
  * Sua's visual source of truth.
@@ -145,6 +146,56 @@ export const safeAreaStyleDark: ViewStyle = {
   flex: 1,
   backgroundColor: "#063D30",
 };
+
+/**
+ * Appearance tokens.
+ *
+ * The 6 scheme-reactive neutrals are driven through CSS variables declared in
+ * tailwind.config.js; `lightVars` mirrors the `addBase` light defaults and
+ * `darkVars` re-maps them, so every `bg-cream`/`text-ink`/`bg-surface`/
+ * `text-ink-soft`/`text-ink-faint`/`border-line` class in the app follows the
+ * preference without any `dark:` variants. Accent colours (brand, gold,
+ * success, …) and `ink.inverse` intentionally stay static: they sit on
+ * coloured/gold surfaces that do not invert.
+ */
+export const lightVars = vars({
+  "--color-cream": "255 248 232",
+  "--color-surface": "255 255 255",
+  "--color-ink": "14 31 24",
+  "--color-ink-soft": "92 107 99",
+  "--color-ink-faint": "138 151 143",
+  "--color-line": "232 224 201",
+});
+
+export const darkVars = vars({
+  // Warm charcoal — Sua's cream/ink roles swap onto dark, warm surfaces.
+  "--color-cream": "23 20 17",
+  "--color-surface": "33 29 24",
+  "--color-ink": "241 235 221",
+  "--color-ink-soft": "181 170 152",
+  "--color-ink-faint": "135 125 108",
+  "--color-line": "55 50 42",
+});
+
+export type AppearanceScheme = "light" | "dark";
+
+export const darkPalette = {
+  ...colors,
+  cream: "#171411",
+  surface: "#211D18",
+  line: "#37322A",
+  ink: {
+    ...colors.ink,
+    DEFAULT: "#F1EBDD",
+    soft: "#B5AA98",
+    faint: "#877D6C",
+  },
+} as const;
+
+/** Runtime palette for JS consumers (icon colors, style objects, tab bar). */
+export function palette(scheme: AppearanceScheme) {
+  return scheme === "dark" ? darkPalette : colors;
+}
 
 export const tokens = {
   colors,

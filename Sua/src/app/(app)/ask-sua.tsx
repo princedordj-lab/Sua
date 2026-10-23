@@ -38,6 +38,7 @@ import { Logo } from "../../components/ui";
 import { CoursePickerSheet } from "../../components/sheets";
 import { Markdown } from "../../components/markdown";
 import { colors } from "../../config/theme";
+import { usePalette } from "../../state/appearance";
 import { useApp } from "../../state/AppContext";
 import { chatApi } from "../../lib/chat";
 import {
@@ -75,6 +76,7 @@ function toRow(message: ChatMessageView): ChatMessageRow {
 }
 
 export default function AskSua() {
+  const pv = usePalette();
   const params = useLocalSearchParams<{ courseId?: string }>();
   const { courses, getAuthToken } = useApp();
   const db = useSQLiteContext();
@@ -310,7 +312,7 @@ export default function AskSua() {
             accessibilityLabel="Back"
             className="h-11 w-11 items-center justify-center active:opacity-80"
           >
-            <ArrowLeft size={22} color={colors.ink.DEFAULT} />
+            <ArrowLeft size={22} color={pv.ink.DEFAULT} />
           </Pressable>
           <View className="flex-1 flex-row items-center justify-center gap-2">
             <Logo compact />
@@ -407,7 +409,7 @@ export default function AskSua() {
               value={draft}
               onChangeText={setDraft}
               placeholder="Ask about your notes"
-              placeholderTextColor={colors.ink.faint}
+              placeholderTextColor={pv.ink.faint}
               multiline
               className="h-11 flex-1 text-body text-ink"
               returnKeyType="send"

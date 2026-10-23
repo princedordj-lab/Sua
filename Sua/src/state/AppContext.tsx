@@ -14,17 +14,20 @@ import { AppState } from "react-native";
 import { coursesApi, profileApi, pushApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
 import {
+  getSetting,
   listLocalCourses,
   pullCourseNotes,
   purgeCourseLocally,
   removeLocalCourse,
   replaceLocalCourses,
+  setSetting,
   syncPendingNotes,
   upsertLocalCourse,
   type LocalCourse,
 } from "../lib/notes";
 import { flushUploads } from "../lib/uploads";
 import { drainGenerationQueue } from "../lib/generate";
+import { flushStudyProgress } from "../lib/progress";
 import { registerForPushAndReport } from "../lib/notifications";
 import type {
   Course,
@@ -42,6 +45,8 @@ type AppContextValue = {
   courses: Course[];
   getAuthToken: () => Promise<string | null>;
   signOut: () => Promise<void>;
+  updateProfile: (changes: Partial<UserProfile>) => Promise<void>;
+  deleteAccount: () => Promise<void>;
   completeOnboarding: (
     profile: UserProfile,
     firstCourse: Omit<Course, "id">,
@@ -84,6 +89,8 @@ function serverProfileToLocal(profile: ServerProfile): UserProfile {
     university: profile.university ?? "",
     programme: profile.programme ?? "",
     level: profile.level ?? "",
+    plan: profile.plan,
+    planExpiresAt: profile.planExpiresAt,
   };
 }
 
@@ -158,6 +165,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         requestRefresh();
         void flushUploads({ db, getAuthToken });
         void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+        void flushStudyProgress({ db, getAuthToken });
       }
     });
     const appState = AppState.addEventListener("change", (next) => {
@@ -165,6 +173,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         requestRefresh();
         void flushUploads({ db, getAuthToken });
         void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+        void flushStudyProgress({ db, getAuthToken });
       }
     });
     return () => {
@@ -173,21 +182,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [db, getAuthToken, requestRefresh]);
 
-  // Register the Expo push token once per session; the backend notifies when
-  // backgrounded generation finishes. Needs a development build (Expo Go
-  // skips it silently).
+  // Register the Expo push token once per session unless the student turned
+  // server pushes off (notification settings); the stored token also powers
+  // the "off" path so re-enabling without a restart still needs the value.
+  // Needs a development build (Expo Go skips it silently).
   const pushRegistered = useRef(false);
   useEffect(() => {
     if (!isSignedIn || userId || pushRegistered.current) return;
     void (async () => {
+      if ((await getSetting(db, "push_enabled")) === "0") return;
       const expoToken = await registerForPushAndReport();
       if (!expoToken) return;
       pushRegistered.current = true;
+      await setSetting(db, "expo_push_token", expoToken).catch(() => {});
       const token = await getToken();
       if (!token) return;
       pushApi.registerToken(token, expoToken).catch(() => {});
     })();
-  }, [isSignedIn, userId, getToken]);
+  }, [isSignedIn, userId, getToken, db]);
 
   useEffect(() => {
     let cancelled = false;
@@ -229,6 +241,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             getAuthToken,
             onNoteChange: () => requestRefresh(2_000),
           }).catch(() => {});
+          void flushStudyProgress({ db, getAuthToken });
         }
       } catch {
         // Backend unreachable. Fall back to the cached course list so notes
@@ -259,9 +272,53 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const isHydrating = isSignedIn && Boolean(userId) && !active.clerkId;
 
   const signOut = useCallback(async () => {
+    // Release this device's push token best-effort: study pushes for a signed
+    // out account make no sense, and the row would leak across sessions.
+    const expoToken = await getSetting(db, "expo_push_token").catch(() => null);
+    if (expoToken) {
+      const token = await getToken().catch(() => null);
+      if (token) {
+        await profileApi.deletePushToken(token, expoToken).catch(() => {});
+      }
+    }
+    await setSetting(db, "expo_push_token", "").catch(() => {});
     setHydrated(EMPTY_HYDRATED);
     await clerkSignOut();
-  }, [clerkSignOut]);
+  }, [clerkSignOut, db, getToken]);
+
+  const updateProfile = useCallback(
+    async (changes: Partial<UserProfile>) => {
+      const token = await getToken();
+      if (!token || !userId) throw new Error("Not signed in");
+      const profile = await profileApi.update(token, {
+        ...(changes.name !== undefined
+          ? { name: changes.name || null }
+          : {}),
+        ...(changes.university !== undefined
+          ? { university: changes.university || null }
+          : {}),
+        ...(changes.programme !== undefined
+          ? { programme: changes.programme || null }
+          : {}),
+        ...(changes.level !== undefined ? { level: changes.level || null } : {}),
+      });
+      setHydrated((prev) => ({
+        ...prev,
+        clerkId: userId,
+        profile,
+      }));
+    },
+    [getToken, userId],
+  );
+
+  // Server-side wipe (rows + Cloudinary files, then the Clerk account). The
+  // local SQLite wipe and sign-out are the caller's job because they must run
+  // after the request completes, and only the profile flow knows the steps.
+  const deleteAccount = useCallback(async () => {
+    const token = await getToken();
+    if (!token) throw new Error("Not signed in");
+    await profileApi.deleteAccount(token);
+  }, [getToken]);
 
   const completeOnboarding = useCallback(
     async (nextProfile: UserProfile, firstCourse: Omit<Course, "id">) => {
@@ -379,6 +436,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       courses: active.courses,
       getAuthToken,
       signOut,
+      updateProfile,
+      deleteAccount,
       completeOnboarding,
       addCourse,
       updateCourse,
@@ -388,6 +447,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       active.courses,
       addCourse,
       completeOnboarding,
+      deleteAccount,
       deleteCourse,
       getAuthToken,
       hasCompletedOnboarding,
@@ -397,6 +457,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       profile,
       signOut,
       updateCourse,
+      updateProfile,
     ],
   );
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

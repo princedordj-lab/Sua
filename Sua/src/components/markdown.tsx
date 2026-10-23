@@ -71,6 +71,16 @@ function parseBlocks(text: string): Block[] {
   return blocks;
 }
 
+export type MarkdownScale = "small" | "medium" | "large";
+
+// Reader text scale. Medium keeps the shipped sizes; the tiers adjust the
+// body run (the size notes and AI copy are read at). Headings stay fixed.
+const BODY_CLASS: Record<MarkdownScale, { base: string; bold: string }> = {
+  small: { base: "text-small leading-6", bold: "text-small font-sans-bold leading-6" },
+  medium: { base: "text-body leading-7", bold: "text-body font-sans-bold leading-7" },
+  large: { base: "text-body-lg leading-8", bold: "text-body-lg font-sans-bold leading-8" },
+};
+
 function headingClass(level: number) {
   if (level <= 1) return "text-title font-sans-extrabold text-ink";
   if (level === 2) return "text-h3 font-sans-extrabold text-ink";
@@ -81,14 +91,23 @@ export function Markdown({
   text,
   className,
   numberOfLines,
+  scale = "default",
 }: {
   text: string;
   className?: string;
   numberOfLines?: number;
+  scale?: MarkdownScale | "default";
 }) {
+  // "default" keeps today's classes exactly when no preference applies
+  // (dense previews, summaries inline, etc.). Only the note reader passes a
+  // preference scale.
+  const body = scale === "default" ? "text-body leading-7" : BODY_CLASS[scale].base;
+  const bodyBold =
+    scale === "default" ? "text-body font-sans-bold leading-7" : BODY_CLASS[scale].bold;
+
   if (numberOfLines !== undefined) {
     return (
-      <Text numberOfLines={numberOfLines} className={className ?? "text-body leading-7 text-ink"}>
+      <Text numberOfLines={numberOfLines} className={className ?? `${body} text-ink`}>
         {stripMarkdown(text)}
       </Text>
     );
@@ -97,7 +116,7 @@ export function Markdown({
   const blocks = parseBlocks(text);
   if (!blocks.length) {
     return (
-      <Text className={className ?? "text-body leading-7 text-ink"}>{stripMarkdown(text)}</Text>
+      <Text className={className ?? `${body} text-ink`}>{stripMarkdown(text)}</Text>
     );
   }
 
@@ -115,21 +134,21 @@ export function Markdown({
         if (block.type === "bullet") {
           return (
             <View key={index} className={`${gap}flex-row gap-2`}>
-              <Text className="text-body leading-7 text-ink">•</Text>
-              <Text className="flex-1 text-body leading-7 text-ink">{inlineNodes(block.text)}</Text>
+              <Text className={`${body} text-ink`}>•</Text>
+              <Text className={`flex-1 ${body} text-ink`}>{inlineNodes(block.text)}</Text>
             </View>
           );
         }
         if (block.type === "numbered") {
           return (
             <View key={index} className={`${gap}flex-row gap-2`}>
-              <Text className="text-body font-sans-bold leading-7 text-ink">{block.marker}</Text>
-              <Text className="flex-1 text-body leading-7 text-ink">{inlineNodes(block.text)}</Text>
+              <Text className={`${bodyBold} text-ink`}>{block.marker}</Text>
+              <Text className={`flex-1 ${body} text-ink`}>{inlineNodes(block.text)}</Text>
             </View>
           );
         }
         return (
-          <Text key={index} className={`${gap}text-body leading-7 text-ink`}>
+          <Text key={index} className={`${gap}${body} text-ink`}>
             {inlineNodes(block.line)}
           </Text>
         );

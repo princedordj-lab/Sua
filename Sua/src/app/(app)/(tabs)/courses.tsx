@@ -23,6 +23,7 @@ import { router } from "expo-router";
 import { Field, PrimaryButton } from "../../../components/ui";
 import { FormSheet } from "../../../components/sheets";
 import { colors } from "../../../config/theme";
+import { usePalette } from "../../../state/appearance";
 import { courseInitials, courseStyle } from "../../../lib/course-style";
 import { useApp } from "../../../state/AppContext";
 import type { Course } from "../../../lib/types";
@@ -42,6 +43,7 @@ function noteLabel(count: number) {
 }
 
 export default function Courses() {
+  const pv = usePalette();
   const { courses, addCourse, updateCourse, deleteCourse } = useApp();
   const db = useSQLiteContext();
   const [editing, setEditing] = useState<Course | null>(null);
@@ -183,12 +185,12 @@ export default function Courses() {
           </Pressable>
         </View>
         <View className="mt-5 h-12 flex-row items-center gap-2 rounded-input border border-line bg-surface px-3">
-          <Search size={18} color={colors.ink.faint} />
+          <Search size={18} color={pv.ink.faint} />
           <TextInput
             value={query}
             onChangeText={setQuery}
             placeholder="Search courses"
-            placeholderTextColor={colors.ink.faint}
+            placeholderTextColor={pv.ink.faint}
             autoCapitalize="none"
             autoCorrect={false}
             accessibilityLabel="Search courses"
@@ -202,7 +204,7 @@ export default function Courses() {
               accessibilityLabel="Clear search"
               className="h-11 w-11 items-center justify-center active:opacity-80"
             >
-              <X size={18} color={colors.ink.faint} />
+              <X size={18} color={pv.ink.faint} />
             </Pressable>
           )}
         </View>
@@ -310,7 +312,7 @@ export default function Courses() {
                           {course.name}
                         </Text>
                         <View className="mt-1.5 flex-row items-center">
-                          <FileText size={14} color={colors.ink.faint} />
+                          <FileText size={14} color={pv.ink.faint} />
                           <Text className="ml-1.5 text-small text-ink-soft">
                             {noteLabel(noteCount)}
                           </Text>
@@ -330,7 +332,7 @@ export default function Courses() {
                         accessibilityLabel={`Actions for ${course.name}`}
                         className="ml-2 h-11 w-11 items-center justify-center rounded-full active:opacity-80"
                       >
-                        <MoreHorizontal size={20} color={colors.ink.faint} />
+                        <MoreHorizontal size={20} color={pv.ink.faint} />
                       </Pressable>
                     </Pressable>
                   </View>

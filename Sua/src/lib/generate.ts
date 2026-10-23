@@ -1,6 +1,9 @@
 import NetInfo from "@react-native-community/netinfo";
 import {
+  countPendingUploads,
+  getNote,
   listGenerationQueue,
+  pullCourseNotes,
   setNoteAiState,
   storeStudySet,
   updateGeneration,
@@ -16,11 +19,16 @@ import type { SQLiteDatabase } from "expo-sqlite";
  * ai_state becomes "queued", offline-friendly). drainGenerationQueue() runs
  * whenever connectivity returns or the app foregrounds, mirroring the upload
  * queue drain: it POSTs /jobs, then polls the job until it completes, and
- * finally pulls /study to cache the outputs locally.
+ * finally pulls the outputs locally.
  *
  * Polling is bounded (about 50 x 4s = ~3.5 min per drain pass, enough for a
  * full transcription + generation); a still-running job is left "active" and
  * resumes on the next connectivity/foreground tick.
+ *
+ * Two server outcomes exist:
+ * - study_set: summary/flashcards/quiz come back from /study.
+ * - course_reference: the AI-written page is the note body — pull the note
+ *   itself and mark ready (there is no study set to cache).
  */
 
 type DrainDeps = {
@@ -50,7 +58,29 @@ async function pullStudySet(deps: DrainDeps, noteId: string) {
   deps.onNoteChange?.(noteId);
 }
 
-async function runOne(deps: DrainDeps, itemName: { id: number; noteId: string; jobId: string | null }) {
+async function finishReference(deps: DrainDeps, noteId: string) {
+  const token = await deps.getAuthToken();
+  if (!token) throw new Error("no auth token");
+  // The reference markdown is the note body on the server; pull the course so
+  // the local note picks it up before the screen reads aiState.
+  const note = await getNote(deps.db, noteId);
+  if (note) {
+    await pullCourseNotes(deps.db, token, note.courseId).catch(() => {});
+  }
+  await setNoteAiState(deps.db, noteId, "ready");
+  showStudyReady("Your course reference is ready");
+  deps.onNoteChange?.(noteId);
+}
+
+async function runOne(
+  deps: DrainDeps,
+  itemName: {
+    id: number;
+    noteId: string;
+    kind: "study_set" | "course_reference";
+    jobId: string | null;
+  },
+) {
   const token = await deps.getAuthToken();
   if (!token) throw new Error("no auth token");
   await updateGeneration(deps.db, itemName.id, { state: "active" });
@@ -59,7 +89,7 @@ async function runOne(deps: DrainDeps, itemName: { id: number; noteId: string; j
   // Submit unless the job row already exists (a resumed poll).
   let jobId = itemName.jobId;
   if (!jobId) {
-    const job = await jobsApi.create(token, itemName.noteId);
+    const job = await jobsApi.create(token, itemName.noteId, itemName.kind);
     if (!job) throw new Error("generation request was not accepted");
     jobId = job.id;
     await updateGeneration(deps.db, itemName.id, {
@@ -72,7 +102,11 @@ async function runOne(deps: DrainDeps, itemName: { id: number; noteId: string; j
     const job = await jobsApi.get(token, jobId);
     if (job.state === "done") {
       await updateGeneration(deps.db, itemName.id, { state: "done", jobId });
-      await pullStudySet(deps, itemName.noteId);
+      if (itemName.kind === "course_reference") {
+        await finishReference(deps, itemName.noteId);
+      } else {
+        await pullStudySet(deps, itemName.noteId);
+      }
       return;
     }
     if (job.state === "failed") {
@@ -94,6 +128,13 @@ export async function drainGenerationQueue({ db, getAuthToken, onNoteChange }: D
     if (item.attempts >= MAX_ATTEMPTS) {
       await updateGeneration(db, item.id, { state: "failed", error: "Too many attempts" });
       await setNoteAiState(db, item.noteId, "failed");
+      continue;
+    }
+    // Recordings generate against transcribed audio, so their job must wait
+    // until every segment is on the server. Leave the row queued; finishing
+    // uploads (or the next reconnect/foreground tick) re-triggers the drain.
+    const note = await getNote(db, item.noteId).catch(() => null);
+    if (note?.sourceType === "audio" && (await countPendingUploads(db, item.noteId)) > 0) {
       continue;
     }
     try {

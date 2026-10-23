@@ -5,7 +5,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
-  Switch,
+  StyleSheet,
   Text,
   TextInput,
   View,
@@ -28,6 +28,12 @@ import {
   requestCameraPermissionsAsync,
 } from "expo-image-picker";
 import { File } from "expo-file-system";
+import { EnrichedMarkdownTextInput } from "react-native-enriched-markdown";
+import type {
+  EnrichedMarkdownTextInputInstance,
+  MarkdownTextInputStyle,
+  StyleState,
+} from "react-native-enriched-markdown";
 import {
   AlertTriangle,
   Bold,
@@ -38,7 +44,7 @@ import {
   CloudUpload,
   FileText,
   Flag,
-  Heading2,
+  Heading,
   Image as ImageIcon,
   Italic,
   List,
@@ -54,13 +60,16 @@ import {
   Square,
   Trash2,
   Undo2,
+  BookOpen,
 } from "lucide-react-native";
 import { BottomSheet, CoursePickerSheet } from "../../../components/sheets";
 import { Markdown } from "../../../components/markdown";
-import { colors } from "../../../config/theme";
-import { courseInitials, courseStyle } from "../../../lib/course-style";
-import { applyMarkdownTool } from "../../../lib/markdown";
-import type { MarkdownTool } from "../../../lib/markdown";
+import { ProgressBar } from "../../../components/progress-bar";
+import { WifiToggle } from "../../../components/wifi-toggle";
+import { colors, fontFamily } from "../../../config/theme";
+import { usePalette } from "../../../state/appearance";
+import { useStringSetting } from "../../../state/settings";
+import { courseStyle } from "../../../lib/course-style";
 import {
   addRecordingSegment,
   completeRecordingSession,
@@ -86,10 +95,12 @@ import {
 import type {
   AiState,
   Note,
+  NoteKind,
   RecordingSegment,
   RecordingSession,
   UploadKind,
   UploadQueueItem,
+  UploadTarget,
 } from "../../../lib/notes";
 import { drainGenerationQueue } from "../../../lib/generate";
 import { jobsApi } from "../../../lib/api";
@@ -108,6 +119,34 @@ const SEGMENT_MS = 2 * 60 * 1000;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const AUTOSAVE_DELAY_MS = 1500;
 
+// Third-party native component without NativeWind support: typography flows
+// through StyleSheet with theme tokens, matching the renderer's size classes.
+const editorStyleSheet = StyleSheet.create({
+  body: {
+    fontSize: 15,
+    lineHeight: 22,
+    fontFamily: fontFamily.sans,
+    minHeight: 176,
+    textAlignVertical: "top",
+  },
+});
+// Color flows through the resolved palette at the call site so the editor and
+// its markdown token styles follow the appearance preference.
+function editorBodyStyle(ink: string) {
+  return { ...editorStyleSheet.body, color: ink } as const;
+}
+function editorMarkdownStyle(ink: string): MarkdownTextInputStyle {
+  return {
+    strong: { color: ink },
+    em: { color: ink },
+    link: { color: colors.brand.DEFAULT, underline: true },
+    h1: { fontSize: 28, fontWeight: "800", color: ink },
+    h2: { fontSize: 22, fontWeight: "800", color: ink },
+    h3: { fontSize: 17, fontWeight: "700", color: ink },
+    list: { itemSpacing: 4 },
+  };
+}
+
 // ~0.5 MB/min so an hour-long lecture lands near 30 MB and each chunk near 1 MB.
 const RECORDING_OPTIONS: RecordingOptions = {
   ...RecordingPresets.HIGH_QUALITY,
@@ -118,8 +157,8 @@ const RECORDING_OPTIONS: RecordingOptions = {
 };
 
 const MODES = [
-  { key: "recording", label: "Record", Icon: Mic },
-  { key: "typing", label: "Type", Icon: PenLine },
+  { key: "recording", label: "Recording", Icon: Mic },
+  { key: "typing", label: "Typing", Icon: PenLine },
   { key: "upload", label: "Upload", Icon: CloudUpload },
 ] as const;
 
@@ -128,11 +167,13 @@ type Mode = (typeof MODES)[number]["key"];
 const TOOLS = [
   { key: "bold", label: "Bold", Icon: Bold },
   { key: "italic", label: "Italic", Icon: Italic },
-  { key: "heading", label: "Heading", Icon: Heading2 },
+  { key: "heading", label: "Heading", Icon: Heading },
   { key: "bullet", label: "Bulleted list", Icon: List },
   { key: "numbered", label: "Numbered list", Icon: ListOrdered },
   { key: "undo", label: "Undo", Icon: Undo2 },
 ] as const;
+
+type ToolKey = (typeof TOOLS)[number]["key"];
 
 const HELP_ROWS = [
   {
@@ -246,6 +287,7 @@ function SegmentedControl({
   onChange: (mode: Mode) => void;
   disabled?: boolean;
 }) {
+  const pv = usePalette();
   return (
     <View className="mt-5 flex-row rounded-chip bg-surface p-1.5 shadow-card">
       {MODES.map(({ key, label, Icon }) => {
@@ -264,7 +306,7 @@ function SegmentedControl({
               selected ? "bg-brand" : ""
             } ${disabled ? "opacity-60" : ""}`}
           >
-            <Icon size={18} color={selected ? colors.ink.inverse : colors.ink.soft} />
+            <Icon size={18} color={selected ? colors.ink.inverse : pv.ink.soft} />
             <Text
               className={`text-label font-sans-bold ${
                 selected ? "text-ink-inverse" : "text-ink-soft"
@@ -288,6 +330,7 @@ function CourseSelect({
   onPress: () => void;
   disabled?: boolean;
 }) {
+  const pv = usePalette();
   const style = course ? courseStyle(course.color) : null;
   return (
     <Pressable
@@ -300,32 +343,25 @@ function CourseSelect({
       accessibilityLabel={
         course ? `Course: ${course.name}. Tap to change` : "Choose a course"
       }
-      className={`mt-4 flex-row items-center rounded-card bg-surface p-3 shadow-card active:opacity-80 ${
+      className={`mt-4 self-start flex-row items-center gap-3 rounded-chip border border-line bg-surface px-4 py-3 active:opacity-80 ${
         disabled ? "opacity-60" : ""
       }`}
     >
       <View
         style={{ backgroundColor: style ? style.tint : colors.successSoft }}
-        className="h-12 w-12 items-center justify-center rounded-input"
+        className="h-9 w-9 items-center justify-center rounded-full"
       >
-        <Text
-          style={{ color: style ? style.accent : colors.brand.DEFAULT }}
-          className="text-body font-sans-extrabold"
-        >
-          {course ? courseInitials(course) : "+"}
-        </Text>
+        <BookOpen
+          size={18}
+          color={style ? style.accent : colors.brand.DEFAULT}
+        />
       </View>
-      <View className="ml-3 flex-1">
-        <Text className="text-body-lg font-sans-bold text-ink" numberOfLines={1}>
-          {course ? course.name : "Choose a course"}
-        </Text>
-        {course?.code ? (
-          <Text className="mt-0.5 text-caption font-sans-bold text-ink-soft" numberOfLines={1}>
-            {course.code}
-          </Text>
-        ) : null}
-      </View>
-      <ChevronDown size={20} color={colors.ink.faint} />
+      <Text className="text-label font-sans-bold text-ink" numberOfLines={1}>
+        {course
+          ? [course.code, course.name].filter(Boolean).join(" ")
+          : "Choose a course"}
+      </Text>
+      <ChevronDown size={18} color={pv.ink.faint} />
     </Pressable>
   );
 }
@@ -355,27 +391,6 @@ function UsageMeter({ used, limit }: { used: number; limit: number }) {
   );
 }
 
-function WifiToggle({
-  value,
-  onChange,
-}: {
-  value: boolean;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <View className="flex-row items-center gap-2 rounded-chip bg-success-soft px-3 py-2">
-      <Text className="text-small font-sans-bold text-ink">Wi-Fi only upload</Text>
-      <Switch
-        value={value}
-        onValueChange={onChange}
-        trackColor={{ true: colors.brand.DEFAULT, false: colors.line }}
-        thumbColor={colors.surface}
-        accessibilityLabel="Wi-Fi only upload"
-      />
-    </View>
-  );
-}
-
 function uploadStateLabel(item: UploadQueueItem) {
   if (item.state === "uploading") return "Uploading…";
   if (item.state === "uploaded") return "Uploaded";
@@ -384,6 +399,7 @@ function uploadStateLabel(item: UploadQueueItem) {
 }
 
 export default function Create() {
+  const pv = usePalette();
   const db = useSQLiteContext();
   const { courses, getAuthToken } = useApp();
   const params = useLocalSearchParams<{ mode?: string; noteId?: string; courseId?: string }>();
@@ -407,29 +423,41 @@ export default function Create() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [typedStatus, setTypedStatus] = useState<TypedStatus>("idle");
-  const [savedAt, setSavedAt] = useState(nowLabel());
   const [dirty, setDirty] = useState(false);
   const [noteSourceType, setNoteSourceType] = useState<Note["sourceType"] | null>(null);
   const [sourceTranscript, setSourceTranscript] = useState<string | null>(null);
   // AI pipeline state for the loaded note; server-owned fields mirrored into SQLite.
   const [aiState, setAiState] = useState<AiState>("none");
   const [summaryMarkdown, setSummaryMarkdown] = useState<string | null>(null);
-  const [reportOpen, setReportOpen] = useState(false);
+  const [openedNoteKind, setOpenedNoteKind] = useState<NoteKind>("note");  const [reportOpen, setReportOpen] = useState(false);
   const [reportComment, setReportComment] = useState("");
   const [reportSending, setReportSending] = useState(false);
   const [reported, setReported] = useState(false);
   const [summaryGenerationError, setSummaryGenerationError] = useState<string | null>(null);
 
-  // Editor affordances: markdown toolbar with undo, plus a rendered preview.
-  const bodyInputRef = useRef<TextInput>(null);
-  const [selection, setSelection] = useState({ start: 0, end: 0 });
-  const [selectionOverride, setSelectionOverride] = useState<{
-    start: number;
-    end: number;
-  } | null>(null);
+  // Editor affordances: rich native markdown editor with undo history.
+  const editorRef = useRef<EnrichedMarkdownTextInputInstance>(null);
+  const bodyRef = useRef(body);
+  useEffect(() => {
+    bodyRef.current = body;
+  });
   const historyRef = useRef<string[]>([]);
   const [historyDepth, setHistoryDepth] = useState(0);
-  const [previewing, setPreviewing] = useState(false);
+  const [styleState, setStyleState] = useState<StyleState>({
+    bold: { isActive: false },
+    italic: { isActive: false },
+    underline: { isActive: false },
+    strikethrough: { isActive: false },
+    spoiler: { isActive: false },
+    link: { isActive: false },
+    heading: { isActive: false, level: 2 },
+    unorderedList: { isActive: false, depth: 0 },
+    orderedList: { isActive: false, depth: 0 },
+  });
+  const historyDepthRef = useRef(0);
+  useEffect(() => {
+    historyDepthRef.current = historyDepth;
+  });
 
   const [usedRecordings, setUsedRecordings] = useState(0);
   const [recordPhase, setRecordPhase] = useState<RecordPhase>("idle");
@@ -451,6 +479,17 @@ export default function Create() {
   });
 
   const [uploadItems, setUploadItems] = useState<UploadQueueItem[]>([]);
+  // A destination prompt: the picked file (queued after confirm), the typing
+  // save, or the just-stopped recording. Closing the sheet means: cancel for
+  // files, keep editing for typing, save-without-AI for recordings.
+  const [pendingPrompt, setPendingPrompt] = useState<{
+    mode: "file" | "typing" | "recording";
+    uri?: string;
+    name?: string;
+    size?: number;
+    kind?: UploadKind;
+    target: UploadTarget;
+  } | null>(null);
 
   const recorder = useAudioRecorder(RECORDING_OPTIONS);
 
@@ -479,8 +518,19 @@ export default function Create() {
     if (params.courseId) setPickedCourseId(params.courseId);
   }
 
-  // Follow the first loaded course until the user picks one explicitly.
-  const courseId = pickedCourseId ?? courses[0]?.id ?? "";
+  // Course selection: "remember last used" (default) restores the course of
+  // the most recent capture; with the pref off a fresh session always starts
+  // unpicked so the user has to choose. The record/save/upload flows persist
+  // the course at each capture (rememberLastCourse).
+  const rememberCoursePref = useStringSetting(db, "remember_capture_course", "1");
+  const lastCourse = useStringSetting(db, "create_last_course", "");
+  const rememberOn = rememberCoursePref.value !== "0";
+  const remembered =
+    rememberOn && lastCourse.value && courses.some((item) => item.id === lastCourse.value)
+      ? lastCourse.value
+      : "";
+  // Follow the remembered course until the user picks one explicitly.
+  const courseId = pickedCourseId ?? remembered ?? (rememberOn ? courses[0]?.id ?? "" : "");
   const course = useMemo(
     () => courses.find((item) => item.id === courseId),
     [courses, courseId],
@@ -513,6 +563,17 @@ export default function Create() {
     draftRef.current = { id: typedNoteId, courseId, title, body, dirty, sourceType: noteSourceType };
   });
 
+  // Persist the capture course when "remember last used" is on. Best-effort:
+  // a failed write just means the next session restores an older course.
+  const rememberLastCourse = useCallback(
+    async (rememberedCourseId: string) => {
+      const stored = await getSetting(db, "remember_capture_course").catch(() => null);
+      if (stored === "0") return;
+      await setSetting(db, "create_last_course", rememberedCourseId).catch(() => {});
+    },
+    [db],
+  );
+
   // Swap in an existing note when ?noteId= arrives (and silently save the
   // outgoing draft first so nothing typed is lost). noteLoading is derived
   // from targetNoteId !== typedNoteId, so this effect never flips state
@@ -529,8 +590,6 @@ export default function Create() {
         if (cancelled) return;
         historyRef.current = [];
         setHistoryDepth(0);
-        setPreviewing(false);
-        setSelectionOverride(null);
         if (note) {
           setTypedNoteId(note.id);
           setTitle(note.title);
@@ -598,7 +657,6 @@ export default function Create() {
             draftRef.current = { ...current, dirty: false };
             setDirty(false);
             setTypedStatus("saved");
-            setSavedAt(nowLabel());
           }
         })
         .catch(() => {
@@ -717,6 +775,7 @@ export default function Create() {
       await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
       await createRecordingSession(db, sessionId, course.id);
       sessionRef.current = { id: sessionId, courseId: course.id };
+      void rememberLastCourse(course.id);
       segmentIdRef.current = null;
       baseMsRef.current = 0;
       segmentMsRef.current = 0;
@@ -733,7 +792,9 @@ export default function Create() {
     }
   };
 
-  const finishRecording = async (opts: { alreadyStopped?: boolean } = {}) => {
+  const finishRecording = async (
+    opts: { alreadyStopped?: boolean; target?: UploadTarget } = {},
+  ) => {
     const session = sessionRef.current;
     if (!session) {
       setRecordPhase("idle");
@@ -758,6 +819,7 @@ export default function Create() {
         body: "",
         sourceType: "audio",
         sourceRef: session.id,
+        noteKind: opts.target === "course_reference" ? "reference" : undefined,
       });
       for (const segment of segments) {
         await enqueueUpload(db, {
@@ -779,7 +841,27 @@ export default function Create() {
         setRecordPhase("idle");
         setRecordMs(0);
       }, 3000);
-      void flushUploads({ db, getAuthToken }).finally(() => refreshUploads());
+      if (opts.target) {
+        // The auto-generate preference (Data & AI settings) decides whether a
+        // capture immediately queues summary→cards→quiz. When it is off the
+        // note saves with its chosen kind and generation stays manual on the
+        // note viewer. The generation waits (in the drain) for all segments
+        // to upload, so queueing right away is safe even offline.
+        const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
+        if (autoGenerate) {
+          await enqueueGeneration(
+            db,
+            noteId,
+            opts.target === "course_reference" ? "course_reference" : "study_set",
+          );
+        }
+      }
+      void flushUploads({ db, getAuthToken }).finally(() => {
+        refreshUploads();
+        if (opts.target) {
+          void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+        }
+      });
     } catch {
       // The session row is still in_progress, so the recovery banner offers
       // Resume / Save / Discard on the next visit instead of losing the take.
@@ -861,10 +943,31 @@ export default function Create() {
     }
   };
 
+  // Done presses stop the take and ask what to make before saving. Segment
+  // bookkeeping happens here (not in finishRecording) so the session still
+  // belongs to `sessionRef` when the sheet confirms — a crash in between
+  // recovers through the existing banner instead of losing the take.
   const stopRecording = async () => {
     if (recordPhase !== "recording" && recordPhase !== "paused") return;
     if (stopping || rotatingRef.current) return;
-    await finishRecording();
+    setStopping(true);
+    try {
+      await recorder.stop();
+      const segmentId = segmentIdRef.current;
+      if (segmentId !== null) {
+        await finalizeSegment(db, segmentId, segmentMsRef.current);
+        segmentIdRef.current = null;
+      }
+      setRecordPhase("idle");
+      setRecordMs(baseMsRef.current);
+      setPendingPrompt({ mode: "recording", target: "lecture_note" });
+    } catch {
+      // Nothing finalised cleanly — fall back to the plain save path (the
+      // in-progress session stays recoverable through the banner).
+      await finishRecording().catch(() => {});
+    } finally {
+      setStopping(false);
+    }
   };
 
   // An un-finalised chunk written by a crash is not reliably playable, so
@@ -912,7 +1015,10 @@ export default function Create() {
       await completeRecordingSession(db, recovery.session.id);
       setUsedRecordings((count) => count + 1);
       refreshRecoveries();
-      void flushUploads({ db, getAuthToken }).finally(() => refreshUploads());
+      void flushUploads({ db, getAuthToken }).finally(() => {
+        refreshUploads();
+        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+      });
     } catch {
       Alert.alert("Couldn’t save the recording", "Try again in a moment.");
     }
@@ -966,7 +1072,7 @@ export default function Create() {
     }
   };
 
-  const persistNote = async (queueSummary: boolean) => {
+  const persistNote = async (queueSummary: boolean, target?: UploadTarget) => {
     if (!course || !canSave) return;
     setTypedStatus("saving");
     try {
@@ -976,14 +1082,20 @@ export default function Create() {
         title: title.trim() || "Untitled note",
         body,
         sourceType: noteSourceType ?? "typed",
+        noteKind: target === "course_reference" ? "reference" : undefined,
       });
-      setSavedAt(nowLabel());
-      setTypedStatus(queueSummary ? "queued" : "saved");
+      void rememberLastCourse(course.id);
+      const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
+      setTypedStatus(queueSummary && autoGenerate ? "queued" : "saved");
       setDirty(false);
-      if (queueSummary) {
+      if (queueSummary && autoGenerate) {
         // Local-first: the note's ai_state flips immediately; the drain call
         // self-gates on connectivity and mirrors pipeline stages to this UI.
-        await enqueueGeneration(db, typedNoteId);
+        await enqueueGeneration(
+          db,
+          typedNoteId,
+          target === "course_reference" ? "course_reference" : "study_set",
+        );
         setAiState("queued");
         void drainGenerationQueue({
           db,
@@ -1006,6 +1118,7 @@ export default function Create() {
     if (!note) return;
     setAiState(note.aiState);
     setSummaryMarkdown(note.summary);
+    setOpenedNoteKind(note.noteKind);
     if (note.aiState === "failed") {
       const generation = await db
         .getFirstAsync<{ error: string }>(
@@ -1025,7 +1138,8 @@ export default function Create() {
     aiState === "queued" ||
     aiState === "transcribing" ||
     aiState === "summarising" ||
-    aiState === "making_cards";
+    aiState === "making_cards" ||
+    aiState === "writing";
   useEffect(() => {
     if (!aiActive) return;
     const timer = setInterval(() => {
@@ -1059,10 +1173,13 @@ export default function Create() {
     setReported(false);
     setTypedStatus("idle");
     setDirty(false);
-    setPreviewing(false);
-    setSelectionOverride(null);
     historyRef.current = [];
     setHistoryDepth(0);
+    void getSetting(db, "remember_capture_course")
+      .then((stored) => {
+        if (stored === "0") setPickedCourseId(null);
+      })
+      .catch(() => {});
   };
 
   // Done: keep everything typed (quiet save) and drop back to a fresh draft,
@@ -1113,25 +1230,26 @@ export default function Create() {
     setHistoryDepth(historyRef.current.length);
   };
 
-  const applyTool = (tool: MarkdownTool) => {
-    if (previewing) return;
-    pushHistory(body);
-    const result = applyMarkdownTool(body, selection.start, selection.end, tool);
-    setBody(result.text);
-    setSelection({ start: result.selectionStart, end: result.selectionEnd });
-    setSelectionOverride({ start: result.selectionStart, end: result.selectionEnd });
+  const runEditorTool = (tool: ToolKey) => {
+    if (tool === "undo") {
+      const previous = historyRef.current.pop();
+      if (previous === undefined) return;
+      setHistoryDepth(historyRef.current.length);
+      setBody(previous);
+      setDirty(true);
+      editorRef.current?.setValue(previous);
+      editorRef.current?.focus();
+      return;
+    }
+    pushHistory(bodyRef.current);
     setDirty(true);
-    bodyInputRef.current?.focus();
-  };
-
-  const undoTool = () => {
-    if (previewing) return;
-    const previous = historyRef.current.pop();
-    if (previous === undefined) return;
-    setHistoryDepth(historyRef.current.length);
-    setBody(previous);
-    setDirty(true);
-    bodyInputRef.current?.focus();
+    const editor = editorRef.current;
+    if (!editor) return;
+    if (tool === "bold") editor.toggleBold();
+    else if (tool === "italic") editor.toggleItalic();
+    else if (tool === "heading") editor.toggleHeading(2);
+    else if (tool === "bullet") editor.toggleUnorderedList();
+    else editor.toggleOrderedList();
   };
 
   const queueFile = async (input: {
@@ -1139,6 +1257,7 @@ export default function Create() {
     name: string;
     size: number;
     kind: UploadKind;
+    target: UploadTarget;
   }) => {
     if (!course) {
       Alert.alert("Pick a course first", "Choose which course this file belongs to.");
@@ -1161,6 +1280,7 @@ export default function Create() {
         title: input.name.replace(/\.[^.]+$/, "").trim() || "Untitled file",
         body: "",
         sourceType: "file",
+        noteKind: input.target === "course_reference" ? "reference" : "note",
       });
       await enqueueUpload(db, {
         noteId,
@@ -1168,14 +1288,49 @@ export default function Create() {
         localPath: input.uri,
         format,
         bytes: input.size,
+        target: input.target,
       });
+      void rememberLastCourse(course.id);
       refreshUploads();
-      void flushUploads({ db, getAuthToken }).finally(() => refreshUploads());
+      void flushUploads({ db, getAuthToken }).finally(() => {
+        refreshUploads();
+        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+      });
     } catch {
       Alert.alert(
         "Couldn’t queue the upload",
         "Your file is still on this device — try again.",
       );
+    }
+  };
+
+  const confirmDestination = async () => {
+    const prompt = pendingPrompt;
+    if (!prompt) return;
+    setPendingPrompt(null);
+    if (prompt.mode === "file") {
+      await queueFile({
+        uri: prompt.uri!,
+        name: prompt.name!,
+        size: prompt.size!,
+        kind: prompt.kind!,
+        target: prompt.target,
+      });
+    } else if (prompt.mode === "typing") {
+      await persistNote(true, prompt.target);
+    } else {
+      await finishRecording({ target: prompt.target });
+    }
+  };
+
+  // Recordings interpret a swiped sheet (or the explicit row) as "keep the
+  // take, skip the AI". Typing dismisses without saving anything.
+  const dismissDestination = () => {
+    const prompt = pendingPrompt;
+    if (!prompt) return;
+    setPendingPrompt(null);
+    if (prompt.mode === "recording") {
+      void finishRecording();
     }
   };
 
@@ -1188,11 +1343,13 @@ export default function Create() {
       });
       if (result.canceled) return;
       const asset = result.assets[0];
-      await queueFile({
+      setPendingPrompt({
+        mode: "file",
         uri: asset.uri,
         name: asset.name,
         size: asset.size ?? 0,
         kind: "document",
+        target: "lecture_note",
       });
     } catch {
       Alert.alert("Couldn’t open the file picker", "Try again in a moment.");
@@ -1217,11 +1374,13 @@ export default function Create() {
           : await launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.8 });
       if (result.canceled) return;
       const asset = result.assets[0];
-      await queueFile({
+      setPendingPrompt({
+        mode: "file",
         uri: asset.uri,
         name: asset.fileName ?? `photo-${Date.now()}.jpg`,
         size: asset.fileSize ?? 0,
         kind: "image",
+        target: "lecture_note",
       });
     } catch {
       Alert.alert("Couldn’t open the camera", "Try again in a moment.");
@@ -1232,7 +1391,10 @@ export default function Create() {
     try {
       await updateUploadState(db, item.id, { state: "pending", error: null });
       refreshUploads();
-      void flushUploads({ db, getAuthToken }).finally(() => refreshUploads());
+      void flushUploads({ db, getAuthToken }).finally(() => {
+        refreshUploads();
+        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+      });
     } catch {
       // Refresh below surfaces the unchanged row.
       refreshUploads();
@@ -1244,7 +1406,7 @@ export default function Create() {
     : typedStatus === "saving"
       ? "Saving…"
       : typedStatus === "saved"
-        ? `Saved ${savedAt}`
+        ? "Saved offline"
         : typedStatus === "queued"
           ? "Summary queued"
           : "Offline note";
@@ -1259,16 +1421,16 @@ export default function Create() {
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <View className="flex-row items-center justify-between">
+        <View className="relative flex-row items-center justify-center">
           <Text className="text-h1 font-sans-extrabold text-ink">Create</Text>
           <Pressable
             onPress={() => setHelpOpen(true)}
             hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="Help with creating"
-            className="h-11 w-11 items-center justify-center rounded-full border border-line bg-surface active:opacity-80"
+            className="absolute right-0 h-11 w-11 items-center justify-center rounded-full border border-line bg-surface active:opacity-80"
           >
-            <CircleHelp size={20} color={colors.ink.soft} />
+            <CircleHelp size={20} color={pv.ink.soft} />
           </Pressable>
         </View>
 
@@ -1360,7 +1522,7 @@ export default function Create() {
                               fill={colors.ink.inverse}
                             />
                           ) : (
-                            <Mic size={38} color={colors.ink.DEFAULT} strokeWidth={2.25} />
+                            <Mic size={38} color={pv.ink.DEFAULT} strokeWidth={2.25} />
                           )}
                         </View>
                       </View>
@@ -1560,48 +1722,67 @@ export default function Create() {
 
                 {uploadItems.length ? (
                   <View className="mt-4 gap-3 rounded-card bg-surface p-card shadow-card">
-                    <Text className="text-caption font-sans-extrabold text-ink-soft">
-                      UPLOAD QUEUE
-                    </Text>
+                    <View className="flex-row items-center justify-between">
+                      <Text className="text-caption font-sans-extrabold text-ink-soft">
+                        UPLOAD QUEUE
+                      </Text>
+                      <Pressable
+                        onPress={() => router.push("/uploads")}
+                        accessibilityRole="link"
+                        accessibilityLabel="Open the uploads screen"
+                        className="active:opacity-70"
+                      >
+                        <Text className="text-caption font-sans-bold text-brand">
+                          View uploads
+                        </Text>
+                      </Pressable>
+                    </View>
                     {uploadItems.map((item) => (
-                      <View key={item.id} className="flex-row items-center gap-3">
-                        <View className="h-9 w-9 shrink-0 items-center justify-center rounded-full bg-success-soft">
-                          {item.kind === "image" ? (
-                            <ImageIcon size={16} color={colors.brand.DEFAULT} />
-                          ) : item.kind === "audio" ? (
-                            <Mic size={16} color={colors.brand.DEFAULT} />
-                          ) : (
-                            <FileText size={16} color={colors.brand.DEFAULT} />
-                          )}
-                        </View>
-                        <View className="flex-1">
-                          <Text
-                            numberOfLines={1}
-                            className="text-body font-sans-bold text-ink"
-                          >
-                            {baseName(item.localPath)}
-                          </Text>
-                          <Text
-                            numberOfLines={2}
-                            className={`text-caption ${
-                              item.state === "failed" ? "text-danger" : "text-ink-soft"
-                            }`}
-                          >
-                            {uploadStateLabel(item)}
-                            {item.state === "failed" && item.error ? ` — ${item.error}` : ""}
-                          </Text>
-                        </View>
-                        {item.state === "failed" ? (
-                          <Pressable
-                            onPress={() => retryUpload(item)}
-                            accessibilityRole="button"
-                            accessibilityLabel={`Retry upload of ${baseName(item.localPath)}`}
-                            className="min-h-9 flex-row items-center justify-center rounded-btn border border-brand px-3 active:opacity-80"
-                          >
-                            <Text className="text-caption font-sans-bold text-brand">
-                              Retry
+                      <View key={item.id} className="gap-2">
+                        <View className="flex-row items-center gap-3">
+                          <View className="h-9 w-9 shrink-0 items-center justify-center rounded-full bg-success-soft">
+                            {item.kind === "image" ? (
+                              <ImageIcon size={16} color={colors.brand.DEFAULT} />
+                            ) : item.kind === "audio" ? (
+                              <Mic size={16} color={colors.brand.DEFAULT} />
+                            ) : (
+                              <FileText size={16} color={colors.brand.DEFAULT} />
+                            )}
+                          </View>
+                          <View className="flex-1">
+                            <Text
+                              numberOfLines={1}
+                              className="text-body font-sans-bold text-ink"
+                            >
+                              {baseName(item.localPath)}
                             </Text>
-                          </Pressable>
+                            <Text
+                              numberOfLines={2}
+                              className={`text-caption ${
+                                item.state === "failed" ? "text-danger" : "text-ink-soft"
+                              }`}
+                            >
+                              {uploadStateLabel(item)}
+                              {item.state === "failed" && item.error
+                                ? ` — ${item.error}`
+                                : ""}
+                            </Text>
+                          </View>
+                          {item.state === "failed" ? (
+                            <Pressable
+                              onPress={() => retryUpload(item)}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Retry upload of ${baseName(item.localPath)}`}
+                              className="min-h-9 flex-row items-center justify-center rounded-btn border border-brand px-3 active:opacity-80"
+                            >
+                              <Text className="text-caption font-sans-bold text-brand">
+                                Retry
+                              </Text>
+                            </Pressable>
+                          ) : null}
+                        </View>
+                        {item.state === "uploading" ? (
+                          <ProgressBar progress={item.progress} showPercent />
                         ) : null}
                       </View>
                     ))}
@@ -1627,7 +1808,7 @@ export default function Create() {
                         setDirty(true);
                       }}
                       placeholder="Note title"
-                      placeholderTextColor={colors.ink.faint}
+                      placeholderTextColor={pv.ink.faint}
                       className="flex-1 text-h3 font-sans-extrabold text-ink"
                       accessibilityLabel="Note title"
                     />
@@ -1661,47 +1842,53 @@ export default function Create() {
                       ) : null}
                     </View>
                   </View>
-                  {previewing ? (
-                    <Markdown text={body} className="mt-3 min-h-44" />
-                  ) : (
-                    <TextInput
-                      ref={bodyInputRef}
-                      value={body}
-                      onChangeText={(value) => {
-                        setBody(value);
+                  <View className="mt-3">
+                    <EnrichedMarkdownTextInput
+                      key={typedNoteId}
+                      ref={editorRef}
+                      defaultValue={body}
+                      onChangeMarkdown={(markdown) => {
+                        setBody(markdown);
                         setDirty(true);
                       }}
-                      onSelectionChange={(event) => {
-                        const next = event.nativeEvent.selection;
-                        setSelection(next);
-                        if (
-                          selectionOverride &&
-                          next.start === selectionOverride.start &&
-                          next.end === selectionOverride.end
-                        ) {
-                          setSelectionOverride(null);
-                        }
+                      onChangeState={setStyleState}
+                      markdownShortcuts={{
+                        heading: true,
+                        unorderedList: true,
+                        orderedList: true,
                       }}
-                      selection={selectionOverride ?? undefined}
                       placeholder="Start writing…"
-                      placeholderTextColor={colors.ink.faint}
-                      multiline
-                      textAlignVertical="top"
-                      className="mt-3 min-h-44 text-body leading-7 text-ink"
+                      placeholderTextColor={pv.ink.faint}
+                      cursorColor={colors.brand.DEFAULT}
+                      selectionColor={colors.brand.DEFAULT}
+                      scrollEnabled={false}
+                      markdownStyle={editorMarkdownStyle(pv.ink.DEFAULT)}
+                      style={editorBodyStyle(pv.ink.DEFAULT)}
                       accessibilityLabel="Note body"
                     />
-                  )}
+                  </View>
                   <View className="mt-3 flex-row items-center justify-between border-t border-line pt-2">
                     <View className="flex-row items-center">
                       {TOOLS.map(({ key, label, Icon }) => {
                         const isUndo = key === "undo";
-                        const disabledTool =
-                          previewing || (isUndo && historyDepth === 0);
+                        const disabledTool = isUndo && historyDepth === 0;
+                        const activeStyle =
+                          key === "bold"
+                            ? styleState.bold.isActive
+                            : key === "italic"
+                              ? styleState.italic.isActive
+                              : key === "heading"
+                                ? styleState.heading.isActive
+                                : key === "bullet"
+                                  ? styleState.unorderedList.isActive
+                                  : key === "numbered"
+                                    ? styleState.orderedList.isActive
+                                    : false;
                         return (
                           <Pressable
                             key={key}
                             disabled={disabledTool}
-                            onPress={() => (isUndo ? undoTool() : applyTool(key))}
+                            onPress={() => runEditorTool(key)}
                             accessibilityRole="button"
                             accessibilityLabel={label}
                             accessibilityState={{ disabled: disabledTool }}
@@ -1709,24 +1896,16 @@ export default function Create() {
                               disabledTool ? "opacity-40" : ""
                             }`}
                           >
-                            <Icon size={19} color={colors.ink.DEFAULT} />
+                            <Icon
+                              size={19}
+                              color={
+                                activeStyle ? colors.brand.DEFAULT : pv.ink.DEFAULT
+                              }
+                            />
                           </Pressable>
                         );
                       })}
                     </View>
-                    <Pressable
-                      onPress={() => {
-                        setPreviewing((current) => !current);
-                        setSelectionOverride(null);
-                      }}
-                      accessibilityRole="button"
-                      accessibilityLabel={previewing ? "Edit note" : "Preview note"}
-                      className="h-11 flex-row items-center justify-center px-2 active:opacity-80"
-                    >
-                      <Text className="text-caption font-sans-bold text-brand">
-                        {previewing ? "Edit" : "Preview"}
-                      </Text>
-                    </Pressable>
                   </View>
                 </View>
 
@@ -1787,7 +1966,11 @@ export default function Create() {
                           ? "Transcribing your lecture…"
                           : aiState === "summarising"
                             ? "Writing your summary…"
-                            : "Making flashcards and a quiz…"}
+                        : aiState === "writing"
+                          ? openedNoteKind === "reference"
+                            ? "Writing your reference…"
+                            : "Writing your lecture note…"
+                          : "Making flashcards and a quiz…"}
                     </Text>
                   </View>
                 ) : summaryMarkdown ? (
@@ -1806,7 +1989,7 @@ export default function Create() {
                         accessibilityLabel="Report a mistake in the summary"
                         className="h-9 w-9 items-center justify-center rounded-full active:opacity-80"
                       >
-                        <Flag size={17} color={colors.ink.faint} />
+                        <Flag size={17} color={pv.ink.faint} />
                       </Pressable>
                     </View>
                     <Markdown text={summaryMarkdown} className="mt-3" />
@@ -1838,7 +2021,7 @@ export default function Create() {
                     accessibilityRole="button"
                     accessibilityLabel="Save and summarise"
                   >
-                    <Sparkles size={17} color={colors.ink.DEFAULT} />
+                    <Sparkles size={17} color={pv.ink.DEFAULT} />
                     <Text className="text-label font-sans-extrabold text-ink">
                       Save and summarise
                     </Text>
@@ -1861,6 +2044,106 @@ export default function Create() {
         }}
         onClose={() => setPickingCourse(false)}
       />
+
+      <BottomSheet
+        visible={pendingPrompt !== null}
+        onClose={dismissDestination}
+        title="What should Sua make?"
+        subtitle={
+          pendingPrompt
+            ? pendingPrompt.mode === "file"
+              ? `${pendingPrompt.name} → ${course?.name ?? "your course"}`
+              : `${pendingPrompt.mode === "typing" ? "Note" : "Recording"} → ${
+                  course?.name ?? "your course"
+                }`
+            : undefined
+        }
+      >
+        {pendingPrompt ? (
+          <>
+            {(
+              [
+                {
+                  target: "lecture_note" as UploadTarget,
+                  Icon: FileText,
+                  title: "Lecture note",
+                  body: "Full summary with flashcards and a quiz. Lives in the course notes list.",
+                },
+                {
+                  target: "course_reference" as UploadTarget,
+                  Icon: BookOpen,
+                  title: "Course reference",
+                  body: "Condensed key terms, formulas and must-know facts, shown in the course Reference section.",
+                },
+              ] as const
+            ).map(({ target, Icon, title: rowTitle, body }) => {
+              const selected = pendingPrompt.target === target;
+              return (
+                <Pressable
+                  key={target}
+                  onPress={() =>
+                    setPendingPrompt({ ...pendingPrompt, target })
+                  }
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}
+                  accessibilityLabel={`Set destination to ${rowTitle}`}
+                  className={`flex-row gap-3 rounded-input border p-4 active:opacity-80 ${
+                    selected ? "border-brand bg-success-soft" : "border-line bg-surface"
+                  }`}
+                >
+                  <View className="h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand/10">
+                    <Icon size={18} color={colors.brand.DEFAULT} />
+                  </View>
+                  <View className="flex-1 gap-1">
+                    <Text className="text-body font-sans-bold text-ink">{rowTitle}</Text>
+                    <Text className="text-small leading-5 text-ink-soft">{body}</Text>
+                  </View>
+                </Pressable>
+              );
+            })}
+            <Pressable
+              onPress={confirmDestination}
+              accessibilityRole="button"
+              accessibilityLabel={
+                pendingPrompt.mode === "file"
+                  ? "Queue the upload"
+                  : pendingPrompt.mode === "typing"
+                    ? "Save the note"
+                    : "Save the recording"
+              }
+              className="mt-1 min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand active:opacity-80"
+            >
+              {pendingPrompt.mode === "file" ? (
+                <CloudUpload size={17} color={colors.ink.inverse} />
+              ) : (
+                <Save size={17} color={colors.ink.inverse} />
+              )}
+              <Text className="text-body font-sans-bold text-surface">
+                {pendingPrompt.mode === "file"
+                  ? "Add to uploads"
+                  : pendingPrompt.mode === "typing"
+                    ? "Save note"
+                    : "Save recording"}
+              </Text>
+            </Pressable>
+            {pendingPrompt.mode === "recording" ? (
+              <Pressable
+                onPress={() => {
+                  setPendingPrompt(null);
+                  void finishRecording();
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Save the recording without an AI summary"
+                className="min-h-9 items-center justify-center active:opacity-70"
+              >
+                <Text className="text-small font-sans-bold text-ink-soft">
+                  Save without AI
+                </Text>
+              </Pressable>
+            ) : null}
+          </>
+        ) : null}
+      </BottomSheet>
 
       <BottomSheet
         visible={helpOpen}
@@ -1897,7 +2180,7 @@ export default function Create() {
               value={reportComment}
               onChangeText={setReportComment}
               placeholder="What was wrong?"
-              placeholderTextColor={colors.ink.faint}
+              placeholderTextColor={pv.ink.faint}
               multiline
               textAlignVertical="top"
               className="min-h-24 rounded-input border border-line bg-surface p-3 text-body leading-6 text-ink"

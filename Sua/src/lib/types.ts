@@ -15,6 +15,8 @@ export type UserProfile = {
   programme: string;
   level: string;
   examDate?: string;
+  plan?: string;
+  planExpiresAt?: string | null;
 };
 
 export type ServerCourse = {
@@ -53,14 +55,33 @@ export type ServerProfileUpdate = {
   onboardingCompleted?: boolean;
 };
 
+// Settings stored in the device settings KV table. Keys that gate behaviour
+// ship "on" when the row is missing.
+export type SettingKey =
+  | "wifi_only"
+  | "auto_generate"
+  | "review_reminder_enabled"
+  | "review_reminder_time"
+  | "push_enabled"
+  | "expo_push_token";
+
 export type AiState =
   | "none"
   | "queued"
   | "transcribing"
   | "summarising"
   | "making_cards"
+  | "writing"
   | "ready"
   | "failed";
+
+export type NoteKind = "note" | "reference";
+
+// Destination the student picked for a document/photo upload.
+export type UploadTask = "lecture_note" | "course_reference";
+
+// What a generation job should produce (server job `kind`).
+export type GenerationKind = "study_set" | "course_reference";
 
 export type ServerNote = {
   id: string;
@@ -71,6 +92,7 @@ export type ServerNote = {
   aiState?: AiState;
   transcript?: string | null;
   summary?: string | null;
+  noteKind?: NoteKind;
   createdAt: string;
   updatedAt: string;
 };
@@ -82,6 +104,7 @@ export type NoteSyncChange = {
   title?: string;
   body?: string;
   sourceType?: "typed" | "audio" | "file";
+  noteKind?: NoteKind;
   updatedAt?: string;
 };
 
@@ -108,6 +131,7 @@ export type ServerAsset = {
   resourceType: string;
   status: "pending" | "active";
   noteId: string | null;
+  task?: UploadTask | "none";
   extractedText?: string | null;
   createdAt: string;
 };
@@ -158,8 +182,56 @@ export type ServerQuiz = {
 // GET /api/notes/:noteId/study — everything generated for one note.
 export type ServerStudy = {
   summaryMarkdown: string;
-  flashcards: { id: string; front: string; back: string }[];
+  flashcards: {
+    id: string;
+    front: string;
+    back: string;
+    dueAt?: string;
+    ease?: number;
+    intervalDays?: number;
+    reps?: number;
+  }[];
   quizzes: ServerQuiz[];
+};
+
+// POST /api/study/sync/reviews — refreshed scheduling for replayed cards.
+export type ServerCardScheduling = {
+  id: string;
+  dueAt: string;
+  ease: number;
+  intervalDays: number;
+  reps: number;
+};
+
+export type ServerReviewSyncResponse = { cards: Record<string, ServerCardScheduling> | null };
+
+export type ServerAttemptDetails = {
+  questionId: string;
+  answer?: string;
+  verdict?: boolean;
+  partial?: boolean;
+  comment?: string;
+};
+
+// POST /api/study/attempts + GET /api/study/attempts/:id
+export type ServerAttempt = {
+  id: string;
+  state: string;
+  correct: number;
+  total: number;
+  details: ServerAttemptDetails[] | null;
+  error?: string | null;
+};
+
+export type ServerCard = {
+  id: string;
+  noteId: string;
+  front: string;
+  back: string;
+  dueAt: string;
+  ease: number;
+  intervalDays: number;
+  reps: number;
 };
 
 export type ServerFeedback = { id: string };

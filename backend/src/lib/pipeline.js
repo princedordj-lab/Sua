@@ -7,7 +7,9 @@ import {
   geminiImageText,
   geminiTranscribe,
   openRouterChat,
+  aiConfigured,
 } from "./ai.js";
+import { enqueueStudyJob, studyQueueConfigured } from "./queue.js";
 import { extractDocumentText } from "./extract.js";
 import { prisma } from "../config/prisma.js";
 
@@ -108,7 +110,7 @@ async function recordAiCall(jobId, step, result) {
  * (3 attempts with exponential backoff); the Job row carries the stage/error
  * the app displays. Every persist is idempotent (replace) so reruns are clean.
  */
-export async function processStudySet(jobId) {
+export async function processJob(jobId) {
   const job = await prisma.job.findUnique({
     where: { id: jobId },
     include: {
@@ -118,94 +120,128 @@ export async function processStudySet(jobId) {
   });
   if (!job) throw new Error(`Job ${jobId} not found`);
   if (job.state === "done") return;
+  if (job.kind === "course_reference") {
+    await processReference(job);
+    return;
+  }
+  if (job.kind === "quiz_marking") {
+    await processQuizMarking(job);
+    return;
+  }
+  await processStudySet(job);
+}
 
-  const { note, user } = job;
+async function startAttempt(job) {
   await prisma.job.update({
     where: { id: job.id },
     data: { startedAt: new Date(), attempts: { increment: 1 } },
   });
+}
+
+function courseContextOf(note) {
+  return [
+    note.course.name,
+    note.course.code ? `course code ${note.course.code}` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+const WEAK_SOURCE_ERROR =
+  "No usable source material. Record a longer lecture, upload readable files, or add typed content.";
+
+/** Doc text (already extracted or re-fetched), image OCR, audio transcription. */
+async function collectRawSource(job, note) {
+  const orderedAssets = note.assets
+    .filter((asset) => asset.status === "active" && asset.publicId !== "pending")
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+
+  const pieces = [];
+  if (note.sourceType === "typed" && char(note.body)) {
+    pieces.push(char(note.body));
+  }
+
+  for (const asset of orderedAssets) {
+    if (asset.kind === "document" && asset.extractedText) {
+      pieces.push(char(asset.extractedText));
+      continue;
+    }
+    if (asset.kind === "document") {
+      const bytes = await fetchAssetBytes(asset);
+      pieces.push(char(extractDocumentText(bytes, asset.format, asset.kind) ?? ""));
+      continue;
+    }
+    if (asset.kind === "image") {
+      const bytes = await fetchAssetBytes(asset);
+      const ocr = await geminiImageText({ bytes, mimeType: mimeFor(asset) });
+      await withUser(job.user.clerkId, (tx) =>
+        tx.asset.update({ where: { id: asset.id }, data: { extractedText: ocr.text } }),
+      );
+      await recordAiCall(job.id, "ocr", ocr);
+      if (ocr.text) pieces.push(char(ocr.text));
+      continue;
+    }
+    if (asset.kind === "audio") {
+      const bytes = await fetchAssetBytes(asset);
+      const transcription = await geminiTranscribe({
+        bytes,
+        mimeType: mimeFor(asset),
+        languageHint: "English (may include a Ghanaian university accent)",
+      });
+      await recordAiCall(job.id, "transcribe", transcription);
+      pieces.push(char(transcription.text));
+    }
+  }
+  return pieces.filter(Boolean).join("\n\n");
+}
+
+async function persistTranscript(user, note, raw) {
+  // Keep the original transcript on the note so the student can audit the AI.
+  await withUser(user.clerkId, (tx) =>
+    tx.note.update({ where: { id: note.id }, data: { transcript: raw } }),
+  );
+}
+
+async function guardRerun(job, hash) {
+  // Caching: an identical source reuses existing outputs.
+  const priorDone = await prisma.job.findFirst({
+    where: { noteId: job.noteId, state: "done", sourceHash: hash, id: { not: job.id } },
+  });
+  if (priorDone) {
+    await finishJob(job, hash);
+    return true;
+  }
+  return false;
+}
+
+export async function processStudySet(job) {
+  const { note, user } = job;
+  await startAttempt(job);
 
   try {
     // ---- 1. Assemble the raw source text --------------------------------
     await setStage(job, "transcribing");
-    const orderedAssets = note.assets
-      .filter((asset) => asset.status === "active" && asset.publicId !== "pending")
-      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-
-    const pieces = [];
-    const chunks = [];
-    if (note.sourceType === "typed" && char(note.body)) {
-      pieces.push(char(note.body));
-      chunks.push({ kind: "typed" });
-    }
-
-    for (const asset of orderedAssets) {
-      if (asset.kind === "document" && asset.extractedText) {
-        pieces.push(char(asset.extractedText));
-        chunks.push({ kind: "document" });
-        continue;
-      }
-      if (asset.kind === "document") {
-        const bytes = await fetchAssetBytes(asset);
-        pieces.push(char(extractDocumentText(bytes, asset.format, asset.kind) ?? ""));
-        chunks.push({ kind: "document" });
-        continue;
-      }
-      if (asset.kind === "image") {
-        const bytes = await fetchAssetBytes(asset);
-        const ocr = await geminiImageText({ bytes, mimeType: mimeFor(asset) });
-        await withUser(user.clerkId, (tx) =>
-          tx.asset.update({ where: { id: asset.id }, data: { extractedText: ocr.text } }),
-        );
-        await recordAiCall(job.id, "ocr", ocr);
-        if (ocr.text) {
-          pieces.push(char(ocr.text));
-          chunks.push({ kind: "image" });
-        }
-        continue;
-      }
-      if (asset.kind === "audio") {
-        const bytes = await fetchAssetBytes(asset);
-        const transcription = await geminiTranscribe({
-          bytes,
-          mimeType: mimeFor(asset),
-          languageHint: "English (may include a Ghanaian university accent)",
-        });
-        await recordAiCall(job.id, "transcribe", transcription);
-        pieces.push(char(transcription.text));
-        chunks.push({ kind: "audio" });
-      }
-    }
-
-    const raw = pieces.filter(Boolean).join("\n\n");
-    if (raw.length < 80) {
-      throw new Error(
-        "No usable source material. Record a longer lecture, upload readable files, or add typed content.",
-      );
-    }
+    const raw = await collectRawSource(job, note);
+    if (raw.length < 80) throw new Error(WEAK_SOURCE_ERROR);
 
     // ---- 2. Clean with course context ------------------------------------
-    const courseContext = [
-      note.course.name,
-      note.course.code ? `course code ${note.course.code}` : "",
-    ]
-      .filter(Boolean)
-      .join(", ");
+    const courseContext = courseContextOf(note);
     const cleaned = await cleanText(raw, courseContext, job);
+    await persistTranscript(user, note, raw);
 
-    // Keep the original transcript on the note so the student can audit the AI.
-    await withUser(user.clerkId, (tx) =>
-      tx.note.update({ where: { id: note.id }, data: { transcript: raw } }),
-    );
+    if (await guardRerun(job, sourceHashOf(cleaned))) return;
 
-    // Caching: an identical source reuses existing outputs.
-    const hash = sourceHashOf(cleaned);
-    const priorDone = await prisma.job.findFirst({
-      where: { noteId: note.id, state: "done", sourceHash: hash, id: { not: job.id } },
-    });
-    if (priorDone) {
-      await finishJob(job, hash);
-      return;
+    // ---- 2b. Full lecture note from the uploaded material -----------------
+    if (job.kind === "lecture_note") {
+      await setStage(job, "writing");
+      const body = await generateLectureNote({
+        cleaned,
+        courseContext,
+        jobId: job.id,
+      });
+      await withUser(user.clerkId, (tx) =>
+        tx.note.update({ where: { id: note.id }, data: { body } }),
+      );
     }
 
     // ---- 3. Summarise (with sectioning for long material) ----------------
@@ -250,7 +286,190 @@ export async function processStudySet(jobId) {
     await persistStudySet(job, note, studySet);
     await bumpUsage(job.userId);
     await checkDailySpend();
-    await finishJob(job, hash);
+    await finishJob(job, sourceHashOf(cleaned));
+    await notifyStudent(job, note);
+  } catch (error) {
+    const message = error?.message ?? String(error);
+    await setFailed(job, message);
+    throw error;
+  }
+}
+
+/**
+ * AI marking of short-answer quiz questions. Note.aiState is NOT touched — the
+ * note finished its own pipeline long ago; this job only settles an attempt.
+ */
+export async function processQuizMarking(job) {
+  let payload;
+  try {
+    payload = JSON.parse(job.payload ?? "{}");
+  } catch {
+    throw new Error("quiz_marking payload is not valid JSON");
+  }
+  const attemptId = payload.attemptId;
+  if (!attemptId) throw new Error("quiz_marking payload is missing attemptId");
+
+  // BullMQ owns the job retry counter; keep the Job row in step with it.
+  await prisma.job.update({
+    where: { id: job.id },
+    data: { state: "running", stage: "marking", startedAt: new Date(), attempts: { increment: 1 } },
+  });
+
+  try {
+    const attempt = await withUser(job.user.clerkId, (tx) =>
+      tx.quizAttempt.findUnique({
+        where: { id: attemptId },
+        include: { quiz: { include: { questions: { orderBy: { ordinal: "asc" } } } } },
+      }),
+    );
+    if (!attempt) throw new Error(`Attempt ${attemptId} not found for marking`);
+    if (attempt.state === "marked") {
+      // Already settled (e.g. a race with another worker); just close the job.
+      await prisma.job.update({
+        where: { id: job.id },
+        data: { state: "done", stage: "ready", finishedAt: new Date(), error: null },
+      });
+      return;
+    }
+
+    const details = Array.isArray(attempt.details) ? attempt.details : [];
+    const unmarked = details.filter(
+      (entry) => (entry.verdict === undefined || entry.verdict === null) && entry.answer,
+    );
+    if (!unmarked.length) {
+      // Client answers never reached us — nothing to mark AI-side.
+      await settleMarking(job, attemptId, details, countCorrect(details));
+      return;
+    }
+
+    const questionById = new Map(attempt.quiz.questions.map((question) => [question.id, question]));
+    const items = unmarked
+      .filter((entry) => questionById.has(String(entry.questionId)))
+      .map((entry) => {
+        const question = questionById.get(String(entry.questionId));
+        return {
+          questionId: entry.questionId,
+          prompt: question.prompt,
+          modelAnswer: question.answer,
+          explanation: question.explanation,
+          studentAnswer: String(entry.answer ?? ""),
+        };
+      });
+    if (!items.length) {
+      await settleMarking(job, attemptId, details, countCorrect(details));
+      return;
+    }
+
+    const attemptMark = async (stricter) => {
+      const result = await openRouterChat({
+        system:
+          "You are Sua's fair marking assistant for African university students. Mark each short " +
+          "answer against the model answer, accepting equivalent phrasing, synonyms and minor " +
+          "typos. Output ONLY valid JSON: {\"marks\":[{\"questionId\":\"...\",\"verdict\":\"correct|partial|wrong\",\"comment\":\"one short helpful sentence\"}]} — no prose, no code fences." +
+          (stricter ? " Schema exactly as instructed. No extra keys." : ""),
+        user: JSON.stringify({ questions: items }),
+        model: bulkModel(),
+        json: true,
+        temperature: stricter ? 0 : 0.1,
+      });
+      await recordAiCall(job.id, stricter ? "quiz_marking_retry" : "quiz_marking", result);
+      const parsed = parseStudySetJson(result.text);
+      if (!parsed || !Array.isArray(parsed.marks)) return null;
+      const shaped = parsed.marks.filter(
+        (mark) =>
+          typeof mark?.questionId === "string" &&
+          ["correct", "partial", "wrong"].includes(mark?.verdict),
+      );
+      return shaped.length === items.length ? shaped : null;
+    };
+
+    let marks = await attemptMark(false);
+    if (!marks) marks = await attemptMark(true);
+    if (!marks) {
+      // Attempt (not job) carries the failure so the app offers a retry.
+      await withUser(job.user.clerkId, (tx) =>
+        tx.quizAttempt.update({
+          where: { id: attemptId },
+          data: { state: "marking_failed", error: "The AI could not mark this attempt. Try again." },
+        }),
+      );
+      await finishMarkingJob(job);
+      return;
+    }
+
+    const markByQuestion = new Map(marks.map((mark) => [mark.questionId, mark]));
+    const merged = details.map((entry) => {
+      if (entry.verdict !== undefined && entry.verdict !== null) return entry;
+      const mark = markByQuestion.get(String(entry.questionId));
+      return {
+        ...entry,
+        verdict: mark?.verdict === "correct",
+        partial: mark?.verdict === "partial",
+        comment: mark?.comment ?? "",
+      };
+    });
+    await settleMarking(job, attemptId, merged, countCorrect(merged));
+    } catch (error) {
+    const message = error?.message ?? String(error);
+    await withUser(job.user.clerkId, (tx) =>
+      tx.quizAttempt.update({
+        where: { id: attemptId },
+        data: { state: "marking_failed", error: message.slice(0, 500) },
+      }),
+    ).catch(() => {});
+    await setFailed(job, message);
+    throw error;
+  }
+}
+
+function countCorrect(details) {
+  return details.filter((entry) => entry?.verdict === true).length;
+}
+
+async function settleMarking(job, attemptId, details, correct) {
+  await withUser(job.user.clerkId, (tx) =>
+    tx.quizAttempt.update({
+      where: { id: attemptId },
+      data: { state: "marked", details, correct },
+    }),
+  );
+  await finishMarkingJob(job);
+}
+
+async function finishMarkingJob(job) {
+  await prisma.job.update({
+    where: { id: job.id },
+    data: { state: "done", stage: "ready", finishedAt: new Date(), error: null },
+  });
+}
+
+export async function processReference(job) {
+  const { note, user } = job;
+  await startAttempt(job);
+
+  try {
+    await setStage(job, "transcribing");
+    const raw = await collectRawSource(job, note);
+    if (raw.length < 80) throw new Error(WEAK_SOURCE_ERROR);
+
+    const courseContext = courseContextOf(note);
+    const cleaned = await cleanText(raw, courseContext, job);
+    await persistTranscript(user, note, raw);
+
+    if (await guardRerun(job, sourceHashOf(cleaned))) return;
+
+    await setStage(job, "writing");
+    const reference = await generateReference({
+      cleaned,
+      courseContext,
+      jobId: job.id,
+    });
+    await withUser(user.clerkId, (tx) =>
+      tx.note.update({ where: { id: note.id }, data: { body: reference } }),
+    );
+    await bumpUsage(job.userId);
+    await checkDailySpend();
+    await finishJob(job, sourceHashOf(cleaned));
     await notifyStudent(job, note);
   } catch (error) {
     const message = error?.message ?? String(error);
@@ -282,7 +501,7 @@ function totalAudioMinutes(note) {
   return Math.max(1, Math.round((audioAssets || 1) * 2));
 }
 
-function splitSections(text) {
+function splitSections(text, { sectionLimit = SECTION_LIMIT_CHARS } = {}) {
   const paragraphs = text.split(/\n{2,}/);
   const sections = [];
   let current = "";
@@ -499,6 +718,193 @@ async function persistStudySet(job, note, set) {
 }
 
 // ---------------------------------------------------------------------------
+// Document → lecture note / course reference generation
+// ---------------------------------------------------------------------------
+
+// Material bound to one writing call; multiple parts continue one document.
+const NOTE_PART_CHARS = 12_000;
+const NOTE_MIN_CHARS = 400;
+const NOTE_BODY_MAX_CHARS = 100_000;
+
+const LECTURE_SYSTEM =
+  "You are Sua, a study assistant for African university students. You are an AI " +
+  "study tool, not the student's lecturer; students verify important facts against " +
+  "their textbook.";
+
+async function generateLectureNote({ cleaned, courseContext, jobId }) {
+  const parts = splitSections(cleaned, { sectionLimit: NOTE_PART_CHARS });
+  const bodyIntro =
+    `Course context: ${courseContext}. Write the material into a complete,` +
+    " well-structured lecture note in markdown:\n" +
+    "- H2 (##) for major sections matching how the material is organised; H3 for subtopics.\n" +
+    "- Clear flowing explanations (short paragraphs), worked examples, and bulleted lists where they help.\n" +
+    "- Preserve every fact, term, formula and example the material teaches; keep technical terms exact.\n" +
+    "- Use only what the material contains. Never invent extra content.\n" +
+    "- Return markdown only, no preamble.";
+
+  const generated = [];
+  for (const [index, part] of parts.entries()) {
+    const partHeader =
+      parts.length > 1
+        ? `This is part ${index + 1}/${parts.length} of one long material. Continue the note seamlessly from the previous parts — keep the markdown heading structure coherent, do not repeat headings.`
+        : "";
+    const result = await openRouterChat({
+      system: LECTURE_SYSTEM,
+      user: `${bodyIntro}\n${partHeader}\n\n=== SOURCE MATERIAL (part ${index + 1}/${parts.length}) ===\n${part}`,
+      model: bulkModel(),
+      temperature: 0.2,
+      maxTokens: 8192,
+    });
+    await recordAiCall(jobId, "note_part", result);
+    if (char(result.text)) generated.push(char(result.text));
+  }
+
+  const body = generated.join("\n\n");
+  if (body.length < NOTE_MIN_CHARS) {
+    throw new Error(
+      "Generated lecture note was too short. Tap Try again.",
+    );
+  }
+  return body.slice(0, NOTE_BODY_MAX_CHARS);
+}
+
+const REFERENCE_SCHEMA = `{
+  "overview": "1-3 sentences on what this material covers",
+  "keyTerms": [{"term": "...", "definition": "..."}],
+  "formulas": ["...(omit the key entirely if none exist)"],
+  "keyFacts": ["... must-know facts, all carried over from the material"],
+  "focusAreas": ["... where revision time should go (omit if unclear)"]
+}`;
+
+function referenceToMarkdown(reference) {
+  const lines = ["## Overview", char(reference.overview), "", "## Key Terms"];
+  for (const term of reference.keyTerms ?? []) {
+    lines.push(`- **${char(term.term)}** — ${char(term.definition)}`);
+  }
+  const formulas = reference.formulas ?? [];
+  if (formulas.length) {
+    lines.push("", "## Formulas");
+    for (const formula of formulas) lines.push(`- ${formula}`);
+  }
+  lines.push("", "## Must-Know Facts");
+  for (const fact of reference.keyFacts ?? []) lines.push(`- ${fact}`);
+  if ((reference.focusAreas ?? []).length) {
+    lines.push("", "## Where to Focus");
+    for (const area of reference.focusAreas) lines.push(`- ${area}`);
+  }
+  return lines.join("\n");
+}
+
+function validateReference(reference) {
+  if (!reference || !char(reference.overview)) return "missing overview";
+  const keyTerms = reference.keyTerms ?? [];
+  if (keyTerms.length < 3) return "too few key terms";
+  for (const term of keyTerms) {
+    if (!char(term?.term) || !char(term?.definition)) return "malformed key term";
+  }
+  const keyFacts = reference.keyFacts ?? [];
+  if (keyFacts.length < 1) return "no key facts";
+  return null;
+}
+
+async function generateReference({ cleaned, courseContext, jobId }) {
+  const prompt =
+    `Course context: ${courseContext}\nFrom the lecture material below, produce a compact ` +
+    "course reference sheet as a single JSON object:\n" +
+    REFERENCE_SCHEMA +
+    "\nRules:\n" +
+    "- Everything must come from the material itself; keep technical terms exact.\n" +
+    "- Key terms: 3-20 with crisp one-line definitions.\n" +
+    "- Include every formula the material states.\n" +
+    "- Return ONLY the JSON object.";
+  const attempt = async (stricter) => {
+    const result = await openRouterChat({
+      system: stricter
+        ? "Output ONLY valid JSON matching the requested schema exactly — no prose, no code fences."
+        : LECTURE_SYSTEM + " Output only valid JSON.",
+      user: `${prompt}\n\n=== MATERIAL ===\n${cleaned}`,
+      model: bulkModel(),
+      json: true,
+      maxTokens: 4096,
+      temperature: stricter ? 0 : 0.2,
+    });
+    await recordAiCall(jobId, stricter ? "generate_reference_retry" : "generate_reference", result);
+    const reference = parseStudySetJson(result.text);
+    const problem = validateReference(reference);
+    return { reference, problem };
+  };
+
+  let outcome = await attempt(false);
+  if (outcome.problem) {
+    outcome = await attempt(true);
+    if (outcome.problem) {
+      throw new Error(
+        `Generated reference failed validation (${outcome.problem}). Tap Try again.`,
+      );
+    }
+  }
+  return referenceToMarkdown(outcome.reference);
+}
+
+/**
+ * Pick up a finished upload whose note just arrived server-side (or vice
+ * versa): when a note exists, has an active asset the student marked for AI
+ * conversion, and the extraction has produced text, enqueue the conversion
+ * job once. Runs in the caller's identity context, idempotent across
+ * repeated syncs. Returns the created job or null.
+ */
+export async function maybeEnqueueGeneration(clerkId, noteId) {
+  if (!studyQueueConfigured() || !process.env.DATABASE_URL || !aiConfigured()) {
+    return null;
+  }
+  const job = await withUser(clerkId, async (tx) => {
+    const note = await tx.note.findFirst({
+      where: { id: noteId },
+      include: { jobs: true, assets: true },
+    });
+    if (!note) return null;
+    // One conversion per upload: any non-study_set job, or an active one,
+    // means the request is already accounted for.
+    if (
+      note.jobs.some(
+        (row) =>
+          row.kind !== "study_set" ||
+          row.state === "queued" ||
+          row.state === "running",
+      )
+    ) {
+      return null;
+    }
+    // Images start with no extracted text (OCR happens inside the job), so
+    // image conversions trigger immediately; documents wait for extraction.
+    const asset = note.assets.find(
+      (row) =>
+        row.status === "active" &&
+        row.task !== "none" &&
+        (row.kind === "image" || (row.extractedText ?? "").length > 0),
+    );
+    if (!asset) return null;
+    const created = await tx.job.create({
+      data: { userId: note.userId, noteId: note.id, kind: asset.task },
+    });
+    await tx.note.update({
+      where: { id: note.id },
+      data: { aiState: "queued" },
+    });
+    return created;
+  });
+  if (!job) return null;
+  try {
+    await enqueueStudyJob(job.id);
+  } catch (error) {
+    console.warn(
+      `enqueue failed for generation job ${job.id}: ${error?.message ?? error}`,
+    );
+  }
+  return job;
+}
+
+// ---------------------------------------------------------------------------
 // Usage, cost, notifications
 // ---------------------------------------------------------------------------
 
@@ -545,13 +951,29 @@ async function finishJob(job, hash) {
 }
 
 // Expo Push: fire-and-forget (a failed notification must never fail the job).
+const NOTIFY_COPY = {
+  study_set: {
+    title: "Your study set is ready",
+    body: (note) => `${note.title || "Your note"} now has a summary, flashcards and a quiz.`,
+  },
+  lecture_note: {
+    title: "Your lecture note is ready",
+    body: (note) => `${note.title || "Your note"} now has a full note, summary, flashcards and a quiz.`,
+  },
+  course_reference: {
+    title: "Your course reference is ready",
+    body: (note) => `${note.title || "Your upload"} was saved to your course reference.`,
+  },
+};
+
 async function notifyStudent(job, note) {
+  const copy = NOTIFY_COPY[job.kind] ?? NOTIFY_COPY.study_set;
   const tokens = await prisma.pushToken.findMany({ where: { userId: job.userId } });
   if (!tokens.length) return;
   const messages = tokens.slice(0, 100).map((row) => ({
     to: row.token,
-    title: "Your study set is ready",
-    body: `${note.title || "Your note"} now has a summary, flashcards and a quiz.`,
+    title: copy.title,
+    body: copy.body(note),
     sound: "default",
   }));
   try {

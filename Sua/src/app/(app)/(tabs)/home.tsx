@@ -216,8 +216,8 @@ export default function Home() {
                     key={note.id}
                     onPress={() =>
                       router.push({
-                        pathname: "/(app)/(tabs)/create",
-                        params: { mode: "typing", noteId: note.id, courseId: note.courseId },
+                        pathname: "/(app)/note/[id]",
+                        params: { id: note.id },
                       })
                     }
                     className={`min-h-20 flex-row items-center px-4 active:opacity-80 ${index ? "border-t border-line" : ""}`}
