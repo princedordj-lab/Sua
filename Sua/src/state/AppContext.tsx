@@ -15,11 +15,13 @@ import { coursesApi, profileApi, pushApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
 import {
   getSetting,
+  listNotes,
   listLocalCourses,
   pullCourseNotes,
   purgeCourseLocally,
   removeLocalCourse,
   replaceLocalCourses,
+  saveNote,
   setSetting,
   syncPendingNotes,
   upsertLocalCourse,
@@ -55,7 +57,7 @@ type AppContextValue = {
   ) => Promise<void>;
   addCourse: (course: Omit<Course, "id">) => Promise<void>;
   updateCourse: (id: string, changes: Partial<Course>) => Promise<void>;
-  deleteCourse: (id: string) => Promise<void>;
+  deleteCourse: (id: string, moveNotesToCourseId?: string) => Promise<void>;
 };
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -77,8 +79,9 @@ function serverCourseToLocal(course: ServerCourse): Course {
     id: course.id,
     code: course.code ?? "",
     name: course.name,
-    lecturer: "",
+    lecturer: course.lecturer ?? "",
     color: course.colour,
+    examDate: course.examDate,
     noteCount: 0,
     archived: course.archived,
   };
@@ -102,6 +105,8 @@ function serverCourseToCache(course: ServerCourse): Omit<LocalCourse, "updatedAt
     name: course.name,
     code: course.code ?? "",
     colour: course.colour,
+    lecturer: course.lecturer ?? "",
+    examDate: course.examDate,
     archived: course.archived,
   };
 }
@@ -111,8 +116,9 @@ function cachedCourseToApp(course: LocalCourse): Course {
     id: course.id,
     code: course.code,
     name: course.name,
-    lecturer: "",
+    lecturer: course.lecturer,
     color: course.colour,
+    examDate: course.examDate,
     noteCount: 0,
     archived: course.archived,
   };
@@ -375,6 +381,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         name: firstCourse.name,
         code: firstCourse.code || null,
         colour: firstCourse.color,
+        lecturer: firstCourse.lecturer || null,
+        examDate: firstCourse.examDate || null,
       });
       void upsertLocalCourse(db, serverCourseToCache(course)).catch(() => {});
       setHydrated((prev) => ({
@@ -396,6 +404,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         name: course.name,
         code: course.code || null,
         colour: course.color,
+        lecturer: course.lecturer || null,
+        examDate: course.examDate || null,
       });
       void upsertLocalCourse(db, serverCourseToCache(created)).catch(() => {});
       setHydrated((prev) => ({
@@ -413,6 +423,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (changes.name !== undefined) payload.name = changes.name;
       if (changes.code !== undefined) payload.code = changes.code || null;
       if (changes.color !== undefined) payload.colour = changes.color;
+      if (changes.lecturer !== undefined) payload.lecturer = changes.lecturer || null;
+      if (changes.examDate !== undefined) payload.examDate = changes.examDate || null;
       if (changes.archived !== undefined) payload.archived = changes.archived;
       const token = await getToken();
       if (!token || !userId) throw new Error("Not signed in");
@@ -430,13 +442,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const deleteCourse = useCallback(
-    async (id: string) => {
+    async (id: string, moveNotesToCourseId?: string) => {
       const token = await getToken();
       if (!token || !userId) throw new Error("Not signed in");
-      await coursesApi.remove(token, id);
-      // Server cascades the course's notes; drop the local copies and their
-      // queued sync changes so nothing syncs orphans afterwards.
-      await purgeCourseLocally(db, id);
+      if (moveNotesToCourseId) {
+        const notes = await listNotes(db, id);
+        for (const note of notes) {
+          await saveNote(db, {
+            id: note.id,
+            courseId: moveNotesToCourseId,
+            title: note.title,
+            body: note.body,
+            sourceType: note.sourceType,
+            sourceRef: note.sourceRef,
+            noteKind: note.noteKind,
+          });
+        }
+      }
+      await coursesApi.remove(token, id, moveNotesToCourseId);
+      if (!moveNotesToCourseId) {
+        // Server cascades the course's notes; drop the local copies and their
+        // queued sync changes so nothing syncs orphans afterwards.
+        await purgeCourseLocally(db, id);
+      }
       await removeLocalCourse(db, id).catch(() => {});
       setHydrated((prev) => ({
         ...prev,

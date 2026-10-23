@@ -21,7 +21,7 @@ import {
 } from "lucide-react-native";
 import { router } from "expo-router";
 import { Field, PrimaryButton } from "../../../components/ui";
-import { FormSheet } from "../../../components/sheets";
+import { CoursePickerSheet, FormSheet } from "../../../components/sheets";
 import { colors } from "../../../config/theme";
 import { usePalette } from "../../../state/appearance";
 import { courseInitials, courseStyle } from "../../../lib/course-style";
@@ -37,6 +37,8 @@ const FILTERS: { key: FilterKey; label: string }[] = [
   { key: "archived", label: "Archived" },
 ];
 
+const COURSE_COLOURS = Object.entries(colors.course) as [string, string][];
+
 function noteLabel(count: number) {
   if (count === 0) return "No notes yet";
   return `${count} ${count === 1 ? "note" : "notes"}`;
@@ -50,9 +52,13 @@ export default function Courses() {
   const [showNew, setShowNew] = useState(false);
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
+  const [lecturer, setLecturer] = useState("");
+  const [examDate, setExamDate] = useState("");
+  const [courseColor, setCourseColor] = useState<string>(colors.course.forest);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterKey>("all");
   const [actionsFor, setActionsFor] = useState<Course | null>(null);
+  const [courseToDelete, setCourseToDelete] = useState<Course | null>(null);
   const [noteCounts, setNoteCounts] = useState<Record<string, number>>({});
 
   // Real per-course note counts from SQLite; the server Course payload carries
@@ -96,18 +102,35 @@ export default function Courses() {
   const openNew = () => {
     setName("");
     setCode("");
+    setLecturer("");
+    setExamDate("");
+    setCourseColor(colors.course.forest);
     setShowNew(true);
   };
   const save = async () => {
     if (!name.trim()) return;
+    const normalizedExamDate = examDate.trim();
+    if (normalizedExamDate && Number.isNaN(new Date(normalizedExamDate).getTime())) {
+      Alert.alert("Invalid exam date", "Use a valid date such as 2026-12-15.");
+      return;
+    }
     try {
-      if (editing) await updateCourse(editing.id, { name, code });
+      if (editing) {
+        await updateCourse(editing.id, {
+          name: name.trim(),
+          code: code.trim(),
+          lecturer: lecturer.trim(),
+          examDate: normalizedExamDate || null,
+          color: courseColor,
+        });
+      }
       else
         await addCourse({
-          name,
-          code: code || "COURSE",
-          lecturer: "",
-          color: colors.brand.DEFAULT,
+          name: name.trim(),
+          code: code.trim(),
+          lecturer: lecturer.trim(),
+          color: courseColor,
+          examDate: normalizedExamDate || null,
           noteCount: 0,
         });
       setEditing(null);
@@ -123,6 +146,25 @@ export default function Courses() {
     }
   };
   const remove = (course: Course) =>
+    (noteCounts[course.id] ?? course.noteCount) > 0
+      ? Alert.alert(
+          `Delete ${course.name}?`,
+          "Move its notes to another course, or permanently delete them.",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Delete all",
+              style: "destructive",
+              onPress: () => {
+                void deleteCourse(course.id).catch(() =>
+                  Alert.alert("Could not delete course", "Check your connection and try again."),
+                );
+              },
+            },
+            { text: "Move notes", onPress: () => setCourseToDelete(course) },
+          ],
+        )
+      :
     Alert.alert(
       `Delete ${course.name}?`,
       "Notes and study sets in this course will be removed from this device.",
@@ -147,6 +189,9 @@ export default function Courses() {
     setEditing(actionsFor);
     setName(actionsFor.name);
     setCode(actionsFor.code);
+    setLecturer(actionsFor.lecturer);
+    setExamDate(actionsFor.examDate?.slice(0, 10) ?? "");
+    setCourseColor(actionsFor.color);
     setActionsFor(null);
   };
   const toggleArchive = () => {
@@ -317,6 +362,11 @@ export default function Courses() {
                           <Text className="ml-1.5 text-small text-ink-soft">
                             {noteLabel(noteCount)}
                           </Text>
+                          {course.examDate ? (
+                            <Text className="ml-2 text-caption font-sans-bold text-warning">
+                              Exam {new Date(course.examDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}
+                            </Text>
+                          ) : null}
                           {course.archived ? (
                             <View className="ml-2 rounded-chip border border-line px-2 py-0.5">
                               <Text className="text-caption font-sans-bold text-ink-faint">
@@ -416,13 +466,28 @@ export default function Courses() {
             </Pressable>
           </Pressable>
         </Modal>
+        <CoursePickerSheet
+          visible={!!courseToDelete}
+          courses={courses}
+          excludeCourseId={courseToDelete?.id}
+          heading="Move notes to"
+          onSelect={(targetId) => {
+            const source = courseToDelete;
+            setCourseToDelete(null);
+            if (!source) return;
+            void deleteCourse(source.id, targetId).catch(() =>
+              Alert.alert("Could not move notes", "Check your connection and try again."),
+            );
+          }}
+          onClose={() => setCourseToDelete(null)}
+        />
         <FormSheet
           visible={showNew || !!editing}
           onClose={() => {
             setShowNew(false);
             setEditing(null);
           }}
-          title={editing ? "Rename course" : "New course"}
+          title={editing ? "Edit course" : "New course"}
         >
           <Field
             label="Course name"
@@ -436,6 +501,40 @@ export default function Courses() {
             onChangeText={setCode}
             placeholder="e.g. CS 241"
           />
+          <Field
+            label="Lecturer (optional)"
+            value={lecturer}
+            onChangeText={setLecturer}
+            placeholder="e.g. Dr. Mensah"
+          />
+          <Field
+            label="Exam date (optional)"
+            value={examDate}
+            onChangeText={setExamDate}
+            placeholder="YYYY-MM-DD"
+            autoCapitalize="none"
+          />
+          <View className="gap-2">
+            <Text className="text-label font-sans-semibold text-ink-soft">Course colour</Text>
+            <View className="flex-row flex-wrap gap-3">
+              {COURSE_COLOURS.map(([label, value]) => {
+                const selected = courseColor === value;
+                return (
+                  <Pressable
+                    key={label}
+                    onPress={() => setCourseColor(value)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${label} course colour`}
+                    accessibilityState={{ selected }}
+                    style={{ backgroundColor: value }}
+                    className={`h-10 w-10 items-center justify-center rounded-full ${selected ? "border-4 border-ink" : ""}`}
+                  >
+                    {selected ? <Text className="text-label font-sans-extrabold text-ink-inverse">✓</Text> : null}
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
           <PrimaryButton onPress={save}>
             {editing ? "Save changes" : "Create course"}
           </PrimaryButton>

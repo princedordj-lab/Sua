@@ -69,6 +69,27 @@ async function extractFromStorage(asset) {
   return extractDocumentText(buffer, asset.format, asset.kind);
 }
 
+// Cloudinary's Admin API index can lag behind a direct upload by a few
+// seconds. Retry on transient 404s so a race between upload completion and
+// indexing doesn't surface as a permanent user-visible error.
+async function fetchRemoteWithRetry(publicId, resourceType, maxAttempts = 3, baseDelayMs = 500) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await cloudinary.api.resource(publicId, {
+        resource_type: resourceType,
+        type: "authenticated",
+      });
+    } catch (err) {
+      const isNotFound =
+        err?.http_code === 404 ||
+        /not found/i.test(err?.message ?? "");
+      if (!isNotFound || attempt === maxAttempts) throw err;
+      // Transient indexing lag — wait then retry with exponential back-off.
+      await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** (attempt - 1)));
+    }
+  }
+}
+
 function requireStorage(res) {
   if (!cloudinaryConfigured()) {
     res.status(503).json({ error: "File storage is not configured" });
@@ -94,16 +115,11 @@ uploadsRouter.post("/sign", async (req, res) => {
   }
   const noteId =
     typeof req.body?.noteId === "string" && req.body.noteId ? req.body.noteId : null;
-  // Destination the student picked in the app; audio segments never carry one.
+  // Destination the student picked in the app (e.g. lecture_note, course_reference).
   const task =
     typeof req.body?.task === "string" && TASKS.has(req.body.task)
       ? req.body.task
       : "none";
-  if (task !== "none" && !(kind in { document: 1, image: 1 })) {
-    return res.status(400).json({
-      error: "AI conversion is only available for documents and images",
-    });
-  }
 
   const outcome = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
@@ -186,10 +202,9 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     }
     let remote;
     try {
-      remote = await cloudinary.api.resource(asset.publicId, {
-        resource_type: asset.resourceType,
-      });
-    } catch {
+      remote = await fetchRemoteWithRetry(asset.publicId, asset.resourceType);
+    } catch (err) {
+      console.error(`Cloudinary complete verification failed for ${asset.publicId}:`, err);
       return { status: 400, error: "Upload not found on storage provider" };
     }
     const updated = await tx.asset.update({

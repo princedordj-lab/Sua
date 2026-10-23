@@ -27,7 +27,7 @@ import {
   launchImageLibraryAsync,
   requestCameraPermissionsAsync,
 } from "expo-image-picker";
-import { File } from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 import { EnrichedMarkdownTextInput } from "react-native-enriched-markdown";
 import type {
   EnrichedMarkdownTextInputInstance,
@@ -87,6 +87,7 @@ import {
   listUploadQueue,
   newId,
   removeRecordingSegment,
+  removeUploadQueueItem,
   saveNote,
   setSetting,
   touchSegmentDuration,
@@ -199,6 +200,13 @@ const DOCUMENT_TYPES = [
   "application/vnd.ms-powerpoint",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "text/plain",
+  "audio/x-m4a",
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/wav",
+  "audio/ogg",
+  "audio/aac",
+  "audio/*",
 ];
 
 type TypedStatus = "idle" | "saving" | "saved" | "queued";
@@ -245,6 +253,33 @@ function extensionOf(name: string, uri: string, fallback: string) {
   const fromUri = uri.match(/\.([A-Za-z0-9]+)(?:\?|$)/);
   if (fromUri) return fromUri[1].toLowerCase();
   return fallback;
+}
+
+function detectUploadKind(extension: string, mime?: string): UploadKind {
+  const ext = extension.toLowerCase().replace(/^\./, "");
+  if (["jpg", "jpeg", "png", "webp", "heic", "heif"].includes(ext) || mime?.startsWith("image/")) {
+    return "image";
+  }
+  if (["m4a", "mp3", "wav", "ogg", "aac"].includes(ext) || mime?.startsWith("audio/")) {
+    return "audio";
+  }
+  return "document";
+}
+
+function copyToPersistentStorage(sourceUri: string, fileName: string): string {
+  try {
+    const uploadDir = new Directory(Paths.document, "uploads");
+    if (!uploadDir.exists) {
+      uploadDir.create();
+    }
+    const safeName = `${Date.now()}-${fileName.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+    const destFile = new File(uploadDir, safeName);
+    const sourceFile = new File(sourceUri);
+    sourceFile.copy(destFile);
+    return destFile.uri;
+  } catch {
+    return sourceUri;
+  }
 }
 
 function fileSizeOf(path: string) {
@@ -703,6 +738,38 @@ export default function Create() {
     if (mode === "upload") refreshUploads();
   }, [mode, refreshUploads]);
 
+  const handleUploadProgress = useCallback((item: UploadQueueItem) => {
+    setUploadItems((prev) => {
+      const idx = prev.findIndex((p) => p.id === item.id);
+      if (idx === -1) return [item, ...prev];
+      const next = [...prev];
+      next[idx] = item;
+      return next;
+    });
+  }, []);
+
+  const runUploadFlush = useCallback(() => {
+    void flushUploads({
+      db,
+      getAuthToken,
+      onProgress: handleUploadProgress,
+    }).finally(() => {
+      refreshUploads();
+      void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+    });
+  }, [db, getAuthToken, handleUploadProgress, refreshUploads]);
+
+  useEffect(() => {
+    const hasActive = uploadItems.some(
+      (item) => item.state === "uploading" || item.state === "pending",
+    );
+    if (!hasActive || mode !== "upload") return;
+    const interval = setInterval(() => {
+      refreshUploads();
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [mode, refreshUploads, uploadItems]);
+
   // Leaving the screen is a clean recording boundary: finalise the in-flight
   // chunk so its file stays playable, but keep the session open — returning
   // to the Record tab offers Resume / Save / Discard instead of losing it.
@@ -736,7 +803,8 @@ export default function Create() {
 
   const beginSegment = async (sessionId: string, index: number) => {
     await recorder.prepareToRecordAsync();
-    const path = recorder.uri ?? "";
+    const path = recorder.uri;
+    if (!path) throw new Error("Audio recorder did not provide a valid file URI");
     segmentIndexRef.current = index;
     segmentMsRef.current = 0;
     segmentIdRef.current = await addRecordingSegment(db, {
@@ -856,12 +924,7 @@ export default function Create() {
           );
         }
       }
-      void flushUploads({ db, getAuthToken }).finally(() => {
-        refreshUploads();
-        if (opts.target) {
-          void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
-        }
-      });
+      runUploadFlush();
     } catch {
       // The session row is still in_progress, so the recovery banner offers
       // Resume / Save / Discard on the next visit instead of losing the take.
@@ -1015,10 +1078,11 @@ export default function Create() {
       await completeRecordingSession(db, recovery.session.id);
       setUsedRecordings((count) => count + 1);
       refreshRecoveries();
-      void flushUploads({ db, getAuthToken }).finally(() => {
-        refreshUploads();
-        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
-      });
+      const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
+      if (autoGenerate) {
+        await enqueueGeneration(db, noteId, "study_set");
+      }
+      runUploadFlush();
     } catch {
       Alert.alert("Couldn’t save the recording", "Try again in a moment.");
     }
@@ -1267,11 +1331,9 @@ export default function Create() {
       Alert.alert("File too large", "Uploads are limited to 25 MB per file.");
       return;
     }
-    const format = extensionOf(
-      input.name,
-      input.uri,
-      input.kind === "image" ? "jpg" : "pdf",
-    );
+    const fallbackFormat =
+      input.kind === "image" ? "jpg" : input.kind === "audio" ? "m4a" : "pdf";
+    const format = extensionOf(input.name, input.uri, fallbackFormat);
     try {
       const noteId = newId();
       await saveNote(db, {
@@ -1279,7 +1341,7 @@ export default function Create() {
         courseId: course.id,
         title: input.name.replace(/\.[^.]+$/, "").trim() || "Untitled file",
         body: "",
-        sourceType: "file",
+        sourceType: input.kind === "audio" ? "audio" : "file",
         noteKind: input.target === "course_reference" ? "reference" : "note",
       });
       await enqueueUpload(db, {
@@ -1292,10 +1354,7 @@ export default function Create() {
       });
       void rememberLastCourse(course.id);
       refreshUploads();
-      void flushUploads({ db, getAuthToken }).finally(() => {
-        refreshUploads();
-        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
-      });
+      runUploadFlush();
     } catch {
       Alert.alert(
         "Couldn’t queue the upload",
@@ -1343,12 +1402,15 @@ export default function Create() {
       });
       if (result.canceled) return;
       const asset = result.assets[0];
+      const ext = extensionOf(asset.name, asset.uri, "pdf");
+      const kind = detectUploadKind(ext, asset.mimeType);
+      const safeUri = copyToPersistentStorage(asset.uri, asset.name);
       setPendingPrompt({
         mode: "file",
-        uri: asset.uri,
+        uri: safeUri,
         name: asset.name,
-        size: asset.size ?? 0,
-        kind: "document",
+        size: asset.size ?? fileSizeOf(safeUri),
+        kind,
         target: "lecture_note",
       });
     } catch {
@@ -1374,11 +1436,13 @@ export default function Create() {
           : await launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.8 });
       if (result.canceled) return;
       const asset = result.assets[0];
+      const fileName = asset.fileName ?? `photo-${Date.now()}.jpg`;
+      const safeUri = copyToPersistentStorage(asset.uri, fileName);
       setPendingPrompt({
         mode: "file",
-        uri: asset.uri,
-        name: asset.fileName ?? `photo-${Date.now()}.jpg`,
-        size: asset.fileSize ?? 0,
+        uri: safeUri,
+        name: fileName,
+        size: asset.fileSize ?? fileSizeOf(safeUri),
         kind: "image",
         target: "lecture_note",
       });
@@ -1389,14 +1453,23 @@ export default function Create() {
 
   const retryUpload = async (item: UploadQueueItem) => {
     try {
-      await updateUploadState(db, item.id, { state: "pending", error: null });
-      refreshUploads();
-      void flushUploads({ db, getAuthToken }).finally(() => {
-        refreshUploads();
-        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+      await updateUploadState(db, item.id, {
+        state: "pending",
+        error: null,
+        resetAttempts: true,
       });
+      refreshUploads();
+      runUploadFlush();
     } catch {
-      // Refresh below surfaces the unchanged row.
+      refreshUploads();
+    }
+  };
+
+  const cancelUpload = async (item: UploadQueueItem) => {
+    try {
+      await removeUploadQueueItem(db, item.id);
+      refreshUploads();
+    } catch {
       refreshUploads();
     }
   };
@@ -1769,17 +1842,52 @@ export default function Create() {
                             </Text>
                           </View>
                           {item.state === "failed" ? (
+                            <View className="flex-row items-center gap-2">
+                              <Pressable
+                                onPress={() => retryUpload(item)}
+                                accessibilityRole="button"
+                                accessibilityLabel={`Retry upload of ${baseName(item.localPath)}`}
+                                className="min-h-9 flex-row items-center justify-center rounded-btn border border-brand px-3 active:opacity-80"
+                              >
+                                <Text className="text-caption font-sans-bold text-brand">
+                                  Retry
+                                </Text>
+                              </Pressable>
+                              <Pressable
+                                onPress={() => cancelUpload(item)}
+                                accessibilityRole="button"
+                                accessibilityLabel={`Remove ${baseName(item.localPath)}`}
+                                className="h-9 w-9 items-center justify-center rounded-btn border border-line bg-surface active:opacity-80"
+                              >
+                                <Trash2 size={15} color={colors.danger} />
+                              </Pressable>
+                            </View>
+                          ) : item.state === "uploaded" ? (
                             <Pressable
-                              onPress={() => retryUpload(item)}
+                              onPress={() =>
+                                router.push({
+                                  pathname: "/(app)/note/[id]",
+                                  params: { id: item.noteId },
+                                })
+                              }
                               accessibilityRole="button"
-                              accessibilityLabel={`Retry upload of ${baseName(item.localPath)}`}
-                              className="min-h-9 flex-row items-center justify-center rounded-btn border border-brand px-3 active:opacity-80"
+                              accessibilityLabel={`View note for ${baseName(item.localPath)}`}
+                              className="min-h-9 flex-row items-center justify-center rounded-btn bg-brand px-3 active:opacity-80"
                             >
-                              <Text className="text-caption font-sans-bold text-brand">
-                                Retry
+                              <Text className="text-caption font-sans-bold text-ink-inverse">
+                                View note
                               </Text>
                             </Pressable>
-                          ) : null}
+                          ) : (
+                            <Pressable
+                              onPress={() => cancelUpload(item)}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Cancel upload of ${baseName(item.localPath)}`}
+                              className="h-9 w-9 items-center justify-center rounded-btn border border-line bg-surface active:opacity-80"
+                            >
+                              <Trash2 size={15} color={pv.ink.soft} />
+                            </Pressable>
+                          )}
                         </View>
                         {item.state === "uploading" ? (
                           <ProgressBar progress={item.progress} showPercent />
@@ -2013,7 +2121,16 @@ export default function Create() {
                     <Text className="text-label font-sans-bold text-brand">Save</Text>
                   </Pressable>
                   <Pressable
-                    onPress={() => persistNote(true)}
+                    onPress={() => {
+                      if (body.trim().length < 80) {
+                        Alert.alert(
+                          "Note is a bit short",
+                          "Add a little more detail (at least a few sentences) before generating summaries and flashcards.",
+                        );
+                        return;
+                      }
+                      setPendingPrompt({ mode: "typing", target: "lecture_note" });
+                    }}
                     disabled={!canSave}
                     className={`min-h-12 flex-1 flex-row items-center justify-center gap-2 rounded-btn bg-gold shadow-gold active:opacity-80 ${
                       canSave ? "" : "opacity-45"

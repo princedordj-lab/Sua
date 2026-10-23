@@ -47,6 +47,7 @@ model Course {
   code      String?
   examDate  DateTime?
   colour    String   @default("#7C5CFC")
+  lecturer  String?
   archived  Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

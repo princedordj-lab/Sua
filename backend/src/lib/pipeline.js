@@ -68,7 +68,7 @@ function mimeFor(asset) {
 async function fetchAssetBytes(asset) {
   const url = cloudinary.url(asset.publicId, {
     resource_type: asset.resourceType,
-    type: "restricted",
+    type: "authenticated",
     sign_url: true,
     secure: true,
   });
@@ -157,7 +157,7 @@ async function collectRawSource(job, note) {
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
 
   const pieces = [];
-  if (note.sourceType === "typed" && char(note.body)) {
+  if (char(note.body)) {
     pieces.push(char(note.body));
   }
 
@@ -172,6 +172,10 @@ async function collectRawSource(job, note) {
       continue;
     }
     if (asset.kind === "image") {
+      if (asset.extractedText) {
+        pieces.push(char(asset.extractedText));
+        continue;
+      }
       const bytes = await fetchAssetBytes(asset);
       const ocr = await geminiImageText({ bytes, mimeType: mimeFor(asset) });
       await withUser(job.user.clerkId, (tx) =>
@@ -182,14 +186,22 @@ async function collectRawSource(job, note) {
       continue;
     }
     if (asset.kind === "audio") {
+      if (asset.extractedText) {
+        pieces.push(char(asset.extractedText));
+        continue;
+      }
       const bytes = await fetchAssetBytes(asset);
       const transcription = await geminiTranscribe({
         bytes,
         mimeType: mimeFor(asset),
         languageHint: "English (may include a Ghanaian university accent)",
       });
+      await withUser(job.user.clerkId, (tx) =>
+        tx.asset.update({ where: { id: asset.id }, data: { extractedText: transcription.text } }),
+      );
       await recordAiCall(job.id, "transcribe", transcription);
-      pieces.push(char(transcription.text));
+      if (transcription.text) pieces.push(char(transcription.text));
+      continue;
     }
   }
   return pieces.filter(Boolean).join("\n\n");
@@ -875,13 +887,13 @@ export async function maybeEnqueueGeneration(clerkId, noteId) {
     ) {
       return null;
     }
-    // Images start with no extracted text (OCR happens inside the job), so
-    // image conversions trigger immediately; documents wait for extraction.
+    // Images and audio start with no extracted text (OCR/transcription happens
+    // inside the job), so their conversions trigger immediately; documents wait for extraction.
     const asset = note.assets.find(
       (row) =>
         row.status === "active" &&
         row.task !== "none" &&
-        (row.kind === "image" || (row.extractedText ?? "").length > 0),
+        (row.kind === "image" || row.kind === "audio" || (row.extractedText ?? "").length > 0),
     );
     if (!asset) return null;
     const created = await tx.job.create({

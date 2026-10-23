@@ -10,12 +10,20 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  Play,
   Trash2,
 } from "lucide-react-native";
 import { useApp } from "../../../state/AppContext";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useSQLiteContext } from "expo-sqlite";
-import { deleteNote, listNotes, saveNote, type Note } from "../../../lib/notes";
+import {
+  deleteNote,
+  listNotes,
+  listStudySetNotes,
+  saveNote,
+  type LocalStudySetRef,
+  type Note,
+} from "../../../lib/notes";
 import { stripMarkdown } from "../../../lib/markdown";
 import {
   BottomSheet,
@@ -24,23 +32,39 @@ import {
   SheetAction,
 } from "../../../components/sheets";
 import { Field, PrimaryButton } from "../../../components/ui";
+import { colors } from "../../../config/theme";
+import { usePalette } from "../../../state/appearance";
+import { courseStyle } from "../../../lib/course-style";
 
 export default function CourseDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { courses, updateCourse, deleteCourse } = useApp();
+  const pv = usePalette();
   const db = useSQLiteContext();
   const [notes, setNotes] = useState<Note[]>([]);
   const [showActions, setShowActions] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
+  const [lecturer, setLecturer] = useState("");
+  const [examDate, setExamDate] = useState("");
   const [moveNote, setMoveNote] = useState<Note | null>(null);
+  const [courseToDelete, setCourseToDelete] = useState(false);
+  const [studySets, setStudySets] = useState<LocalStudySetRef[]>([]);
+  const [activeTab, setActiveTab] = useState<"notes" | "study">("notes");
+  const [showAdd, setShowAdd] = useState(false);
 
   // Reload on focus so edits made in the Create editor show up on return.
   const loadNotes = useCallback(() => {
-    listNotes(db, id)
-      .then(setNotes)
-      .catch(() => setNotes([]));
+    void Promise.all([listNotes(db, id), listStudySetNotes(db)])
+      .then(([courseNotes, allStudySets]) => {
+        setNotes(courseNotes);
+        setStudySets(allStudySets.filter((item) => item.courseId === id));
+      })
+      .catch(() => {
+        setNotes([]);
+        setStudySets([]);
+      });
   }, [db, id]);
   useFocusEffect(loadNotes);
   const course = courses.find((item) => item.id === id);
@@ -53,16 +77,33 @@ export default function CourseDetail() {
 
   const references = notes.filter((note) => note.noteKind === "reference");
   const studyNotes = notes.filter((note) => note.noteKind !== "reference");
+  const studySetCount = studySets.reduce(
+    (total, item) => total + item.flashcardCount + item.quizCount,
+    0,
+  );
+  const { accent } = courseStyle(course.color);
 
   const openActions = () => {
     setName(course.name);
     setCode(course.code);
+    setLecturer(course.lecturer);
+    setExamDate(course.examDate?.slice(0, 10) ?? "");
     setShowActions(true);
   };
   const saveRename = async () => {
     if (!name.trim()) return;
+    const normalizedExamDate = examDate.trim();
+    if (normalizedExamDate && Number.isNaN(new Date(normalizedExamDate).getTime())) {
+      Alert.alert("Invalid exam date", "Use a valid date such as 2026-12-15.");
+      return;
+    }
     try {
-      await updateCourse(id, { name: name.trim(), code });
+      await updateCourse(id, {
+        name: name.trim(),
+        code: code.trim(),
+        lecturer: lecturer.trim(),
+        examDate: normalizedExamDate || null,
+      });
       setRenaming(false);
       setShowActions(false);
     } catch {
@@ -85,6 +126,26 @@ export default function CourseDetail() {
   };
   const confirmDelete = () => {
     setShowActions(false);
+    if (notes.length > 0) {
+      Alert.alert(
+        `Delete ${course.name}?`,
+        "Move its notes to another course, or permanently delete them.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete all",
+            style: "destructive",
+            onPress: () => {
+              void deleteCourse(id)
+                .then(() => router.replace("/courses"))
+                .catch(() => Alert.alert("Could not delete course", "Check your connection and try again."));
+            },
+          },
+          { text: "Move notes", onPress: () => setCourseToDelete(true) },
+        ],
+      );
+      return;
+    }
     Alert.alert(
       `Delete ${course.name}?`,
       "Notes and study sets in this course will be removed from this device.",
@@ -203,18 +264,56 @@ export default function CourseDetail() {
           </View>
           <View className="flex-1 rounded-2xl bg-white p-4">
             <Text className="text-sm text-[#8A8498]">Study sets</Text>
-            <Text className="mt-1 text-2xl font-black text-[#19152C]">0</Text>
+            <Text className="mt-1 text-2xl font-black text-[#19152C]">{studySetCount}</Text>
           </View>
         </View>
+        <View className="mt-7 flex-row rounded-btn border border-line bg-surface p-1">
+          {(["notes", "study"] as const).map((tab) => (
+            <Pressable
+              key={tab}
+              onPress={() => setActiveTab(tab)}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: activeTab === tab }}
+              className={`min-h-11 flex-1 items-center justify-center rounded-btn ${activeTab === tab ? "bg-brand" : ""}`}
+            >
+              <Text className={`font-sans-bold ${activeTab === tab ? "text-ink-inverse" : "text-ink-soft"}`}>
+                {tab === "notes" ? "Notes" : "Study sets"}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+        {activeTab === "study" ? (
+          <View className="mt-5">
+            <Pressable
+              onPress={() => router.push({ pathname: "/(app)/review", params: { courseId: id } })}
+              className="min-h-14 flex-row items-center justify-center gap-2 rounded-btn bg-brand px-5 active:opacity-80"
+            >
+              <Play size={17} color={colors.gold.DEFAULT} />
+              <Text className="font-sans-bold text-gold">Review course deck</Text>
+            </Pressable>
+            {studySets.length === 0 ? (
+              <View className="mt-4 items-center rounded-card border border-dashed border-line bg-surface px-6 py-10">
+                <BookOpen size={28} color={accent} />
+                <Text className="mt-3 text-base font-extrabold text-ink">No study sets yet</Text>
+                <Text className="mt-2 text-center text-sm leading-5 text-ink-soft">Generate flashcards and quizzes from a note to review them here.</Text>
+              </View>
+            ) : studySets.map((studySet) => (
+              <Pressable
+                key={studySet.noteId}
+                onPress={() => router.push({ pathname: "/(app)/deck/[id]", params: { id: studySet.noteId } })}
+                className="mt-3 rounded-tile border border-line bg-surface p-4 active:opacity-80"
+              >
+                <Text className="font-sans-extrabold text-ink">{studySet.noteTitle || "Untitled note"}</Text>
+                <Text className="mt-1 text-small text-ink-soft">{studySet.flashcardCount} cards · {studySet.quizCount} quizzes</Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : (
+          <>
         <View className="mt-8 flex-row items-center justify-between">
           <Text className="text-lg font-extrabold text-[#19152C]">Notes</Text>
           <Pressable
-            onPress={() =>
-              router.push({
-                pathname: "/(app)/(tabs)/create",
-                params: { mode: "typing", courseId: id },
-              })
-            }
+            onPress={() => setShowAdd(true)}
             className="min-h-11 flex-row items-center rounded-btn bg-brand px-4 active:opacity-80"
           >
             <Plus size={17} color="#FFBE1A" />
@@ -316,6 +415,8 @@ export default function CourseDetail() {
             ))}
           </View>
         ) : null}
+          </>
+        )}
       </ScrollView>
       <BottomSheet
         visible={showActions}
@@ -348,6 +449,28 @@ export default function CourseDetail() {
           onPress={() => setShowActions(false)}
         />
       </BottomSheet>
+      <BottomSheet
+        visible={showAdd}
+        onClose={() => setShowAdd(false)}
+        title="Add to course"
+        subtitle={course.name}
+      >
+        {[
+          ["recording", "Record lecture"],
+          ["upload", "Upload slides or notes"],
+          ["typing", "Type note"],
+        ].map(([mode, label]) => (
+          <SheetAction
+            key={mode}
+            icon={<Plus size={18} color={accent} />}
+            label={label}
+            onPress={() => {
+              setShowAdd(false);
+              router.push({ pathname: "/(app)/(tabs)/create", params: { mode, courseId: id } });
+            }}
+          />
+        ))}
+      </BottomSheet>
       <CoursePickerSheet
         visible={!!moveNote}
         courses={courses}
@@ -356,10 +479,23 @@ export default function CourseDetail() {
         onSelect={move}
         onClose={() => setMoveNote(null)}
       />
+      <CoursePickerSheet
+        visible={courseToDelete}
+        courses={courses}
+        excludeCourseId={id}
+        heading="Move notes to"
+        onSelect={(targetId) => {
+          setCourseToDelete(false);
+          void deleteCourse(id, targetId)
+            .then(() => router.replace("/courses"))
+            .catch(() => Alert.alert("Could not move notes", "Check your connection and try again."));
+        }}
+        onClose={() => setCourseToDelete(false)}
+      />
       <FormSheet
         visible={renaming}
         onClose={() => setRenaming(false)}
-        title="Rename course"
+        title="Edit course"
       >
         <Field
           label="Course name"
@@ -372,6 +508,19 @@ export default function CourseDetail() {
           value={code}
           onChangeText={setCode}
           placeholder="e.g. CS 241"
+        />
+        <Field
+          label="Lecturer (optional)"
+          value={lecturer}
+          onChangeText={setLecturer}
+          placeholder="e.g. Dr. Mensah"
+        />
+        <Field
+          label="Exam date (optional)"
+          value={examDate}
+          onChangeText={setExamDate}
+          placeholder="YYYY-MM-DD"
+          autoCapitalize="none"
         />
         <PrimaryButton onPress={saveRename}>Save changes</PrimaryButton>
       </FormSheet>

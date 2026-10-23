@@ -4,6 +4,7 @@ export type Course = {
   name: string;
   lecturer: string;
   color: string;
+  examDate?: string | null;
   noteCount: number;
   archived?: boolean;
 };
@@ -25,6 +26,7 @@ export type ServerCourse = {
   code: string | null;
   examDate: string | null;
   colour: string;
+  lecturer: string | null;
   archived: boolean;
 };
 
@@ -33,6 +35,7 @@ export type ServerCourseCreate = {
   code?: string | null;
   examDate?: string | null;
   colour?: string;
+  lecturer?: string | null;
 };
 
 export type ServerProfile = {
@@ -142,7 +145,7 @@ export type SignedUpload = ServerAsset & {
   cloudName: string;
   timestamp: number;
   signature: string;
-  type: "restricted";
+  type: "authenticated";
   maxBytes: number;
 };
 

@@ -11,6 +11,7 @@ import {
   gradeCard,
   getSetting,
   listDueCards,
+  getNote,
   type LocalFlashcard,
 } from "../../lib/notes";
 import { flushStudyProgress } from "../../lib/progress";
@@ -20,7 +21,7 @@ const DAY_MS = 86_400_000;
 
 export default function Review() {
   const pv = usePalette();
-  const { deck } = useLocalSearchParams<{ deck?: string }>();
+  const { deck, courseId } = useLocalSearchParams<{ deck?: string; courseId?: string }>();
   const db = useSQLiteContext();
   const { getAuthToken } = useApp();
   const [cards, setCards] = useState<LocalFlashcard[]>([]);
@@ -46,12 +47,32 @@ export default function Review() {
         const now = new Date().toISOString();
         let queue = await listDueCards(db, now);
         if (deck) queue = queue.filter((card) => card.noteId === deck);
+        if (courseId) {
+          const noteIds = new Set(
+            (
+              await Promise.all(queue.map((card) => getNote(db, card.noteId)))
+            )
+              .filter((note) => note?.courseId === courseId)
+              .map((note) => note!.id),
+          );
+          queue = queue.filter((card) => noteIds.has(card.noteId));
+        }
         if (queue.length && deck) {
           queue = queue.filter((card) => card.noteId === deck);
         }
         if (!queue.length) {
           const ahead = await listDueCards(db, new Date(Date.now() + 7 * DAY_MS).toISOString());
-          queue = deck ? ahead.filter((card) => card.noteId === deck) : ahead.slice(0, sessionLength);
+          if (deck) queue = ahead.filter((card) => card.noteId === deck);
+          else if (courseId) {
+            const noteIds = new Set(
+              (
+                await Promise.all(ahead.map((card) => getNote(db, card.noteId)))
+              )
+                .filter((note) => note?.courseId === courseId)
+                .map((note) => note!.id),
+            );
+            queue = ahead.filter((card) => noteIds.has(card.noteId));
+          } else queue = ahead.slice(0, sessionLength);
         }
         queue = queue.slice(0, sessionLength);
         setCards(queue);
@@ -60,7 +81,7 @@ export default function Review() {
         setDone(false);
         setTallies({ again: 0, hard: 0, good: 0, easy: 0 });
       })();
-    }, [db, deck]),
+    }, [courseId, db, deck]),
   );
 
   const total = cards.length;

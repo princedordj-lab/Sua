@@ -13,6 +13,7 @@ function shapeCourse(course) {
     code: course.code,
     examDate: course.examDate,
     colour: course.colour,
+    lecturer: course.lecturer ?? null,
     archived: course.archived,
   };
 }
@@ -39,7 +40,7 @@ coursesRouter.get("/", async (req, res) => {
 
 coursesRouter.post("/", async (req, res) => {
   const identity = await identityFromRequest(req);
-  const { name, code, examDate, colour } = req.body ?? {};
+  const { name, code, examDate, colour, lecturer } = req.body ?? {};
   if (!name || typeof name !== "string" || !name.trim()) {
     return res.status(400).json({ error: "name is required" });
   }
@@ -56,6 +57,7 @@ coursesRouter.post("/", async (req, res) => {
         code: code || null,
         examDate: parsedExamDate,
         colour: colour || undefined,
+        lecturer: lecturer ? String(lecturer).trim() : null,
       },
     });
   });
@@ -65,10 +67,13 @@ coursesRouter.post("/", async (req, res) => {
 coursesRouter.patch("/:id", async (req, res) => {
   const identity = await identityFromRequest(req);
   const { id } = req.params;
-  const allowed = ["name", "code", "examDate", "colour", "archived"];
+  const allowed = ["name", "code", "examDate", "colour", "archived", "lecturer"];
   const changes = {};
   for (const key of allowed) {
     if (key in (req.body ?? {})) changes[key] = req.body[key];
+  }
+  if ("lecturer" in changes) {
+    changes.lecturer = changes.lecturer ? String(changes.lecturer).trim() : null;
   }
   if ("examDate" in changes) {
     const parsedExamDate = parseDate(changes.examDate);
@@ -95,8 +100,22 @@ coursesRouter.patch("/:id", async (req, res) => {
 coursesRouter.delete("/:id", async (req, res) => {
   const identity = await identityFromRequest(req);
   const { id } = req.params;
+  const moveToCourseId = req.body?.moveToCourseId;
   const result = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
+    if (moveToCourseId) {
+      if (moveToCourseId === id) return { count: 0, error: "invalid_move_target" };
+      const target = await tx.course.findFirst({
+        where: { id: moveToCourseId, userId: user.id },
+        select: { id: true },
+      });
+      if (!target) return { count: 0, error: "move_target_not_found" };
+      await tx.note.updateMany({
+        where: { courseId: id, userId: user.id },
+        data: { courseId: target.id },
+      });
+      return tx.course.deleteMany({ where: { id, userId: user.id } });
+    }
     const notes = await tx.note.findMany({
       where: { courseId: id, userId: user.id },
       select: { id: true },
@@ -124,7 +143,9 @@ coursesRouter.delete("/:id", async (req, res) => {
     return tx.course.deleteMany({ where: { id, userId: user.id } });
   });
   if (result.count === 0) {
-    return res.status(404).json({ error: "Course not found" });
+    return res.status(result.error === "move_target_not_found" ? 400 : 404).json({
+      error: result.error === "move_target_not_found" ? "Move target not found" : "Course not found",
+    });
   }
   res.status(204).end();
 });

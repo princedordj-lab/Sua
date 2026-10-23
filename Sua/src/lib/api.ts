@@ -94,8 +94,12 @@ export const coursesApi = {
       token,
       body: JSON.stringify(changes),
     }),
-  remove: (token: string, id: string) =>
-    apiRequest<void>(`/courses/${id}`, { method: "DELETE", token }),
+  remove: (token: string, id: string, moveToCourseId?: string) =>
+    apiRequest<void>(`/courses/${id}`, {
+      method: "DELETE",
+      token,
+      body: moveToCourseId ? JSON.stringify({ moveToCourseId }) : undefined,
+    }),
 };
 
 export const profileApi = {

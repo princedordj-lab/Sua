@@ -54,6 +54,8 @@ export type LocalCourse = {
   name: string;
   code: string;
   colour: string;
+  lecturer: string;
+  examDate: string | null;
   archived: boolean;
   updatedAt: string;
 };
@@ -361,6 +363,16 @@ const MIGRATIONS: ((db: SQLiteDatabase) => Promise<void>)[] = [
       CREATE INDEX IF NOT EXISTS card_queue_state_idx ON card_queue(state, id);
     `);
   },
+  // 12 — course details mirrored for offline course management
+  async (db) => {
+    const columns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(courses)");
+    if (!columns.some((column) => column.name === "lecturer")) {
+      await db.execAsync("ALTER TABLE courses ADD COLUMN lecturer TEXT NOT NULL DEFAULT ''");
+    }
+    if (!columns.some((column) => column.name === "exam_date")) {
+      await db.execAsync("ALTER TABLE courses ADD COLUMN exam_date TEXT");
+    }
+  },
 ];
 
 export async function migrateDb(db: SQLiteDatabase) {
@@ -440,6 +452,10 @@ export async function saveNote(
     input.noteKind ?? null,
   );
   await db.runAsync(
+    "DELETE FROM sync_queue WHERE entity = 'note' AND entity_id = ? AND operation = 'upsert'",
+    input.id,
+  );
+  await db.runAsync(
     "INSERT INTO sync_queue (entity, entity_id, operation, payload, created_at) VALUES ('note', ?, 'upsert', ?, ?)",
     input.id,
     // source_ref stays on the device: the server note shape has no field for it.
@@ -464,6 +480,30 @@ export function registerUploadCanceller(canceller: (noteId: string) => void) {
 
 export async function deleteNote(db: SQLiteDatabase, id: string) {
   uploadCanceller?.(id);
+  const note = await getNote(db, id).catch(() => null);
+  if (note?.sourceRef) {
+    const segments = await listSessionSegments(db, note.sourceRef).catch(() => []);
+    for (const segment of segments) {
+      if (segment.path) {
+        try {
+          new File(segment.path).delete();
+        } catch {}
+      }
+    }
+  }
+  const uploadRows = await db
+    .getAllAsync<{ local_path: string }>(
+      "SELECT local_path FROM upload_queue WHERE note_id = ?",
+      id,
+    )
+    .catch(() => []);
+  for (const row of uploadRows) {
+    if (row.local_path) {
+      try {
+        new File(row.local_path).delete();
+      } catch {}
+    }
+  }
   const now = new Date().toISOString();
   await db.withTransactionAsync(async () => {
     await db.runAsync("DELETE FROM notes WHERE id = ?", id);
@@ -649,6 +689,8 @@ function rowToCourse(row: Record<string, unknown>): LocalCourse {
     name: String(row.name),
     code: String(row.code),
     colour: String(row.colour),
+    lecturer: String(row.lecturer ?? ""),
+    examDate: row.exam_date ? String(row.exam_date) : null,
     archived: Boolean(row.archived),
     updatedAt: String(row.updated_at),
   };
@@ -663,11 +705,13 @@ export async function replaceLocalCourses(
     await db.runAsync("DELETE FROM courses");
     for (const course of courses) {
       await db.runAsync(
-        "INSERT INTO courses (id, name, code, colour, archived, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO courses (id, name, code, colour, lecturer, exam_date, archived, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         course.id,
         course.name,
         course.code,
         course.colour,
+        course.lecturer,
+        course.examDate,
         course.archived ? 1 : 0,
         now,
       );
@@ -678,13 +722,16 @@ export async function replaceLocalCourses(
 export async function upsertLocalCourse(db: SQLiteDatabase, course: Omit<LocalCourse, "updatedAt">) {
   const now = new Date().toISOString();
   await db.runAsync(
-    `INSERT INTO courses (id, name, code, colour, archived, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO courses (id, name, code, colour, lecturer, exam_date, archived, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET name = excluded.name, code = excluded.code,
-       colour = excluded.colour, archived = excluded.archived, updated_at = excluded.updated_at`,
+       colour = excluded.colour, lecturer = excluded.lecturer, exam_date = excluded.exam_date,
+       archived = excluded.archived, updated_at = excluded.updated_at`,
     course.id,
     course.name,
     course.code,
     course.colour,
+    course.lecturer,
+    course.examDate,
     course.archived ? 1 : 0,
     now,
   );
@@ -1000,6 +1047,21 @@ export async function resetUploadProgress(db: SQLiteDatabase, id: number) {
     "UPDATE upload_queue SET sent_bytes = 0, progress = 0 WHERE id = ?",
     id,
   );
+}
+
+export async function removeUploadQueueItem(db: SQLiteDatabase, id: number) {
+  const row = await db.getFirstAsync<{ local_path: string }>(
+    "SELECT local_path FROM upload_queue WHERE id = ?",
+    id,
+  );
+  if (row?.local_path) {
+    try {
+      new File(row.local_path).delete();
+    } catch {
+      // Ignore if already deleted
+    }
+  }
+  await db.runAsync("DELETE FROM upload_queue WHERE id = ?", id);
 }
 
 // True while any of a note's queued files are still unsettled. Recording

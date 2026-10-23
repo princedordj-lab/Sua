@@ -135,6 +135,7 @@ export function CoursePickerSheet({
   visible,
   courses,
   currentCourseId,
+  excludeCourseId,
   heading,
   onSelect,
   onClose,
@@ -142,6 +143,7 @@ export function CoursePickerSheet({
   visible: boolean;
   courses: Course[];
   currentCourseId?: string;
+  excludeCourseId?: string;
   heading: string;
   onSelect: (courseId: string) => void;
   onClose: () => void;
@@ -149,7 +151,9 @@ export function CoursePickerSheet({
   // Archived courses are not valid move targets, except the note's current
   // course so the sheet always renders a selected row.
   const targets = courses.filter(
-    (course) => !course.archived || course.id === currentCourseId,
+    (course) =>
+      course.id !== excludeCourseId &&
+      (!course.archived || course.id === currentCourseId),
   );
   return (
     <Modal
