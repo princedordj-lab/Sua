@@ -128,7 +128,11 @@ export default function Uploads() {
   }, [doneNoteIds, getAuthToken]);
 
   const retry = async (item: UploadQueueItem) => {
-    await updateUploadState(db, item.id, { state: "pending", error: null });
+    await updateUploadState(db, item.id, {
+      state: "pending",
+      error: null,
+      resetAttempts: true,
+    });
     await load();
     void flushUploads({ db, getAuthToken }).finally(() => void load());
   };

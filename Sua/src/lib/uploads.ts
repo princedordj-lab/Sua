@@ -4,9 +4,12 @@ import type { SQLiteDatabase } from "expo-sqlite";
 import { uploadsApi } from "./api";
 import {
   getSetting,
+  listPendingUploads,
   listUploadQueue,
+  registerUploadCanceller,
   resetUploadProgress,
   setNoteTranscript,
+  syncPendingNotes,
   updateUploadProgress,
   updateUploadState,
 } from "./notes";
@@ -36,6 +39,26 @@ const MIME_BY_FORMAT: Record<string, string> = {
 function mimeFor(item: UploadQueueItem) {
   return MIME_BY_FORMAT[item.format] ?? "application/octet-stream";
 }
+
+interface ActiveUpload {
+  noteId: string;
+  cancel: () => void;
+}
+
+const activeUploads = new Map<number, ActiveUpload>();
+
+export function cancelUploadsForNote(noteId: string): void {
+  for (const [id, active] of activeUploads.entries()) {
+    if (active.noteId === noteId) {
+      try {
+        active.cancel();
+      } catch {}
+      activeUploads.delete(id);
+    }
+  }
+}
+
+registerUploadCanceller(cancelUploadsForNote);
 
 let flushRunning = false;
 
@@ -68,10 +91,19 @@ export async function flushUploads(opts: {
       }
     }
 
-    for (const item of await listUploadQueue(db)) {
+    // Push pending notes to server first so foreign key constraints are satisfied (Rule 9: note sync before uploads)
+    await syncPendingNotes(db, token).catch(() => {});
+
+    for (const item of await listPendingUploads(db)) {
       const state = await NetInfo.fetch();
       if (state.isConnected === false) return;
       if (wifiOnly && state.type !== NetInfoStateType.wifi) return;
+      // Confirm row and its note still exist before starting upload
+      const exists = await db.getFirstAsync<{ id: number }>(
+        "SELECT q.id FROM upload_queue q JOIN notes n ON q.note_id = n.id WHERE q.id = ?",
+        item.id,
+      );
+      if (!exists) continue;
       await uploadOne(db, token, item, opts.onProgress);
     }
   } catch {
@@ -87,6 +119,13 @@ async function uploadOne(
   item: UploadQueueItem,
   onProgress?: FlushProgress,
 ) {
+  // Confirm item and its note still exist in SQLite before doing work
+  const exists = await db.getFirstAsync<{ id: number }>(
+    "SELECT q.id FROM upload_queue q JOIN notes n ON q.note_id = n.id WHERE q.id = ?",
+    item.id,
+  );
+  if (!exists) return;
+
   const file = new File(item.localPath);
   if (!file.exists) {
     await updateUploadState(db, item.id, {
@@ -96,6 +135,17 @@ async function uploadOne(
     onProgress?.(item);
     return;
   }
+
+  let isCancelled = false;
+  let activeTask: ReturnType<typeof file.createUploadTask> | null = null;
+  const cancel = () => {
+    isCancelled = true;
+    try {
+      activeTask?.cancel();
+    } catch {}
+  };
+  activeUploads.set(item.id, { noteId: item.noteId, cancel });
+
   await updateUploadState(db, item.id, { state: "uploading", error: null });
   await resetUploadProgress(db, item.id);
   let release = () => {};
@@ -107,12 +157,27 @@ async function uploadOne(
     // with generation set to manual the upload still carries the note kind
     // locally, but the server must not auto-start an AI job for it.
     const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
-    const sign = await uploadsApi.sign(token, {
-      kind: item.kind,
-      format: item.format,
-      noteId: item.noteId,
-      task: autoGenerate ? item.target ?? "none" : "none",
-    });
+    let sign;
+    try {
+      sign = await uploadsApi.sign(token, {
+        kind: item.kind,
+        format: item.format,
+        noteId: item.noteId,
+        task: autoGenerate ? item.target ?? "none" : "none",
+      });
+    } catch {
+      // If note has not landed on server yet, sync pending notes and retry signing once
+      await syncPendingNotes(db, token).catch(() => {});
+      sign = await uploadsApi.sign(token, {
+        kind: item.kind,
+        format: item.format,
+        noteId: item.noteId,
+        task: autoGenerate ? item.target ?? "none" : "none",
+      });
+    }
+
+    if (isCancelled) return;
+
     const size = file.size ?? 0;
     if (size > sign.maxBytes) {
       const failed: UploadQueueItem = {
@@ -152,11 +217,38 @@ async function uploadOne(
         }
       },
     });
+    activeTask = task;
     release = () => task.release();
+
+    if (isCancelled) return;
+
     const result = await task.uploadAsync();
+
+    if (isCancelled) return;
+
     if (result.status < 200 || result.status >= 300) {
-      throw new Error(`Storage upload failed (${result.status})`);
+      let detail = "";
+      try {
+        const response = JSON.parse(result.body) as {
+          error?: { message?: string };
+          message?: string;
+        };
+        detail = response.error?.message ?? response.message ?? "";
+      } catch {
+        detail = result.body.slice(0, 200);
+      }
+      throw new Error(
+        `Storage upload failed (${result.status})${detail ? `: ${detail}` : ""}`,
+      );
     }
+
+    // Verify parent note was not deleted before finalizing remote asset
+    const noteExists = await db.getFirstAsync<{ id: string }>(
+      "SELECT id FROM notes WHERE id = ?",
+      item.noteId,
+    );
+    if (!noteExists || isCancelled) return;
+
     const asset = await uploadsApi.complete(token, sign.id, sign.publicId);
     await updateUploadProgress(db, item.id, { sentBytes: size, progress: 100 });
     await updateUploadState(db, item.id, {
@@ -171,7 +263,25 @@ async function uploadOne(
       await setNoteTranscript(db, item.noteId, asset.extractedText);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Upload failed";
+    if (isCancelled) {
+      // Cancelled intentionally because the note was deleted; exit silently
+      return;
+    }
+    let message = "Upload failed. Please try again.";
+    if (error instanceof Error) {
+      const raw = error.message;
+      if (/network|offline|connect|internet/i.test(raw)) {
+        message = "Waiting for connection";
+      } else if (/limit|exceeded|too large|MB/i.test(raw)) {
+        message = raw;
+      } else if (/storage upload failed/i.test(raw)) {
+        message = "Storage upload failed. Please try again.";
+      } else if (/sync/i.test(raw)) {
+        message = "Syncing note first. Please wait.";
+      } else if (!/prisma|sql|constraint|foreign key|500|syntax|database/i.test(raw)) {
+        message = raw.length > 80 ? "Upload failed. Please try again." : raw;
+      }
+    }
     await updateUploadState(db, item.id, {
       state: "failed",
       error: message,
@@ -180,6 +290,7 @@ async function uploadOne(
     await resetUploadProgress(db, item.id);
     announce({ ...item, state: "failed", progress: 0, sentBytes: 0, error: message });
   } finally {
+    activeUploads.delete(item.id);
     release();
   }
 }

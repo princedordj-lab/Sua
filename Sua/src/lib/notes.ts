@@ -457,7 +457,13 @@ export async function saveNote(
   return getNote(db, input.id);
 }
 
+let uploadCanceller: ((noteId: string) => void) | null = null;
+export function registerUploadCanceller(canceller: (noteId: string) => void) {
+  uploadCanceller = canceller;
+}
+
 export async function deleteNote(db: SQLiteDatabase, id: string) {
+  uploadCanceller?.(id);
   const now = new Date().toISOString();
   await db.withTransactionAsync(async () => {
     await db.runAsync("DELETE FROM notes WHERE id = ?", id);
@@ -508,6 +514,13 @@ export async function countAudioNotesThisMonth(db: SQLiteDatabase) {
 // The server cascades note rows when a course is deleted; mirror that locally
 // and drop queued changes for those notes so nothing tries to sync orphans.
 export async function purgeCourseLocally(db: SQLiteDatabase, courseId: string) {
+  const noteRows = await db.getAllAsync<{ id: string }>(
+    "SELECT id FROM notes WHERE course_id = ?",
+    courseId,
+  );
+  for (const row of noteRows) {
+    uploadCanceller?.(row.id);
+  }
   await db.withTransactionAsync(async () => {
     await db.runAsync(
       "DELETE FROM sync_queue WHERE entity = 'note' AND entity_id IN (SELECT id FROM notes WHERE course_id = ?)",
@@ -888,6 +901,27 @@ export async function enqueueUpload(
   return Number(result.lastInsertRowId);
 }
 
+// Pending uploads ready to process — excludes permanently failed rows (attempts >= 3)
+// and throttles failed retries with exponential backoff so connectivity hiccups don't
+// spam upload tasks in a tight loop.
+export async function listPendingUploads(db: SQLiteDatabase) {
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM upload_queue WHERE state = 'pending' OR (state = 'failed' AND attempts < 3) ORDER BY id ASC",
+  );
+  const now = Date.now();
+  return rows.map(rowToUpload).filter((item) => {
+    if (item.state === "pending") return true;
+    if (item.state === "failed") {
+      // Exponential backoff: attempt 1 -> 5s, attempt 2 -> 30s, attempt 3 -> 120s
+      const delays = [5_000, 30_000, 120_000];
+      const delay = delays[Math.max(0, item.attempts - 1)] ?? 120_000;
+      const lastAttempt = new Date(item.updatedAt).getTime();
+      return now - lastAttempt >= delay;
+    }
+    return false;
+  });
+}
+
 // Everything not yet uploaded — including rows stuck in 'uploading' from a
 // crash, which are reset by the flusher.
 export async function listUploadQueue(db: SQLiteDatabase) {
@@ -928,6 +962,7 @@ export async function updateUploadState(
     assetId?: string | null;
     error?: string | null;
     bumpAttempts?: boolean;
+    resetAttempts?: boolean;
   },
 ) {
   const now = new Date().toISOString();
@@ -943,8 +978,12 @@ export async function updateUploadState(
   }
   updates.push("error = ?");
   values.push(patch.error ?? null);
-  updates.push("attempts = attempts + ?");
-  values.push(patch.bumpAttempts ? 1 : 0);
+  if (patch.resetAttempts) {
+    updates.push("attempts = 0");
+  } else {
+    updates.push("attempts = attempts + ?");
+    values.push(patch.bumpAttempts ? 1 : 0);
+  }
   updates.push("updated_at = ?");
   values.push(now);
   values.push(id);

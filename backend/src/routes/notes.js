@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { cloudinary, cloudinaryConfigured } from "../config/cloudinary.js";
 import { withUser } from "../lib/db.js";
 import { ensureUser } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
@@ -51,6 +52,21 @@ notesRouter.post("/sync", async (req, res) => {
         continue;
       }
       if (change.operation === "delete") {
+        const assets = await tx.asset.findMany({
+          where: { noteId: change.id, userId: user.id },
+        });
+        for (const asset of assets) {
+          if (cloudinaryConfigured() && asset.publicId && asset.publicId !== "pending") {
+            try {
+              await cloudinary.uploader.destroy(asset.publicId, {
+                resource_type: asset.resourceType,
+              });
+            } catch (err) {
+              console.warn(`Cloudinary destroy failed for asset ${asset.publicId}:`, err);
+            }
+          }
+        }
+        await tx.asset.deleteMany({ where: { noteId: change.id, userId: user.id } });
         await tx.note.deleteMany({ where: { id: change.id, userId: user.id } });
         // Idempotent: deleting a note that is already gone still succeeds.
         results.push({ id: change.id, status: "accepted" });

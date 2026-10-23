@@ -320,7 +320,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     await setSetting(db, "expo_push_token", "").catch(() => {});
     setHydrated(EMPTY_HYDRATED);
-    setHydrationIssue(false);
     await clerkSignOut();
   }, [clerkSignOut, db, getToken]);
 

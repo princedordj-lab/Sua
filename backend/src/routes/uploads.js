@@ -57,7 +57,7 @@ function shapeAsset(asset) {
 async function extractFromStorage(asset) {
   const url = cloudinary.url(asset.publicId, {
     resource_type: asset.resourceType,
-    type: "restricted",
+    type: "authenticated",
     sign_url: true,
     secure: true,
   });
@@ -108,29 +108,33 @@ uploadsRouter.post("/sign", async (req, res) => {
   const outcome = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
     if (noteId) {
-      // Offline-first: a note that hasn't synced yet has no row here — its
-      // upload can legitimately race the note push. A note that does exist
-      // and belongs to someone else must never be referenced.
       const note = await tx.note.findFirst({
         where: { id: noteId },
         select: { userId: true },
       });
       if (note && note.userId !== user.id) {
-        return { error: "noteId does not match one of your notes" };
+        return { status: 403, error: "noteId does not match one of your notes" };
+      }
+      if (!note) {
+        // The foreign key constraint requires note to exist in Postgres before referencing it.
+        return {
+          status: 409,
+          error: "Note not found. Please sync notes before signing uploads.",
+        };
       }
     }
-      const created = await tx.asset.create({
-        data: {
-          userId: user.id,
-          kind,
-          publicId: "pending",
-          resourceType: RESOURCE_TYPES[kind],
-          format: normalizedFormat,
-          status: "pending",
-          noteId,
-          task,
-        },
-      });
+    const created = await tx.asset.create({
+      data: {
+        userId: user.id,
+        kind,
+        publicId: "pending",
+        resourceType: RESOURCE_TYPES[kind],
+        format: normalizedFormat,
+        status: "pending",
+        noteId,
+        task,
+      },
+    });
     // Restricted assets are only retrievable through signed delivery URLs.
     const publicId = `sua/${user.id}/${created.id}`;
     const asset = await tx.asset.update({
@@ -141,12 +145,12 @@ uploadsRouter.post("/sign", async (req, res) => {
   });
 
   if (outcome.error) {
-    return res.status(400).json({ error: outcome.error });
+    return res.status(outcome.status || 400).json({ error: outcome.error });
   }
   const asset = outcome.asset;
 
   const timestamp = Math.floor(Date.now() / 1000);
-  const params = { public_id: asset.publicId, timestamp, type: "restricted" };
+  const params = { public_id: asset.publicId, timestamp, type: "authenticated" };
   const signature = cloudinary.utils.api_sign_request(
     params,
     process.env.CLOUDINARY_API_SECRET,
@@ -159,7 +163,7 @@ uploadsRouter.post("/sign", async (req, res) => {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME,
     timestamp,
     signature,
-    type: "restricted",
+    type: "authenticated",
     maxBytes: MAX_BYTES[kind],
   });
 });
@@ -257,7 +261,7 @@ assetsRouter.get("/:id/url", async (req, res) => {
 
   const url = cloudinary.url(asset.publicId, {
     resource_type: asset.resourceType,
-    type: "restricted",
+    type: "authenticated",
     sign_url: true,
     secure: true,
   });

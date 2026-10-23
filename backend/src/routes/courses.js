@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { cloudinary, cloudinaryConfigured } from "../config/cloudinary.js";
 import { withUser } from "../lib/db.js";
 import { ensureUser } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
@@ -96,6 +97,30 @@ coursesRouter.delete("/:id", async (req, res) => {
   const { id } = req.params;
   const result = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
+    const notes = await tx.note.findMany({
+      where: { courseId: id, userId: user.id },
+      select: { id: true },
+    });
+    if (notes.length > 0) {
+      const noteIds = notes.map((n) => n.id);
+      const assets = await tx.asset.findMany({
+        where: { noteId: { in: noteIds }, userId: user.id },
+      });
+      for (const asset of assets) {
+        if (cloudinaryConfigured() && asset.publicId && asset.publicId !== "pending") {
+          try {
+            await cloudinary.uploader.destroy(asset.publicId, {
+              resource_type: asset.resourceType,
+            });
+          } catch (err) {
+            console.warn(`Cloudinary destroy failed for asset ${asset.publicId}:`, err);
+          }
+        }
+      }
+      await tx.asset.deleteMany({
+        where: { noteId: { in: noteIds }, userId: user.id },
+      });
+    }
     return tx.course.deleteMany({ where: { id, userId: user.id } });
   });
   if (result.count === 0) {

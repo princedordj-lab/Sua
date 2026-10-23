@@ -54,9 +54,14 @@ app.use("/api/chat/speech", express.raw({ type: "audio/*", limit: "8mb" }));
 app.use("/api/chat", authenticate, chatRouter);
 
 app.use((err, _req, res, _next) => {
-  const status = err.status ?? 500;
-  if (status >= 500) console.error(err);
-  res.status(status).json({ error: err.message ?? "Internal server error" });
+  const status = Number(err.status ?? err.statusCode ?? 500);
+  if (status >= 500) {
+    console.error("Internal server error:", err);
+    return res
+      .status(status)
+      .json({ error: "Something went wrong. Please try again in a moment." });
+  }
+  res.status(status).json({ error: err.message ?? "Request failed" });
 });
 
 app.listen(port, () => {

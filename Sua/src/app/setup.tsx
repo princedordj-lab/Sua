@@ -44,12 +44,13 @@ export default function Setup() {
       );
       router.replace("/home");
     } catch (error) {
-      Alert.alert(
-        "Could not finish setup",
-        error instanceof Error && error.message
+      const msg =
+        error instanceof Error &&
+        error.message &&
+        !/failed \(|\bstatus\b|prisma|sql|constraint/i.test(error.message)
           ? error.message
-          : "Check your connection and try again.",
-      );
+          : "Check your connection and try again.";
+      Alert.alert("Could not finish setup", msg);
     } finally {
       setSaving(false);
     }

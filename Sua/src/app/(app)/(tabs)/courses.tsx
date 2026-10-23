@@ -113,12 +113,13 @@ export default function Courses() {
       setEditing(null);
       setShowNew(false);
     } catch (error) {
-      Alert.alert(
-        "Could not save course",
-        error instanceof Error && error.message
+      const msg =
+        error instanceof Error &&
+        error.message &&
+        !/failed \(|\bstatus\b|prisma|sql|constraint/i.test(error.message)
           ? error.message
-          : "Check your connection and try again.",
-      );
+          : "Check your connection and try again.";
+      Alert.alert("Could not save course", msg);
     }
   };
   const remove = (course: Course) =>

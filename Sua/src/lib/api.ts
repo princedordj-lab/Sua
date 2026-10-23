@@ -30,26 +30,47 @@ export async function apiRequest<T>(
   path: string,
   options: RequestOptions = {},
 ) {
-  const response = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
-      ...options.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+        ...options.headers,
+      },
+    });
+  } catch {
+    throw new Error("Could not connect to Sua. Check your internet connection.");
+  }
+
   if (!response.ok) {
-    const body = await response.text();
     let detail = "";
     try {
+      const body = await response.text();
       const parsed = JSON.parse(body) as { error?: string };
       detail = parsed.error ?? "";
     } catch {
-      detail = body;
+      detail = "";
     }
-    throw new Error(
-      `API request failed (${response.status})${detail ? `: ${detail}` : ""}`,
-    );
+
+    if (response.status >= 500) {
+      throw new Error("Something went wrong on the server. Please try again.");
+    }
+
+    if (
+      /prisma|foreign key|constraint|syntax error|database|relation|table/i.test(
+        detail,
+      )
+    ) {
+      throw new Error("Unable to complete request. Please try again.");
+    }
+
+    if (response.status === 409 && /sync notes/i.test(detail)) {
+      throw new Error("Note is syncing with the server. Please wait a moment.");
+    }
+
+    throw new Error(detail || "Request failed. Please try again.");
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

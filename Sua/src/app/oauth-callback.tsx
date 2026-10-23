@@ -1,35 +1,34 @@
 import { useEffect } from "react";
 import { ActivityIndicator, Alert, Text, View } from "react-native";
-import { router, useLocalSearchParams } from "expo-router";
+import { router } from "expo-router";
 import { useAuth } from "@clerk/expo";
 import * as WebBrowser from "expo-web-browser";
+import { getPendingAuthDestination } from "../lib/pending-auth-destination";
 
 WebBrowser.maybeCompleteAuthSession();
 
 export default function OAuthCallback() {
   const { isLoaded, isSignedIn } = useAuth();
-  const { flow } = useLocalSearchParams<{ flow?: string }>();
 
   useEffect(() => {
     if (!isLoaded) return;
     if (isSignedIn) {
-      router.replace(flow === "sign-up" ? "/setup" : "/home");
+      router.replace(getPendingAuthDestination());
       return;
     }
 
-    // A successful OAuth return should activate a Clerk session quickly. If
-    // it does not, the redirect is usually missing from Clerk's native SSO
-    // allowlist; do not leave the user on an infinite loading screen.
+    // The callback route can render before the originating sign-in screen has
+    // consumed the OAuth result and activated its Clerk session.
     const timeout = setTimeout(() => {
       Alert.alert(
-        "Google sign-in could not finish",
-        "Add sua://oauth-callback to Clerk's mobile SSO redirect allowlist, then try again.",
+        "Google sign-in timed out",
+        "Clerk did not activate the session. Try again. If it repeats, check that sua://oauth-callback is allowlisted for this app.",
       );
       router.replace("/sign-in");
-    }, 8000);
+    }, 20_000);
 
     return () => clearTimeout(timeout);
-  }, [flow, isLoaded, isSignedIn]);
+  }, [isLoaded, isSignedIn]);
 
   return (
     <View className="flex-1 items-center justify-center gap-3 bg-cream">

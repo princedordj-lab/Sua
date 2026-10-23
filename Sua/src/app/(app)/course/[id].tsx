@@ -15,7 +15,7 @@ import {
 import { useApp } from "../../../state/AppContext";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useSQLiteContext } from "expo-sqlite";
-import { listNotes, saveNote, type Note } from "../../../lib/notes";
+import { deleteNote, listNotes, saveNote, type Note } from "../../../lib/notes";
 import { stripMarkdown } from "../../../lib/markdown";
 import {
   BottomSheet,
@@ -123,6 +123,31 @@ export default function CourseDetail() {
     } catch {
       Alert.alert("Could not move note", "Please try again.");
     }
+  };
+
+  const confirmDeleteNote = (note: Note) => {
+    const label = note.title.trim() || "this note";
+    Alert.alert(
+      `Delete ${label.length > 28 ? `${label.slice(0, 28)}…` : label}?`,
+      "The note and its uploads will be removed from this device and your account.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              try {
+                await deleteNote(db, note.id);
+                setNotes((prev) => prev.filter((item) => item.id !== note.id));
+              } catch {
+                Alert.alert("Couldn’t delete note", "Try again in a moment.");
+              }
+            })();
+          },
+        },
+      ],
+    );
   };
 
   const tint =
@@ -235,6 +260,15 @@ export default function CourseDetail() {
             >
               <ArrowRightLeft size={17} color="#7C5CFC" />
             </Pressable>
+            <Pressable
+              onPress={() => confirmDeleteNote(note)}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={`Delete ${note.title || "note"}`}
+              className="w-12 items-center justify-center border-l border-[#F0EDF9] active:opacity-80"
+            >
+              <Trash2 size={17} color="#D64545" />
+            </Pressable>
           </View>
         ))}
 
@@ -245,27 +279,40 @@ export default function CourseDetail() {
               Condensed key points from your uploaded slides and photos.
             </Text>
             {references.map((note) => (
-              <Pressable
+              <View
                 key={note.id}
-                onPress={() =>
-                  router.push({
-                    pathname: "/(app)/note/[id]",
-                    params: { id: note.id },
-                  })
-                }
-                className="mt-3 rounded-2xl border border-[#E5E1F5] bg-[#F3F0FF] p-4 active:opacity-80"
+                className="mt-3 flex-row items-stretch overflow-hidden rounded-2xl border border-[#E5E1F5] bg-[#F3F0FF]"
               >
-                <View className="flex-row items-center gap-2">
-                  <BookOpen size={16} color="#7C5CFC" />
-                  <Text className="font-extrabold text-[#19152C]">{note.title || "Untitled reference"}</Text>
-                </View>
-                <Text numberOfLines={3} className="mt-1 text-sm leading-5 text-[#8A8498]">
-                  {stripMarkdown(note.body || note.transcript || "") || "Waiting for the AI to summarise this file…"}
-                </Text>
-                {note.aiState !== "none" && note.aiState !== "ready" && note.aiState !== "failed" ? (
-                  <Text className="mt-2 text-xs font-semibold text-[#7C5CFC]">AI working…</Text>
-                ) : null}
-              </Pressable>
+                <Pressable
+                  onPress={() =>
+                    router.push({
+                      pathname: "/(app)/note/[id]",
+                      params: { id: note.id },
+                    })
+                  }
+                  className="flex-1 p-4 active:opacity-80"
+                >
+                  <View className="flex-row items-center gap-2">
+                    <BookOpen size={16} color="#7C5CFC" />
+                    <Text className="font-extrabold text-[#19152C]">{note.title || "Untitled reference"}</Text>
+                  </View>
+                  <Text numberOfLines={3} className="mt-1 text-sm leading-5 text-[#8A8498]">
+                    {stripMarkdown(note.body || note.transcript || "") || "Waiting for the AI to summarise this file…"}
+                  </Text>
+                  {note.aiState !== "none" && note.aiState !== "ready" && note.aiState !== "failed" ? (
+                    <Text className="mt-2 text-xs font-semibold text-[#7C5CFC]">AI working…</Text>
+                  ) : null}
+                </Pressable>
+                <Pressable
+                  onPress={() => confirmDeleteNote(note)}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Delete ${note.title || "reference"}`}
+                  className="w-12 items-center justify-center border-l border-[#E5E1F5] active:opacity-80"
+                >
+                  <Trash2 size={17} color="#D64545" />
+                </Pressable>
+              </View>
             ))}
           </View>
         ) : null}

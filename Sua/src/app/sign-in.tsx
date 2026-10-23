@@ -14,6 +14,7 @@ import { Apple } from "lucide-react-native";
 import { Image } from "expo-image";
 import { Field, Logo, PrimaryButton } from "../components/ui";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { setPendingAuthDestination } from "../lib/pending-auth-destination";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -21,6 +22,8 @@ function messageFromError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return "Something went wrong. Please try again.";
 }
+
+type SignInChallenge = "email_code" | "phone_code" | "totp" | "backup_code";
 
 export default function SignIn() {
   const { signIn } = useSignIn();
@@ -34,12 +37,14 @@ export default function SignIn() {
   const [code, setCode] = useState("");
   const [pendingVerification, setPendingVerification] = useState(false);
   const [verificationSubmitted, setVerificationSubmitted] = useState(false);
+  const [signInChallenge, setSignInChallenge] = useState<SignInChallenge | null>(null);
   const [busy, setBusy] = useState(false);
   const finalizingVerification = useRef(false);
 
   const switchMode = (next: "sign-in" | "sign-up") => {
     setMode(next);
     setPendingVerification(false);
+    setSignInChallenge(null);
     setVerificationSubmitted(false);
     setCode("");
   };
@@ -93,6 +98,36 @@ export default function SignIn() {
     if (error) throw error;
   }, [fullName, navigateAfterAuth, signUp]);
 
+  const beginSignInChallenge = async () => {
+    const strategies = signIn.supportedSecondFactors ?? [];
+    const strategy = (["email_code", "phone_code", "totp", "backup_code"] as const)
+      .find((candidate) => strategies.some((factor) => factor.strategy === candidate));
+
+    if (!strategy) {
+      const available = strategies.map((factor) => factor.strategy).join(", ");
+      throw new Error(
+        `Clerk requires another sign-in step${available ? ` (${available})` : ""}, but Sua does not support that verification method yet.`,
+      );
+    }
+
+    if (strategy === "email_code") {
+      const { error } = await signIn.mfa.sendEmailCode();
+      if (error) throw error;
+    } else if (strategy === "phone_code") {
+      const { error } = await signIn.mfa.sendPhoneCode();
+      if (error) throw error;
+    }
+    setCode("");
+    setSignInChallenge(strategy);
+  };
+
+  const completeSignIn = async () => {
+    const { error } = await signIn.finalize({
+      navigate: () => router.replace("/home"),
+    });
+    if (error) throw error;
+  };
+
   const submitEmailPassword = async () => {
     if (!email || !password)
       return Alert.alert(
@@ -111,12 +146,17 @@ export default function SignIn() {
         });
         if (error) throw error;
         if (signIn.status === "complete") {
-          const { error: finalizeError } = await signIn.finalize({
-            navigate: () => router.replace("/home"),
-          });
-          if (finalizeError) throw finalizeError;
+          await completeSignIn();
+        } else if (
+          signIn.status === "needs_second_factor" ||
+          signIn.status === "needs_client_trust"
+        ) {
+          await beginSignInChallenge();
         } else {
-          Alert.alert("Sign in incomplete", "Additional verification is required.");
+          Alert.alert(
+            "Sign in incomplete",
+            `Clerk returned status: ${signIn.status ?? "unknown"}.`,
+          );
         }
       } catch (error) {
         Alert.alert("Sign in failed", messageFromError(error));
@@ -171,6 +211,35 @@ export default function SignIn() {
     }
   };
 
+  const submitSignInChallenge = async () => {
+    if (!code || !signInChallenge) return;
+    setBusy(true);
+    try {
+      let error: unknown = null;
+      if (signInChallenge === "email_code") {
+        ({ error } = await signIn.mfa.verifyEmailCode({ code }));
+      } else if (signInChallenge === "phone_code") {
+        ({ error } = await signIn.mfa.verifyPhoneCode({ code }));
+      } else if (signInChallenge === "totp") {
+        ({ error } = await signIn.mfa.verifyTOTP({ code }));
+      } else {
+        ({ error } = await signIn.mfa.verifyBackupCode({ code }));
+      }
+      if (error) throw error;
+      if (signIn.status === "complete") {
+        await completeSignIn();
+        return;
+      }
+      throw new Error(
+        `Verification succeeded, but Clerk still reports ${signIn.status ?? "an incomplete sign-in"}.`,
+      );
+    } catch (error) {
+      Alert.alert("Verification failed", messageFromError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!verificationSubmitted || busy) return;
     if (finalizingVerification.current) return;
@@ -198,7 +267,6 @@ export default function SignIn() {
         redirectUrl: AuthSession.makeRedirectUri({
           scheme: "sua",
           path: "oauth-callback",
-          queryParams: { flow: authMode },
         }),
       });
       const { createdSessionId, setActive } = result;
@@ -208,6 +276,7 @@ export default function SignIn() {
         // it is available, then fall back to the selected tab.
         const destination =
           result.signUp || authMode === "sign-up" ? "/setup" : "/home";
+        setPendingAuthDestination(destination);
         await setActive({
           session: createdSessionId,
           navigate: (params) => {
@@ -256,33 +325,47 @@ export default function SignIn() {
             <Text className="text-[34px] font-black text-[#19152C]">
               {pendingVerification
                 ? "Check your email."
-                : mode === "sign-in"
+                : signInChallenge
+                  ? "Verify your sign-in."
+                  : mode === "sign-in"
                   ? "Welcome back."
                   : "Create your account."}
             </Text>
             <Text className="mt-2 text-base text-[#6E687D]">
-              {pendingVerification
-                ? `We sent a verification code to ${email}.`
+              {pendingVerification || signInChallenge
+                ? pendingVerification || signInChallenge === "email_code"
+                  ? `Enter the verification code sent to ${email}.`
+                  : signInChallenge === "phone_code"
+                    ? "Enter the verification code sent to your phone."
+                    : signInChallenge === "totp"
+                      ? "Enter the code from your authenticator app."
+                      : "Enter one of your backup codes."
                 : mode === "sign-in"
                   ? "Sign in to pick up where you left off."
                   : "Start turning lectures into exam-ready study sets."}
             </Text>
           </View>
 
-          {pendingVerification ? (
+          {pendingVerification || signInChallenge ? (
             <View className="gap-4">
               <Field
-                label="Verification code"
+                label={signInChallenge === "backup_code" ? "Backup code" : "Verification code"}
                 value={code}
                 onChangeText={setCode}
                 placeholder="123456"
-                keyboardType="number-pad"
+                keyboardType={signInChallenge === "backup_code" ? "default" : "number-pad"}
               />
-              <PrimaryButton onPress={submitVerificationCode}>
-                {busy ? "Verifying..." : "Verify email"}
+              <PrimaryButton
+                onPress={pendingVerification ? submitVerificationCode : submitSignInChallenge}
+              >
+                {busy ? "Verifying..." : "Verify and continue"}
               </PrimaryButton>
               <Pressable
-                onPress={() => setPendingVerification(false)}
+                onPress={() => {
+                  setPendingVerification(false);
+                  setSignInChallenge(null);
+                  setCode("");
+                }}
                 className="items-center py-2"
               >
                 <Text className="font-bold text-brand">
