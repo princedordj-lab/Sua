@@ -40,10 +40,12 @@ type AppContextValue = {
   isLoaded: boolean;
   isSignedIn: boolean;
   isHydrating: boolean;
+  hydrationIssue: boolean;
   hasCompletedOnboarding: boolean;
   profile: UserProfile | null;
   courses: Course[];
   getAuthToken: () => Promise<string | null>;
+  retryHydration: () => void;
   signOut: () => Promise<void>;
   updateProfile: (changes: Partial<UserProfile>) => Promise<void>;
   deleteAccount: () => Promise<void>;
@@ -130,6 +132,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Connectivity and foreground events bump it; a failed sync schedules one
   // bounded retry so queued edits resume without waiting for an app restart.
   const [refreshTick, setRefreshTick] = useState(0);
+  const [hydrationIssue, setHydrationIssue] = useState(false);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestRefresh = useCallback((delayMs = 0) => {
     if (delayMs <= 0) {
@@ -142,12 +145,44 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setRefreshTick((tick) => tick + 1);
     }, delayMs);
   }, []);
+  const retryHydration = useCallback(() => {
+    requestRefresh();
+  }, [requestRefresh]);
+  const applyHydrationFallback = useCallback((clerkId: string) => {
+    setHydrated((previous) => {
+      if (previous.clerkId === clerkId && previous.profile) return previous;
+      return { clerkId, profile: null, courses: [] };
+    });
+    setHydrationIssue(true);
+    void listLocalCourses(db)
+      .then((cached) => {
+        setHydrated((previous) =>
+          previous.clerkId === clerkId && !previous.profile
+            ? { ...previous, courses: cached.map(cachedCourseToApp) }
+            : previous,
+        );
+      })
+      .catch(() => {});
+  }, [db]);
   useEffect(
     () => () => {
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
     },
     [],
   );
+
+  // Network-backed bootstrap must not block the signed-in app forever. After
+  // a bounded wait, expose cached courses and let connectivity/foreground
+  // events retry the server bootstrap in the background.
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn || !userId || hydrated.clerkId === userId) {
+      return;
+    }
+    const timeout = setTimeout(() => {
+      applyHydrationFallback(userId);
+    }, 10_000);
+    return () => clearTimeout(timeout);
+  }, [applyHydrationFallback, hydrated.clerkId, isLoaded, isSignedIn, userId]);
 
   // Flush the note queue and pull fresh copies whenever connectivity returns
   // or the app returns to the foreground — the queue must not wait for a
@@ -219,6 +254,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           profile,
           courses: serverCourses.map(serverCourseToLocal),
         });
+        setHydrationIssue(false);
         // Mirror courses into SQLite so an offline cold start can still list
         // them (and therefore create notes) without the API.
         void replaceLocalCourses(db, serverCourses.map(serverCourseToCache)).catch(() => {});
@@ -248,6 +284,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // can still be created and viewed offline; keep any state already
         // hydrated by an earlier successful pass.
         if (cancelled) return;
+        setHydrationIssue(true);
         let cached: LocalCourse[] = [];
         try {
           cached = await listLocalCourses(db);
@@ -283,6 +320,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     await setSetting(db, "expo_push_token", "").catch(() => {});
     setHydrated(EMPTY_HYDRATED);
+    setHydrationIssue(false);
     await clerkSignOut();
   }, [clerkSignOut, db, getToken]);
 
@@ -431,10 +469,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       isLoaded,
       isSignedIn,
       isHydrating,
+      hydrationIssue,
       hasCompletedOnboarding,
       profile,
       courses: active.courses,
       getAuthToken,
+      retryHydration,
       signOut,
       updateProfile,
       deleteAccount,
@@ -451,10 +491,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       deleteCourse,
       getAuthToken,
       hasCompletedOnboarding,
+      hydrationIssue,
       isHydrating,
       isLoaded,
       isSignedIn,
       profile,
+      retryHydration,
       signOut,
       updateCourse,
       updateProfile,

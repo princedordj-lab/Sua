@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Platform,
@@ -33,27 +33,39 @@ export default function SignIn() {
   const [fullName, setFullName] = useState("");
   const [code, setCode] = useState("");
   const [pendingVerification, setPendingVerification] = useState(false);
+  const [verificationSubmitted, setVerificationSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
+  const finalizingVerification = useRef(false);
 
   const switchMode = (next: "sign-in" | "sign-up") => {
     setMode(next);
     setPendingVerification(false);
+    setVerificationSubmitted(false);
     setCode("");
   };
 
-  const navigateAfterAuth = (params?: {
+  const navigateAfterAuth = useCallback((params?: {
     session?: { currentTask?: unknown } | null;
     decorateUrl?: (url: string) => string;
   }) => {
-    if (params?.session?.currentTask) return;
+    if (params?.session?.currentTask) {
+      // Do not treat an active Clerk task as a completed authentication.
+      // Return the user to the auth flow where the task can be addressed.
+      router.replace("/sign-in");
+      Alert.alert(
+        "Additional verification required",
+        "Your account needs another verification step before Sua can continue. Complete the step with your identity provider, then sign in again.",
+      );
+      return;
+    }
     if (mode === "sign-in") {
       router.replace("/home");
     } else {
       router.replace("/setup");
     }
-  };
+  }, [mode]);
 
-  const finalizeVerifiedSignUp = async () => {
+  const finalizeVerifiedSignUp = useCallback(async () => {
     if (signUp.status === "missing_requirements") {
       const missingFields = signUp.missingFields ?? [];
       const needsName = missingFields.some((field) =>
@@ -79,8 +91,7 @@ export default function SignIn() {
       navigate: navigateAfterAuth,
     });
     if (error) throw error;
-    router.replace("/setup");
-  };
+  }, [fullName, navigateAfterAuth, signUp]);
 
   const submitEmailPassword = async () => {
     if (!email || !password)
@@ -104,7 +115,6 @@ export default function SignIn() {
             navigate: () => router.replace("/home"),
           });
           if (finalizeError) throw finalizeError;
-          router.replace("/home");
         } else {
           Alert.alert("Sign in incomplete", "Additional verification is required.");
         }
@@ -131,7 +141,6 @@ export default function SignIn() {
           navigate: navigateAfterAuth,
         });
         if (finalizeError) throw finalizeError;
-        router.replace("/setup");
         return;
       }
       const { error: verificationError } =
@@ -151,7 +160,10 @@ export default function SignIn() {
     try {
       const { error } = await signUp.verifications.verifyEmailCode({ code });
       if (error) throw error;
-      await finalizeVerifiedSignUp();
+      // Clerk can publish the updated status on the next render. Finalize in
+      // the effect below so we read the fresh status instead of a stale hook
+      // snapshot from this callback.
+      setVerificationSubmitted(true);
     } catch (error) {
       Alert.alert("Verification failed", messageFromError(error));
     } finally {
@@ -159,25 +171,66 @@ export default function SignIn() {
     }
   };
 
+  useEffect(() => {
+    if (!verificationSubmitted || busy) return;
+    if (finalizingVerification.current) return;
+    if (signUp.status !== "complete" && signUp.status !== "missing_requirements") {
+      return;
+    }
+
+    finalizingVerification.current = true;
+    void finalizeVerifiedSignUp()
+      .catch((error: unknown) => {
+        Alert.alert("Verification failed", messageFromError(error));
+      })
+      .finally(() => {
+        finalizingVerification.current = false;
+        setVerificationSubmitted(false);
+      });
+  }, [busy, finalizeVerifiedSignUp, signUp.status, verificationSubmitted]);
+
   const continueWithGoogle = async () => {
+    const authMode = mode;
     setBusy(true);
     try {
-      const { createdSessionId, setActive } = await startSSOFlow({
+      const result = await startSSOFlow({
         strategy: "oauth_google",
         redirectUrl: AuthSession.makeRedirectUri({
           scheme: "sua",
           path: "oauth-callback",
+          queryParams: { flow: authMode },
         }),
       });
+      const { createdSessionId, setActive } = result;
       if (createdSessionId && setActive) {
+        // Clerk can complete OAuth by creating an account even when the user
+        // started from the sign-in tab. Prefer the actual returned flow when
+        // it is available, then fall back to the selected tab.
+        const destination =
+          result.signUp || authMode === "sign-up" ? "/setup" : "/home";
         await setActive({
           session: createdSessionId,
-          navigate: mode === "sign-in" ? () => router.replace("/home") : navigateAfterAuth,
+          navigate: (params) => {
+            if (params?.session?.currentTask) {
+              router.replace("/sign-in");
+              Alert.alert(
+                "Additional verification required",
+                "Your account needs another verification step before Sua can continue. Complete the step with your identity provider, then sign in again.",
+              );
+              return;
+            }
+            router.replace(destination);
+          },
         });
-        router.replace(mode === "sign-in" ? "/home" : "/setup");
       } else {
+        const missing = result.signUp?.missingFields?.join(", ");
+        if (result.signUp?.status === "missing_requirements") {
+          setMode("sign-up");
+        }
         throw new Error(
-          "Google authentication completed without an active Clerk session. Check the mobile SSO redirect allowlist.",
+          missing
+            ? `Google authentication needs these additional account details: ${missing}. Return to the form and complete them, or try Google again.`
+            : "Google authentication needs an additional verification step before a session can start. Return to email sign-in or try Google again.",
         );
       }
     } catch (error) {

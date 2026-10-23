@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { ActivityIndicator, Alert, Text, View } from "react-native";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { useAuth } from "@clerk/expo";
 import * as WebBrowser from "expo-web-browser";
 
@@ -8,11 +8,12 @@ WebBrowser.maybeCompleteAuthSession();
 
 export default function OAuthCallback() {
   const { isLoaded, isSignedIn } = useAuth();
+  const { flow } = useLocalSearchParams<{ flow?: string }>();
 
   useEffect(() => {
     if (!isLoaded) return;
     if (isSignedIn) {
-      router.replace("/");
+      router.replace(flow === "sign-up" ? "/setup" : "/home");
       return;
     }
 
@@ -28,7 +29,7 @@ export default function OAuthCallback() {
     }, 8000);
 
     return () => clearTimeout(timeout);
-  }, [isLoaded, isSignedIn]);
+  }, [flow, isLoaded, isSignedIn]);
 
   return (
     <View className="flex-1 items-center justify-center gap-3 bg-cream">

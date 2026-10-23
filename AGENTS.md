@@ -42,6 +42,7 @@ Sua/
 │   │   └── generated/  # Prisma client
 │   ├── prisma/         # Schema + numbered migrations (0_… through 4_…)
 │   └── package.json
+├── web/                # Next.js web MVP (App Router, TS, Tailwind v4) — see buildstep.md
 ├── design_tokens/      # Tailwind config and shared theme
 └── images/             # Marketing and screenshot assets
 ```
