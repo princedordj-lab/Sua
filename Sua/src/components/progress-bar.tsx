@@ -20,7 +20,7 @@ export function ProgressBar({
         accessibilityRole="progressbar"
         accessibilityValue={{ min: 0, max: 100, now: pct }}
       >
-        <View className="h-full rounded-chip bg-brand" style={{ width: `${pct}%` }} />
+        <View className="h-full rounded-chip bg-brand-strong" style={{ width: `${pct}%` }} />
       </View>
       {showPercent ? (
         <Text className="text-caption font-sans-bold text-ink-soft">{pct}%</Text>

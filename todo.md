@@ -157,9 +157,9 @@ Run work as background jobs so the student does not need to keep the app open:
 | Styling | NativeWind; use inline `className` for Views and other components; `style` only on `SafeAreaView` |
 | Authentication | Clerk |
 | Cloud database | NeonDB (Postgres) | Application data and sync API persistence. |
-| Cloud file storage | Cloudinary | Uploaded audio, PDFs, slides, and images; asset access is mediated by the backend API. |
+| Cloud file storage | Neon Object Storage | Private uploaded audio, PDFs, slides, and images; direct uploads and short-lived private URLs are mediated by the backend API. Cloudinary remains a temporary compatibility source during the asset migration. |
 | ORM | Prisma | Typed database access from the backend. |
-| Local-first storage | Expo SQLite; phone is primary copy, NeonDB is cloud data store, Cloudinary stores files. |
+| Local-first storage | Expo SQLite; phone is primary copy, NeonDB is the cloud data store, and Neon Object Storage keeps private file objects. |
 | AI generation | xKiro; configurable low-cost bulk model and stronger assistant/marking model |
 | Transcription | Gemini, with secondary provider decision open |
 | Payments | Paystack |
@@ -173,7 +173,7 @@ Engineering rules:
 - Long jobs run in background and notify on completion; never block the student.
 - Compress audio, lazy-load screens, and keep downloads small.
 - Every AI answer is traceable to student notes where possible.
-- Use encrypted traffic, authenticated API access, protected Cloudinary assets, and Postgres row-level security so users access only their own records.
+- Use encrypted traffic, authenticated API access, private Neon objects with short-lived signed URLs, and Postgres row-level security so users access only their own records.
 - Do not use recordings or notes to train AI models. Support deletion and comply with Ghana's Data Protection Act.
 - Add monthly per-user AI caps, caching, cheap defaults, and alerts when daily AI spend crosses a configured threshold.
 
@@ -198,7 +198,7 @@ Engineering rules:
 - **Devices:** Android 8+, iOS 15+, phones with 3 GB RAM.
 - **Reliability:** chunked recording persistence, crash recovery, and Recover recording on next launch.
 - **Accessibility:** readable text, strong contrast, screen-reader labels on all buttons.
-- **Privacy/security:** encrypted traffic, authenticated API access, protected Cloudinary assets, per-user Postgres row-level security, user-controlled deletion, no model training on student content; follow Ghana Data Protection Act.
+- **Privacy/security:** encrypted traffic, authenticated API access, private Neon assets, per-user Postgres row-level security, user-controlled deletion, no model training on student content; follow Ghana Data Protection Act.
 - **90-day success measures:** 40% create first summary within 24 hours; 25% of weekly active users review 4+ days/week; 8% free-to-paid conversion; 20% day-30 retention; 98% job success; median under 8 minutes for 30-minute recording; Play Store rating 4.5+; AI cost per free user under GHS 1.50/month (validate).
 - **Analytics events:** `signup_completed`, `first_recording_started`, `summary_ready`, `flashcards_opened`, `review_session_completed`, `quiz_completed`, `assistant_question_sent`, `paywall_viewed`, `checkout_started`, `payment_succeeded`, `referral_sent`, `report_mistake_tapped`, `job_failed`.
 
@@ -209,7 +209,7 @@ Complete milestones in order where dependencies require it. Each milestone can b
 ### [x] Milestone 0 — Architecture and build plan confirmed
 
 - [x] Confirm NeonDB (Postgres) for application data, Prisma for data access, and Expo SQLite for local-first storage.
-- [x] Confirm Cloudinary for cloud file storage.
+- [x] Confirm Neon Object Storage for cloud file storage; migrate existing active Cloudinary assets before retiring the compatibility path.
 - [x] Confirm Express.js on Node.js as the backend API connecting the mobile frontend to application services over HTTPS.
 - [x] Record agreed product limits and pricing: 10 free flashcard/quiz sets per month and GHS 150 for the four-month Semester Pass.
 
@@ -225,7 +225,7 @@ Complete milestones in order where dependencies require it. Each milestone can b
 - [x] Implement course create, rename, archive, delete confirmation, and move-note flow.
 - [] Add Sentry/PostHog foundations and analytics event definitions.(Skip) — skipped by decision; analytics move to a later milestone.
 
-> Frontend foundation and Clerk identity are complete. NeonDB + Prisma user/course schema is live with per-user row-level security, and the authenticated Express API (`/api/me`, `/api/courses`, Clerk webhook sync) is connected to the frontend client. Cloudinary is integrated via signed direct uploads (`/api/uploads/sign`, `/api/uploads/:id/complete`, protected asset URLs at `/api/assets/:id/url`, per-asset delete, and Cloudinary cleanup on account deletion) with an RLS-protected `assets` table. Course management is complete including archive persistence across restarts, delete confirmation with local note purge, and a two-tap move-note flow (course chip in the note editor and move action on the course screen). Sentry/PostHog foundations are explicitly skipped and tracked for a later milestone.
+> Frontend foundation and Clerk identity are complete. NeonDB + Prisma user/course schema is live with per-user row-level security, and the authenticated Express API (`/api/me`, `/api/courses`, Clerk webhook sync) is connected to the frontend client. File handling now targets private Neon Object Storage using short-lived upload/download URLs, while the asset migration command and old-client Cloudinary compatibility path remain until cutover is verified. Course management is complete including archive persistence across restarts, delete confirmation with local note purge, and a two-tap move-note flow (course chip in the note editor and move action on the course screen). Sentry/PostHog foundations are explicitly skipped and tracked for a later milestone.
 
 **Exit criteria:** a new user can sign up, finish or skip onboarding, reach Home within 90 seconds, and manage courses with ownership protections in place.
 
@@ -241,7 +241,7 @@ Complete milestones in order where dependencies require it. Each milestone can b
 
 **Exit criteria:** create and view notes offline; record survives interruption; queued changes/uploads resume on reconnection without losing data.
 
-**Deferral notes:** image OCR text extraction is deferred to Milestone 3 (Gemini) — PDF/DOCX/PPTX/TXT extraction is complete via pure-JS server-side parsing; the free-tier 3-audio-notes-per-month enforcement stays capped at 9999 until billing lands in Milestone 5 (monthly counting and the 60-minute recording cap are enforced now); orphaned Cloudinary assets from abandoned queues are cleaned up with account deletion (per-asset GC of expired pending rows is deferred to Milestone 5).
+**Deferral notes:** image OCR text extraction is deferred to Milestone 3 (Gemini) — PDF/DOCX/PPTX/TXT extraction is complete via pure-JS server-side parsing; the free-tier 3-audio-notes-per-month enforcement stays capped at 9999 until billing lands in Milestone 5 (monthly counting and the 60-minute recording cap are enforced now); abandoned queue objects are cleaned up with account deletion (per-asset GC of expired pending rows is deferred to Milestone 5).
 
 > Local-first notes and capture are complete. The versioned SQLite layer (WAL, v1–v6 migrations) stores notes with `syncState`, recording sessions/segments, and an upload queue with attempt tracking; the sync contract pushes pending mutations with a timestamp conflict guard and pulls with pending-safe upserts so local offline edits are never clobbered. The Create tab supports three modes: typed notes (markdown toolbar, preview, debounced 1.5 s autosave), chunked audio recording (2-minute m4a segments at ~0.5 MB/min, pause/resume, 60-minute cap, crash-recovery banner that resumes or saves interrupted takes, unmount-safe finalization), and uploads (PDF/DOCX/PPTX/TXT/images up to 25 MB with a Wi-Fi-only toggle, sequential background upload with retry, and server-side text extraction stored on the asset and mirrored into the note transcript). Hydration is offline-tolerant, course mutations mirror locally, and connectivity changes drain the note then upload queues. Remaining M2 verification is on-device (development builds on Android/iOS).
 
@@ -285,7 +285,7 @@ Complete milestones in order where dependencies require it. Each milestone can b
 - [ ] Implement Free and Pro entitlements and limits, including 10 sets/month and GHS 150 Semester Pass price.
 - [ ] Integrate Paystack GHS checkout for MTN MoMo, Telecel Cash, AirtelTigo Money, and cards; receipts and payment history.
 - [ ] Implement cancellation, 3-day grace period, limit reversion, referrals, and permanent content retention after expiry.
-- [x] Build Profile, AI/data settings, session/password controls, and account/data deletion. Done ahead of the billing items: profile hub with plan badge and monthly recordings meter, account editing (PATCH /me), notification preferences (review reminder + study-set-ready push opt-out with DELETE /me/push-token), Wi-Fi-only and auto-generate settings (gates the capture pipeline and /sign task param), device data wipe, and account/data deletion (POST /me/delete reusing the webhook's Cloudinary + cascade cleanup). Password/session management is delegated to the Clerk account portal (EXPO_PUBLIC_CLERK_ACCOUNT_PORTAL_URL).
+- [x] Build Profile, AI/data settings, session/password controls, and account/data deletion. Done ahead of the billing items: profile hub with plan badge and monthly recordings meter, account editing (PATCH /me), notification preferences (review reminder + study-set-ready push opt-out with DELETE /me/push-token), Wi-Fi-only and auto-generate settings (gates the capture pipeline and /sign task param), device data wipe, and account/data deletion (POST /me/delete reusing the webhook's storage-object + cascade cleanup). Password/session management is delegated to the Clerk account portal (EXPO_PUBLIC_CLERK_ACCOUNT_PORTAL_URL).
 - [x] Add a Preferences screen (Profile → Preferences) with all four planned settings: appearance mode (System/Light/Dark — dark mode uses CSS-variable design tokens via NativeWind `vars()` so the ~27 JS consumer files read palette values from a runtime provider instead of static token imports; dark palette is warm charcoal), review session length (10/20/30, clamped 5–50, caps the `/review` queue), note text size (small/medium/large, 14/16/20 tiers, applied to note bodies and transcripts in the note viewer), and remember-last-capture-course (`remember_capture_course`, persists `create_last_course` on recording/typing/upload commits and defaults the picker). Settings are device-local KV pairs (no SQLite migration); typed routes regenerated.
 - [ ] Verify privacy, RLS, storage access, data deletion, accessibility, and student-content exclusion from model training.
 - [ ] Tune performance, low-data behavior, and 3 GB RAM device support; verify Android 8+ and iOS 15+.

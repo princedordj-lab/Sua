@@ -6,7 +6,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useAppearance, type AppearancePref } from "../../../state/appearance";
 import { useBooleanSetting, useStringSetting } from "../../../state/settings";
 import { SwitchRow } from "../../../components/ui";
-import { colors } from "../../../config/theme";
 import { usePalette } from "../../../state/appearance";
 
 const APPEARANCE_OPTIONS: { value: AppearancePref; label: string }[] = [
@@ -53,8 +52,7 @@ function SegSelect({
             accessibilityRole="radio"
             accessibilityState={{ selected }}
             accessibilityLabel={`${label}: ${option.label}`}
-            className="min-h-9 flex-1 items-center justify-center rounded-chip px-2 active:opacity-80"
-            style={selected ? { backgroundColor: colors.brand.DEFAULT } : undefined}
+            className={`min-h-9 flex-1 items-center justify-center rounded-chip px-2 active:opacity-80 ${selected ? "bg-brand-strong" : ""}`}
           >
             <Text
               className={`text-caption font-sans-bold ${
@@ -85,7 +83,7 @@ function OptionBlock({
   return (
     <View>
       <View className="flex-row items-center gap-2 px-card py-2">
-        <Icon size={19} color={colors.brand.DEFAULT} />
+        <Icon size={19} color={pv.brand.DEFAULT} />
         <Text className="font-sans-bold text-body" style={{ color: pv.ink.DEFAULT }}>
           {title}
         </Text>
@@ -101,6 +99,7 @@ function OptionBlock({
 function PreferencesContent() {
   const db = useSQLiteContext();
   const { pref, setPref, loaded } = useAppearance();
+  const pv = usePalette();
   const sessionLength = useStringSetting(db, "review_session_length", "30");
   const textScale = useStringSetting(db, "note_text_scale", "medium");
   const rememberCourse = useBooleanSetting(db, "remember_capture_course");
@@ -115,7 +114,7 @@ function PreferencesContent() {
           accessibilityLabel="Go back"
           className="h-10 w-10 items-center justify-center rounded-full bg-surface active:opacity-80"
         >
-          <ArrowLeft size={20} color={colors.ink.DEFAULT} />
+          <ArrowLeft size={20} color={pv.ink.DEFAULT} />
         </Pressable>
         <Text className="flex-1 text-body-lg font-sans-extrabold text-ink">Preferences</Text>
       </View>

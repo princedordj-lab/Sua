@@ -85,7 +85,7 @@ export default function Study() {
         </Text>
         <Text className="mt-1 text-3xl font-sans-black text-ink">Study</Text>
 
-        <View className="mt-6 rounded-card bg-brand p-card-lg">
+        <View className="mt-6 rounded-card bg-brand-strong p-card-lg">
           <View className="flex-row items-center justify-between">
             <View className="flex-row items-center gap-2">
               <Sparkles size={18} color={colors.gold.DEFAULT} />

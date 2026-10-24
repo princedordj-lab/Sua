@@ -64,20 +64,26 @@ app.use((err, _req, res, _next) => {
   res.status(status).json({ error: err.message ?? "Request failed" });
 });
 
-app.listen(port, () => {
-  if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
-    console.warn(
-      "CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY not set — authenticated routes will fail.",
-    );
-  }
-  if (
-    !process.env.CLOUDINARY_CLOUD_NAME ||
-    !process.env.CLOUDINARY_API_KEY ||
-    !process.env.CLOUDINARY_API_SECRET
-  ) {
-    console.warn(
-      "CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET not set — upload routes return 503.",
-    );
-  }
-  console.log(`Sua API listening on port ${port}`);
-});
+// Export for Vercel serverless function
+export default app;
+
+// Start server locally if not running on Vercel
+if (!process.env.VERCEL) {
+  app.listen(port, () => {
+    if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
+      console.warn(
+        "CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY not set — authenticated routes will fail.",
+      );
+    }
+    if (
+      !process.env.NEON_API_KEY ||
+      !process.env.NEON_PROJECT_ID ||
+      !process.env.NEON_BRANCH_ID
+    ) {
+      console.warn(
+        "NEON_API_KEY / NEON_PROJECT_ID / NEON_BRANCH_ID not set — Neon upload routes return 503.",
+      );
+    }
+    console.log(`Sua API listening on port ${port}`);
+  });
+}

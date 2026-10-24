@@ -1,49 +1,56 @@
-import { colors } from "../config/theme";
+import { colors, palette } from "../config/theme";
 import type { Course } from "./types";
 
 // Known course colours map to token tints; unknown server colours fall back to
 // the raw value with a translucent tint so any colour renders safely.
-const COURSE_STYLES: Record<string, { accent: string; tint: string }> = {
+const COURSE_STYLES: Record<string, { accent: string; tintKey: keyof typeof colors.courseTint | "success" }> = {
   [colors.course.ocean]: {
     accent: colors.course.ocean,
-    tint: colors.courseTint.ocean,
+    tintKey: "ocean",
   },
   [colors.course.forest]: {
     accent: colors.course.forest,
-    tint: colors.courseTint.forest,
+    tintKey: "forest",
   },
   [colors.course.gold]: {
     accent: colors.course.gold,
-    tint: colors.courseTint.gold,
+    tintKey: "gold",
   },
   [colors.course.coral]: {
     accent: colors.course.coral,
-    tint: colors.courseTint.coral,
+    tintKey: "coral",
   },
   [colors.course.violet]: {
     accent: colors.course.violet,
-    tint: colors.courseTint.violet,
+    tintKey: "violet",
   },
   [colors.course.sky]: {
     accent: colors.course.sky,
-    tint: colors.courseTint.sky,
+    tintKey: "sky",
   },
   [colors.course.plum]: {
     accent: colors.course.plum,
-    tint: colors.courseTint.plum,
+    tintKey: "plum",
   },
   [colors.course.slate]: {
     accent: colors.course.slate,
-    tint: colors.courseTint.slate,
+    tintKey: "slate",
   },
   [colors.brand.DEFAULT]: {
     accent: colors.brand.DEFAULT,
-    tint: colors.successSoft,
+    tintKey: "success",
   },
 };
 
-export function courseStyle(color: string) {
-  return COURSE_STYLES[color] ?? { accent: color, tint: `${color}1F` };
+export function courseStyle(color: string, theme: ReturnType<typeof palette> = colors) {
+  const style = COURSE_STYLES[color];
+  if (style) {
+    return {
+      accent: style.tintKey === "success" ? theme.brand.DEFAULT : theme.course[style.tintKey],
+      tint: style.tintKey === "success" ? theme.successSoft : theme.courseTint[style.tintKey],
+    };
+  }
+  return { accent: color, tint: `${color}1F` };
 }
 
 export function courseInitials(course: Course) {

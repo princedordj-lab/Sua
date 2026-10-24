@@ -13,6 +13,7 @@ export const colors = {
   brand: {
     DEFAULT: "#005B45",
     light: "#087A5B",
+    strong: "#005B45",
   },
   gold: {
     DEFAULT: "#FFBE1A",
@@ -124,12 +125,12 @@ export const ui = {
   screen: "flex-1 bg-cream px-screen pb-tabbar",
   card: "rounded-card bg-surface p-card shadow-card",
   cardLarge: "rounded-card bg-surface p-card-lg shadow-card",
-  hero: "rounded-card bg-brand p-card-lg",
+  hero: "rounded-card bg-brand-strong p-card-lg",
   button: "min-h-12 items-center justify-center rounded-btn px-5",
   buttonPrimary:
     "min-h-12 items-center justify-center rounded-btn bg-gold px-5 shadow-gold",
   buttonSecondary:
-    "min-h-12 items-center justify-center rounded-btn bg-brand px-5",
+    "min-h-12 items-center justify-center rounded-btn bg-brand-strong px-5",
   input:
     "h-12 rounded-input border border-line bg-surface px-4 text-body text-ink",
   chip: "rounded-chip px-3 py-2",
@@ -150,13 +151,10 @@ export const safeAreaStyleDark: ViewStyle = {
 /**
  * Appearance tokens.
  *
- * The 6 scheme-reactive neutrals are driven through CSS variables declared in
- * tailwind.config.js; `lightVars` mirrors the `addBase` light defaults and
- * `darkVars` re-maps them, so every `bg-cream`/`text-ink`/`bg-surface`/
- * `text-ink-soft`/`text-ink-faint`/`border-line` class in the app follows the
- * preference without any `dark:` variants. Accent colours (brand, gold,
- * success, …) and `ink.inverse` intentionally stay static: they sit on
- * coloured/gold surfaces that do not invert.
+ * Scheme-aware neutral, brand and status roles are driven through CSS
+ * variables declared in tailwind.config.js. `darkVars` remaps those roles, so
+ * token-based classes follow the appearance preference without `dark:` variants.
+ * Inverse ink stays white for controls on coloured surfaces.
  */
 export const lightVars = vars({
   "--color-cream": "255 248 232",
@@ -165,6 +163,24 @@ export const lightVars = vars({
   "--color-ink-soft": "92 107 99",
   "--color-ink-faint": "138 151 143",
   "--color-line": "232 224 201",
+  "--color-brand": "0 91 69",
+  "--color-brand-light": "8 122 91",
+  "--color-brand-strong": "0 91 69",
+  "--color-gold": "255 190 26",
+  "--color-gold-soft": "255 241 191",
+  "--color-success": "30 158 106",
+  "--color-danger": "214 69 69",
+  "--color-warning": "232 135 14",
+  "--color-info": "47 125 209",
+  "--color-success-soft": "232 247 240",
+  "--color-danger-soft": "252 236 236",
+  "--color-warning-soft": "255 243 225",
+  "--color-info-soft": "234 243 252",
+  "--color-rating-again": "174 39 39",
+  "--color-rating-hard": "153 78 0",
+  "--color-rating-good": "0 91 69",
+  "--color-rating-easy": "126 86 0",
+  "--color-course-violet-tint": "240 237 252",
 });
 
 export const darkVars = vars({
@@ -173,14 +189,51 @@ export const darkVars = vars({
   "--color-surface": "33 29 24",
   "--color-ink": "241 235 221",
   "--color-ink-soft": "181 170 152",
-  "--color-ink-faint": "135 125 108",
+  "--color-ink-faint": "167 157 140",
   "--color-line": "55 50 42",
+  "--color-brand": "37 168 127",
+  "--color-brand-light": "0 91 69",
+  "--color-brand-strong": "0 91 69",
+  "--color-gold": "255 204 72",
+  "--color-gold-soft": "74 59 24",
+  "--color-success": "77 207 151",
+  "--color-danger": "255 123 123",
+  "--color-warning": "247 184 94",
+  "--color-info": "116 177 240",
+  "--color-success-soft": "27 56 43",
+  "--color-danger-soft": "62 34 34",
+  "--color-warning-soft": "63 47 25",
+  "--color-info-soft": "30 47 64",
+  "--color-rating-again": "130 35 35",
+  "--color-rating-hard": "126 62 0",
+  "--color-rating-good": "0 78 58",
+  "--color-rating-easy": "104 70 0",
+  "--color-course-violet-tint": "48 42 72",
 });
 
 export type AppearanceScheme = "light" | "dark";
 
 export const darkPalette = {
   ...colors,
+  brand: { DEFAULT: "#25A87F", light: "#005B45", strong: "#005B45" },
+  gold: { DEFAULT: "#FFCC48", soft: "#4A3B18" },
+  success: "#4DCF97",
+  danger: "#FF7B7B",
+  warning: "#F7B85E",
+  info: "#74B1F0",
+  successSoft: "#1B382B",
+  dangerSoft: "#3E2222",
+  warningSoft: "#3F2F19",
+  infoSoft: "#1E2F40",
+  rating: { again: "#822323", hard: "#7E3E00", good: "#004E3A", easy: "#684600" },
+  course: {
+    ocean: "#73B3F3", forest: "#4DCF97", gold: "#FFCC48", coral: "#FF9287",
+    violet: "#A496FF", sky: "#73CEEC", plum: "#E091D2", slate: "#A9B3AD",
+  },
+  courseTint: {
+    ocean: "#1E2F40", forest: "#1B382B", gold: "#4A3B18", coral: "#422925",
+    violet: "#302A48", sky: "#1D3540", plum: "#3D293B", slate: "#2C322F",
+  },
   cream: "#171411",
   surface: "#211D18",
   line: "#37322A",
@@ -188,7 +241,7 @@ export const darkPalette = {
     ...colors.ink,
     DEFAULT: "#F1EBDD",
     soft: "#B5AA98",
-    faint: "#877D6C",
+    faint: "#A79D8C",
   },
 } as const;
 

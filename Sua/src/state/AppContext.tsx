@@ -354,7 +354,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [getToken, userId],
   );
 
-  // Server-side wipe (rows + Cloudinary files, then the Clerk account). The
+  // Server-side wipe (rows + storage objects, then the Clerk account). The
   // local SQLite wipe and sign-out are the caller's job because they must run
   // after the request completes, and only the profile flow knows the steps.
   const deleteAccount = useCallback(async () => {

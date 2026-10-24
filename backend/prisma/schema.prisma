@@ -92,6 +92,8 @@ model Asset {
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   kind         String
   publicId     String
+  storageProvider String @default("cloudinary")
+  cloudinaryCleanupPending Boolean @default(false)
   secureUrl    String?
   bytes        Int      @default(0)
   format       String?

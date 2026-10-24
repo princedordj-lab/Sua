@@ -14,6 +14,7 @@ import { Apple } from "lucide-react-native";
 import { Image } from "expo-image";
 import { Field, Logo, PrimaryButton } from "../components/ui";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { usePalette } from "../state/appearance";
 import { setPendingAuthDestination } from "../lib/pending-auth-destination";
 
 WebBrowser.maybeCompleteAuthSession();
@@ -26,6 +27,7 @@ function messageFromError(error: unknown): string {
 type SignInChallenge = "email_code" | "phone_code" | "totp" | "backup_code";
 
 export default function SignIn() {
+  const pv = usePalette();
   const { signIn } = useSignIn();
   const { signUp } = useSignUp();
   const { startSSOFlow } = useSSO();
@@ -322,7 +324,7 @@ export default function SignIn() {
         <Logo />
         <View className="flex-1 justify-center gap-6">
           <View>
-            <Text className="text-[34px] font-black text-[#19152C]">
+            <Text className="text-[34px] font-black text-ink">
               {pendingVerification
                 ? "Check your email."
                 : signInChallenge
@@ -331,7 +333,7 @@ export default function SignIn() {
                   ? "Welcome back."
                   : "Create your account."}
             </Text>
-            <Text className="mt-2 text-base text-[#6E687D]">
+            <Text className="mt-2 text-base text-ink-soft">
               {pendingVerification || signInChallenge
                 ? pendingVerification || signInChallenge === "email_code"
                   ? `Enter the verification code sent to ${email}.`
@@ -415,25 +417,25 @@ export default function SignIn() {
                     : "Create account"}
               </PrimaryButton>
               <View className="flex-row items-center gap-3">
-                <View className="h-px flex-1 bg-[#E7E2F0]" />
-                <Text className="text-[#9992A8]">or continue with</Text>
-                <View className="h-px flex-1 bg-[#E7E2F0]" />
+                <View className="h-px flex-1 bg-line" />
+                <Text className="text-ink-faint">or continue with</Text>
+                <View className="h-px flex-1 bg-line" />
               </View>
               <View className="flex-row gap-3">
                 <Pressable
                   onPress={continueWithGoogle}
-                    className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-full border border-[#E9E5F2] bg-white "
+                    className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-full border border-line bg-surface"
                   >
                   <Image source={require("@/assets/images/google.svg")} style={{ width: 20, height: 20 }} />
-                  <Text className="font-bold text-[#393442]">Google</Text>
+                  <Text className="font-bold text-ink">Google</Text>
                 </Pressable>
                 {Platform.OS === "ios" && (
                   <Pressable
                     onPress={continueWithApple}
-                    className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-[#E9E5F2] bg-white"
+                    className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-line bg-surface"
                   >
-                    <Apple size={18} color="#19152C" />
-                    <Text className="font-bold text-[#393442]">Apple</Text>
+                    <Apple size={18} color={pv.ink.DEFAULT} />
+                    <Text className="font-bold text-ink">Apple</Text>
                   </Pressable>
                 )}
               </View>
@@ -443,7 +445,7 @@ export default function SignIn() {
                 }
                 className="items-center py-2"
               >
-                <Text className="text-[#6E687D]">
+                <Text className="text-ink-soft">
                   {mode === "sign-in"
                     ? "New to Sua? "
                     : "Already have an account? "}

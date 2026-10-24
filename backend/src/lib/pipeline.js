@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { cloudinary } from "../config/cloudinary.js";
+import { readAssetBytes } from "./storage.js";
 import { withUser } from "./db.js";
 import {
   bulkModel,
@@ -66,17 +66,11 @@ function mimeFor(asset) {
 }
 
 async function fetchAssetBytes(asset) {
-  const url = cloudinary.url(asset.publicId, {
-    resource_type: asset.resourceType,
-    type: "authenticated",
-    sign_url: true,
-    secure: true,
-  });
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`storage fetch failed (${response.status}) for asset ${asset.id}`);
+  try {
+    return await readAssetBytes(asset);
+  } catch (error) {
+    throw new Error(`storage fetch failed for asset ${asset.id}: ${error?.message ?? error}`);
   }
-  return Buffer.from(await response.arrayBuffer());
 }
 
 /**

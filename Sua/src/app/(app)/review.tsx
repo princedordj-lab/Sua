@@ -138,7 +138,7 @@ export default function Review() {
             onPress={() => router.back()}
             accessibilityRole="button"
             accessibilityLabel="Finish the review session"
-            className="mt-8 min-h-12 items-center justify-center rounded-btn bg-brand px-6 active:opacity-80"
+            className="mt-8 min-h-12 items-center justify-center rounded-btn bg-brand-strong px-6 active:opacity-80"
           >
             <Text className="text-label font-sans-bold text-ink-inverse">Done</Text>
           </Pressable>
@@ -197,7 +197,7 @@ export default function Review() {
             onPress={() => handleGrade("again")}
             accessibilityRole="button"
             accessibilityLabel="Grade again"
-            className="flex-1 items-center justify-center gap-1 rounded-btn bg-danger py-3 active:opacity-80"
+            className="flex-1 items-center justify-center gap-1 rounded-btn bg-rating-again py-3 active:opacity-80"
           >
             <X size={17} color={colors.ink.inverse} />
             <Text className="text-caption font-sans-bold text-ink-inverse">Again</Text>
@@ -206,7 +206,7 @@ export default function Review() {
             onPress={() => handleGrade("hard")}
             accessibilityRole="button"
             accessibilityLabel="Grade hard"
-            className="flex-1 items-center justify-center gap-1 rounded-btn bg-warning py-3 active:opacity-80"
+            className="flex-1 items-center justify-center gap-1 rounded-btn bg-rating-hard py-3 active:opacity-80"
           >
             <Text className="text-caption font-sans-bold text-ink-inverse">Hard</Text>
           </Pressable>
@@ -214,7 +214,7 @@ export default function Review() {
             onPress={() => handleGrade("good")}
             accessibilityRole="button"
             accessibilityLabel="Grade good"
-            className="flex-1 items-center justify-center gap-1 rounded-btn bg-success py-3 active:opacity-80"
+            className="flex-1 items-center justify-center gap-1 rounded-btn bg-rating-good py-3 active:opacity-80"
           >
             <Check size={17} color={colors.ink.inverse} />
             <Text className="text-caption font-sans-bold text-ink-inverse">Good</Text>
@@ -223,7 +223,7 @@ export default function Review() {
             onPress={() => handleGrade("easy")}
             accessibilityRole="button"
             accessibilityLabel="Grade easy"
-            className="flex-1 items-center justify-center gap-1 rounded-btn bg-brand py-3 active:opacity-80"
+            className="flex-1 items-center justify-center gap-1 rounded-btn bg-rating-easy py-3 active:opacity-80"
           >
             <Text className="text-caption font-sans-bold text-ink-inverse">Easy</Text>
           </Pressable>

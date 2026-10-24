@@ -132,7 +132,7 @@ export const notesApi = {
 };
 
 export const uploadsApi = {
-  sign: (token: string, input: { kind: AssetKind; format: string; noteId?: string; task?: UploadTask | "none" }) =>
+  sign: (token: string, input: { kind: AssetKind; format: string; noteId?: string; task?: UploadTask | "none"; storageProvider?: "neon" }) =>
     apiRequest<SignedUpload>("/uploads/sign", {
       method: "POST",
       token,

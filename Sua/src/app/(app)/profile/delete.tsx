@@ -31,7 +31,7 @@ export default function DeleteAccount() {
     deleting = true;
     setBusy(true);
     try {
-      // Server wipe first: rows + Cloudinary files + the Clerk account (which
+      // Server wipe first: rows + storage objects + the Clerk account (which
       // revokes sessions). If it fails nothing local is touched, so the
       // device stays consistent with the Play Store promise of deletion.
       await deleteAccount();

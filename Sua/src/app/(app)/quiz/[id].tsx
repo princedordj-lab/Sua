@@ -332,7 +332,7 @@ export default function Quiz() {
             onPress={start}
             accessibilityRole="button"
             accessibilityLabel="Start the quiz"
-            className="mt-8 min-h-12 items-center justify-center rounded-btn bg-brand active:opacity-80"
+            className="mt-8 min-h-12 items-center justify-center rounded-btn bg-brand-strong active:opacity-80"
           >
             <Text className="text-label font-sans-extrabold text-ink-inverse">
               Start quiz
@@ -451,7 +451,7 @@ export default function Quiz() {
             onPress={() => void shortContinue()}
             accessibilityRole="button"
             accessibilityLabel="Continue to the next question"
-            className="min-h-12 items-center justify-center rounded-btn bg-brand active:opacity-80"
+            className="min-h-12 items-center justify-center rounded-btn bg-brand-strong active:opacity-80"
           >
             <Text className="text-label font-sans-extrabold text-ink-inverse">
               {revealed ? "Next question" : "Continue"}
@@ -566,7 +566,7 @@ export default function Quiz() {
             onPress={() => router.back()}
             accessibilityRole="button"
             accessibilityLabel="Finish the quiz"
-            className="min-h-12 flex-1 items-center justify-center rounded-btn bg-brand active:opacity-80"
+            className="min-h-12 flex-1 items-center justify-center rounded-btn bg-brand-strong active:opacity-80"
           >
             <Text className="text-label font-sans-bold text-ink-inverse">Done</Text>
           </Pressable>

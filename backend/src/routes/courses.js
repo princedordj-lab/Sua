@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { cloudinary, cloudinaryConfigured } from "../config/cloudinary.js";
+import { deleteAssetObject } from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
 import { ensureUser } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
@@ -126,13 +126,11 @@ coursesRouter.delete("/:id", async (req, res) => {
         where: { noteId: { in: noteIds }, userId: user.id },
       });
       for (const asset of assets) {
-        if (cloudinaryConfigured() && asset.publicId && asset.publicId !== "pending") {
+        if (asset.publicId && asset.publicId !== "pending") {
           try {
-            await cloudinary.uploader.destroy(asset.publicId, {
-              resource_type: asset.resourceType,
-            });
+            await deleteAssetObject(asset);
           } catch (err) {
-            console.warn(`Cloudinary destroy failed for asset ${asset.publicId}:`, err);
+            console.warn(`Storage object delete failed for asset ${asset.publicId}:`, err);
           }
         }
       }

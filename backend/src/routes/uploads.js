@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { cloudinary, cloudinaryConfigured } from "../config/cloudinary.js";
+import { neonStorageConfigured, presignNeonObject } from "../config/neon-storage.js";
+import { assetDownloadUrl, deleteAssetObject, readAssetBytes, storageProviderOf, verifyNeonObject } from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
 import { extractDocumentText } from "../lib/extract.js";
 import { maybeEnqueueGeneration } from "../lib/pipeline.js";
@@ -8,6 +10,19 @@ import { identityFromRequest } from "../lib/identity.js";
 
 export const uploadsRouter = Router();
 export const assetsRouter = Router();
+
+function mimeForFormat(format, kind) {
+  const mimeByFormat = {
+    pdf: "application/pdf", txt: "text/plain; charset=utf-8",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ppt: "application/vnd.ms-powerpoint",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
+    heic: "image/heic", heif: "image/heif", m4a: "audio/mp4", mp3: "audio/mpeg",
+    wav: "audio/wav", ogg: "audio/ogg", aac: "audio/aac",
+  };
+  return mimeByFormat[format] ?? (kind === "image" ? "image/jpeg" : "application/octet-stream");
+}
 
 const MAX_BYTES = {
   document: 25 * 1024 * 1024,
@@ -40,6 +55,7 @@ function shapeAsset(asset) {
     id: asset.id,
     kind: asset.kind,
     publicId: asset.publicId,
+    storageProvider: storageProviderOf(asset),
     secureUrl: asset.secureUrl,
     bytes: asset.bytes,
     format: asset.format,
@@ -55,17 +71,7 @@ function shapeAsset(asset) {
 // Downloads the confirmed bytes through a signed URL (the media itself never
 // travels through the API) and parses any text the format supports.
 async function extractFromStorage(asset) {
-  const url = cloudinary.url(asset.publicId, {
-    resource_type: asset.resourceType,
-    type: "authenticated",
-    sign_url: true,
-    secure: true,
-  });
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`storage fetch failed (${response.status})`);
-  }
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = await readAssetBytes(asset);
   return extractDocumentText(buffer, asset.format, asset.kind);
 }
 
@@ -90,19 +96,19 @@ async function fetchRemoteWithRetry(publicId, resourceType, maxAttempts = 3, bas
   }
 }
 
-function requireStorage(res) {
-  if (!cloudinaryConfigured()) {
-    res.status(503).json({ error: "File storage is not configured" });
-    return false;
-  }
-  return true;
-}
-
-// Clients upload straight to Cloudinary with these signed parameters, so
-// large files never proxy through the API and secrets never leave the server.
+// Older clients omit storageProvider and keep using Cloudinary while the app
+// rollout drains queued transfers. Current clients request Neon presigned PUTs.
 uploadsRouter.post("/sign", async (req, res) => {
-  if (!requireStorage(res)) return;
   const identity = await identityFromRequest(req);
+  // New app versions identify Neon explicitly. Older installed builds omit
+  // this field and continue to receive the legacy Cloudinary multipart shape.
+  const storageProvider = req.body?.storageProvider === "neon" ? "neon" : "cloudinary";
+  if (storageProvider === "neon" && !neonStorageConfigured()) {
+    return res.status(503).json({ error: "Neon Object Storage is not configured" });
+  }
+  if (storageProvider === "cloudinary" && !cloudinaryConfigured()) {
+    return res.status(503).json({ error: "Legacy upload storage is not configured" });
+  }
   const { kind, format } = req.body ?? {};
   if (!kind || !(kind in MAX_BYTES)) {
     return res.status(400).json({ error: "kind must be audio, document, or image" });
@@ -144,6 +150,7 @@ uploadsRouter.post("/sign", async (req, res) => {
         userId: user.id,
         kind,
         publicId: "pending",
+        storageProvider,
         resourceType: RESOURCE_TYPES[kind],
         format: normalizedFormat,
         status: "pending",
@@ -165,6 +172,24 @@ uploadsRouter.post("/sign", async (req, res) => {
   }
   const asset = outcome.asset;
 
+  if (storageProvider === "neon") {
+    try {
+      const upload = await presignNeonObject(asset.publicId, "upload", mimeForFormat(normalizedFormat, kind));
+      return res.status(201).json({
+        ...shapeAsset(asset),
+        uploadUrl: upload.url,
+        uploadHeaders: upload.headers,
+        uploadExpiresAt: upload.expiresAt,
+        uploadMethod: "PUT",
+        maxBytes: MAX_BYTES[kind],
+      });
+    } catch (error) {
+      await withUser(identity.clerkId, (tx) => tx.asset.deleteMany({ where: { id: asset.id } }));
+      console.error("Neon upload signing failed:", error?.message ?? error);
+      return res.status(503).json({ error: "Could not prepare file upload" });
+    }
+  }
+
   const timestamp = Math.floor(Date.now() / 1000);
   const params = { public_id: asset.publicId, timestamp, type: "authenticated" };
   const signature = cloudinary.utils.api_sign_request(
@@ -185,38 +210,63 @@ uploadsRouter.post("/sign", async (req, res) => {
 });
 
 // The client confirms an upload; the server verifies the asset actually
-// exists on Cloudinary before marking it active (never trusts client URLs).
+// exists in the selected provider before marking it active (never trusts a
+// client URL or object metadata).
 uploadsRouter.post("/:id/complete", async (req, res) => {
-  if (!requireStorage(res)) return;
   const identity = await identityFromRequest(req);
   const { id } = req.params;
   const claimedPublicId = String(req.body?.publicId ?? "");
 
-  const outcome = await withUser(identity.clerkId, async (tx) => {
+  const existingAsset = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
-    const asset = await tx.asset.findFirst({ where: { id, userId: user.id } });
-    if (!asset) return { status: 404, error: "Asset not found" };
-    if (asset.status === "active") return { status: 200, asset };
-    if (!claimedPublicId || claimedPublicId !== asset.publicId) {
-      return { status: 400, error: "publicId does not match this upload" };
+    return tx.asset.findFirst({ where: { id, userId: user.id } });
+  });
+
+  if (!existingAsset) return res.status(404).json({ error: "Asset not found" });
+  let outcome;
+  if (existingAsset.status === "active") {
+    outcome = { status: 200, asset: existingAsset };
+  } else {
+    if (!claimedPublicId || claimedPublicId !== existingAsset.publicId) {
+      return res.status(400).json({ error: "publicId does not match this upload" });
     }
+
+    // Verify storage outside the RLS transaction. Neon's object read can take
+    // longer than Prisma's interactive transaction window, so keeping network
+    // I/O here prevents holding a database connection while waiting on storage.
     let remote;
     try {
-      remote = await fetchRemoteWithRetry(asset.publicId, asset.resourceType);
+      remote = storageProviderOf(existingAsset) === "neon"
+        ? await verifyNeonObject(existingAsset.publicId, MAX_BYTES[existingAsset.kind])
+        : await fetchRemoteWithRetry(existingAsset.publicId, existingAsset.resourceType);
     } catch (err) {
-      console.error(`Cloudinary complete verification failed for ${asset.publicId}:`, err);
-      return { status: 400, error: "Upload not found on storage provider" };
+      console.error(`${storageProviderOf(existingAsset)} complete verification failed for ${existingAsset.publicId}:`, err);
+      if (/exceeds the allowed size/i.test(err?.message ?? "")) {
+        return res.status(413).json({ error: "Uploaded file exceeds the allowed size" });
+      }
+      return res.status(400).json({ error: "Upload not found on storage provider" });
     }
-    const updated = await tx.asset.update({
-      where: { id: asset.id },
-      data: {
-        status: "active",
-        bytes: remote.bytes ?? 0,
-        secureUrl: remote.secure_url ?? null,
-      },
+
+    outcome = await withUser(identity.clerkId, async (tx) => {
+      const user = await ensureUser(tx, identity);
+      const current = await tx.asset.findFirst({ where: { id, userId: user.id } });
+      if (!current) return { status: 404, error: "Asset not found" };
+      // A concurrent completion may already have activated this same asset.
+      if (current.status === "active") return { status: 200, asset: current };
+      if (current.publicId !== claimedPublicId || storageProviderOf(current) !== storageProviderOf(existingAsset)) {
+        return { status: 409, error: "Asset changed during upload; retry completion" };
+      }
+      const updated = await tx.asset.update({
+        where: { id: current.id },
+        data: {
+          status: "active",
+          bytes: remote.bytes ?? 0,
+          secureUrl: remote.secure_url ?? null,
+        },
+      });
+      return { status: 200, asset: updated };
     });
-    return { status: 200, asset: updated };
-  });
+  }
 
   if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
 
@@ -265,7 +315,6 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
 });
 
 assetsRouter.get("/:id/url", async (req, res) => {
-  if (!requireStorage(res)) return;
   const identity = await identityFromRequest(req);
   const { id } = req.params;
   const asset = await withUser(identity.clerkId, async (tx) => {
@@ -274,13 +323,13 @@ assetsRouter.get("/:id/url", async (req, res) => {
   });
   if (!asset) return res.status(404).json({ error: "Asset not found" });
 
-  const url = cloudinary.url(asset.publicId, {
-    resource_type: asset.resourceType,
-    type: "authenticated",
-    sign_url: true,
-    secure: true,
-  });
-  res.json({ id: asset.id, url, expiresIn: null });
+  try {
+    const signed = await assetDownloadUrl(asset);
+    res.json({ id: asset.id, url: signed.url, expiresIn: storageProviderOf(asset) === "neon" ? 900 : null });
+  } catch (error) {
+    console.error(`Asset URL signing failed for ${asset.id}:`, error?.message ?? error);
+    res.status(503).json({ error: "Could not prepare file access" });
+  }
 });
 
 assetsRouter.delete("/:id", async (req, res) => {
@@ -293,15 +342,11 @@ assetsRouter.delete("/:id", async (req, res) => {
   });
   if (!asset) return res.status(404).json({ error: "Asset not found" });
 
-  if (cloudinaryConfigured() && asset.publicId !== "pending") {
-    try {
-      await cloudinary.uploader.destroy(asset.publicId, {
-        resource_type: asset.resourceType,
-      });
-    } catch (err) {
-      console.error(`Cloudinary destroy failed for ${asset.publicId}`, err);
-      return res.status(502).json({ error: "Could not delete file; try again" });
-    }
+  try {
+    await deleteAssetObject(asset);
+  } catch (err) {
+    console.error(`${storageProviderOf(asset)} object delete failed for ${asset.publicId}`, err);
+    return res.status(502).json({ error: "Could not delete file; try again" });
   }
 
   await withUser(identity.clerkId, async (tx) => {

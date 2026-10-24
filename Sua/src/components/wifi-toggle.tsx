@@ -1,5 +1,4 @@
 import { Switch, Text, View } from "react-native";
-import { colors } from "../config/theme";
 import { usePalette } from "../state/appearance";
 
 export function WifiToggle({
@@ -16,8 +15,8 @@ export function WifiToggle({
       <Switch
         value={value}
         onValueChange={onChange}
-        trackColor={{ true: colors.brand.DEFAULT, false: pv.line }}
-        thumbColor={colors.ink.inverse}
+        trackColor={{ true: pv.brand.DEFAULT, false: pv.line }}
+        thumbColor={pv.surface}
         accessibilityLabel="Wi-Fi only upload"
       />
     </View>

@@ -15,8 +15,7 @@ import {
 } from "./notes";
 import type { UploadQueueItem } from "./notes";
 
-// Cloudinary is strict about MIME types on raw/image uploads; map the
-// extensions we accept to their canonical types.
+// Map accepted extensions to canonical MIME types for Neon signed PUTs.
 const MIME_BY_FORMAT: Record<string, string> = {
   pdf: "application/pdf",
   txt: "text/plain; charset=utf-8",
@@ -64,7 +63,7 @@ let flushRunning = false;
 
 export type FlushProgress = (item: UploadQueueItem) => void;
 
-// Pushes queued files straight to storage (client → Cloudinary, then the API
+// Pushes queued files straight to Neon Object Storage, then the API
 // confirms), honouring the Wi-Fi-only preference. Safe to call from anywhere:
 // concurrent calls no-op, and any failure leaves the row queued for the next
 // connectivity or foreground event. `onProgress` gives a foreground screen
@@ -164,6 +163,7 @@ async function uploadOne(
         format: item.format,
         noteId: item.noteId,
         task: autoGenerate ? item.target ?? "none" : "none",
+        storageProvider: "neon",
       });
     } catch {
       // If note has not landed on server yet, sync pending notes and retry signing once
@@ -173,6 +173,7 @@ async function uploadOne(
         format: item.format,
         noteId: item.noteId,
         task: autoGenerate ? item.target ?? "none" : "none",
+        storageProvider: "neon",
       });
     }
 
@@ -193,17 +194,13 @@ async function uploadOne(
     }
     let lastPersisted = -1;
     const task = file.createUploadTask(sign.uploadUrl, {
-      httpMethod: "POST",
-      uploadType: UploadType.MULTIPART,
-      fieldName: "file",
-      mimeType: mimeFor(item),
-      parameters: {
-        api_key: sign.apiKey,
-        timestamp: String(sign.timestamp),
-        signature: sign.signature,
-        public_id: sign.publicId,
-        type: sign.type,
+      httpMethod: sign.uploadMethod ?? "PUT",
+      uploadType: UploadType.BINARY_CONTENT,
+      headers: {
+        ...(sign.uploadHeaders ?? {}),
+        "Content-Length": String(size),
       },
+      mimeType: mimeFor(item),
       // Progress ticks stay std-light: persist every ~5% (or the final byte)
       // so a killed app resumes an approximately-placed bar.
       onProgress: ({ bytesSent, totalBytes }) => {

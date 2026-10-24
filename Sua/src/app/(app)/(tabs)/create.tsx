@@ -338,7 +338,7 @@ function SegmentedControl({
             accessibilityState={{ selected, disabled }}
             accessibilityLabel={label}
             className={`min-h-12 flex-1 flex-row items-center justify-center gap-2 rounded-chip active:opacity-80 ${
-              selected ? "bg-brand" : ""
+              selected ? "bg-brand-strong" : ""
             } ${disabled ? "opacity-60" : ""}`}
           >
             <Icon size={18} color={selected ? colors.ink.inverse : pv.ink.soft} />
@@ -366,7 +366,7 @@ function CourseSelect({
   disabled?: boolean;
 }) {
   const pv = usePalette();
-  const style = course ? courseStyle(course.color) : null;
+  const style = course ? courseStyle(course.color, pv) : null;
   return (
     <Pressable
       onPress={() => {
@@ -383,7 +383,7 @@ function CourseSelect({
       }`}
     >
       <View
-        style={{ backgroundColor: style ? style.tint : colors.successSoft }}
+        style={{ backgroundColor: style ? style.tint : pv.successSoft }}
         className="h-9 w-9 items-center justify-center rounded-full"
       >
         <BookOpen
@@ -415,7 +415,7 @@ function UsageMeter({ used, limit }: { used: number; limit: number }) {
         ) : null}
       </View>
       <View className="mt-3 h-2 overflow-hidden rounded-chip bg-line">
-        <View className={`h-full rounded-chip ${reached ? "bg-danger" : "bg-brand"} ${bar}`} />
+        <View className={`h-full rounded-chip ${reached ? "bg-danger" : "bg-brand-strong"} ${bar}`} />
       </View>
       {reached ? (
         <Text className="mt-2 text-small text-ink-soft">
@@ -1518,7 +1518,7 @@ export default function Create() {
             </Text>
             <Pressable
               onPress={() => router.push("/(app)/(tabs)/courses")}
-              className="mt-4 min-h-12 flex-row items-center justify-center rounded-btn bg-brand px-6 active:opacity-80"
+              className="mt-4 min-h-12 flex-row items-center justify-center rounded-btn bg-brand-strong px-6 active:opacity-80"
               accessibilityRole="button"
               accessibilityLabel="Add a course"
             >
@@ -1579,7 +1579,7 @@ export default function Create() {
                       >
                         <View
                           className={`h-28 w-28 items-center justify-center rounded-full border-4 border-white ${
-                            isRecording || isPaused ? "bg-brand" : "bg-gold"
+                            isRecording || isPaused ? "bg-brand-strong" : "bg-gold"
                           } shadow-gold`}
                         >
                           {isRecording ? (
@@ -1684,7 +1684,7 @@ export default function Create() {
                                 onPress={() => resumeRecovery(recovery)}
                                 accessibilityRole="button"
                                 accessibilityLabel="Continue recording"
-                                className="min-h-10 flex-row items-center justify-center rounded-btn bg-brand px-4 active:opacity-80"
+                                className="min-h-10 flex-row items-center justify-center rounded-btn bg-brand-strong px-4 active:opacity-80"
                               >
                                 <Play size={15} color={colors.ink.inverse} />
                                 <Text className="ml-2 text-label font-sans-bold text-ink-inverse">
@@ -1872,7 +1872,7 @@ export default function Create() {
                               }
                               accessibilityRole="button"
                               accessibilityLabel={`View note for ${baseName(item.localPath)}`}
-                              className="min-h-9 flex-row items-center justify-center rounded-btn bg-brand px-3 active:opacity-80"
+                              className="min-h-9 flex-row items-center justify-center rounded-btn bg-brand-strong px-3 active:opacity-80"
                             >
                               <Text className="text-caption font-sans-bold text-ink-inverse">
                                 View note
@@ -2055,7 +2055,7 @@ export default function Create() {
                         }}
                         accessibilityRole="button"
                         accessibilityLabel="Try generating the summary again"
-                        className="min-h-10 flex-row items-center justify-center gap-2 rounded-btn bg-brand px-4 active:opacity-80"
+                        className="min-h-10 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong px-4 active:opacity-80"
                       >
                         <RefreshCw size={15} color={colors.ink.inverse} />
                         <Text className="text-label font-sans-bold text-ink-inverse">
@@ -2228,7 +2228,7 @@ export default function Create() {
                     ? "Save the note"
                     : "Save the recording"
               }
-              className="mt-1 min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand active:opacity-80"
+              className="mt-1 min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong active:opacity-80"
             >
               {pendingPrompt.mode === "file" ? (
                 <CloudUpload size={17} color={colors.ink.inverse} />
@@ -2329,7 +2329,7 @@ export default function Create() {
               disabled={!reportComment.trim() || reportSending}
               accessibilityRole="button"
               accessibilityLabel="Send report"
-              className={`min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand active:opacity-80 ${
+              className={`min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong active:opacity-80 ${
                 !reportComment.trim() || reportSending ? "opacity-50" : ""
               }`}
             >

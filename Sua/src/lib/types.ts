@@ -128,6 +128,7 @@ export type ServerAsset = {
   id: string;
   kind: AssetKind;
   publicId: string;
+  storageProvider?: "neon" | "cloudinary";
   secureUrl: string | null;
   bytes: number;
   format: string | null;
@@ -141,11 +142,14 @@ export type ServerAsset = {
 
 export type SignedUpload = ServerAsset & {
   uploadUrl: string;
-  apiKey: string;
-  cloudName: string;
-  timestamp: number;
-  signature: string;
-  type: "authenticated";
+  uploadHeaders?: Record<string, string>;
+  uploadMethod?: "PUT" | "POST";
+  uploadExpiresAt?: string | null;
+  apiKey?: string;
+  cloudName?: string;
+  timestamp?: number;
+  signature?: string;
+  type?: "authenticated";
   maxBytes: number;
 };
 

@@ -11,5 +11,11 @@ export function withUser(clerkId, fn) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('app.current_user_id', ${clerkId}, true)`;
     return fn(tx);
+  }, {
+    // Neon compute wake-ups and transient network latency can exceed Prisma's
+    // five-second interactive transaction default. These callbacks should
+    // contain database work only; external I/O belongs outside withUser.
+    maxWait: 10000,
+    timeout: 15000,
   });
 }

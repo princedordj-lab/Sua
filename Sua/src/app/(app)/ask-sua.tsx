@@ -89,38 +89,53 @@ export default function AskSua() {
   const [offline, setOffline] = useState(false);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
   const [pickedCourseId, setPickedCourseId] = useState<string | null>(null);
+  const [routeCourseSelection, setRouteCourseSelection] = useState<{
+    routeCourseId?: string;
+    selectedCourseId: string;
+  } | null>(null);
   const [sourceTitles, setSourceTitles] = useState<Map<string, string>>(new Map());
 
   const listRef = useRef<FlatList<ChatMessageRow>>(null);
   const draftRef = useRef("");
+  const courseInitializedRef = useRef(false);
 
   // Route param wins on open (future "Ask about this course" entry points),
   // otherwise continue the last-used conversation.
-  const [seenParam, setSeenParam] = useState(params.courseId);
-  if (params.courseId !== seenParam) {
-    setSeenParam(params.courseId);
-    if (params.courseId) setPickedCourseId(params.courseId);
-  }
-  const [seenCourses, setSeenCourses] = useState<string | null>(null);
   const courseSignature = courses.map((course) => course.id).join(",");
-  if (pickedCourseId === null && courseSignature && seenCourses !== courseSignature) {
-    setSeenCourses(courseSignature);
-    void (async () => {
-      const remembered = await getSetting(db, ASK_SUA_COARSE_KEY);
-      const first = courses[0]?.id ?? "";
-      setPickedCourseId(remembered ?? first);
-    })();
-  }
+  const firstCourseId = courses[0]?.id ?? "";
 
-  const courseId = pickedCourseId ?? "";
+  useEffect(() => {
+    if (params.courseId || courseInitializedRef.current || !firstCourseId) return;
+
+    let active = true;
+    void getSetting(db, ASK_SUA_COARSE_KEY).then((remembered) => {
+      if (!active || courseInitializedRef.current) return;
+      const knownCourseIds = courseSignature.split(",");
+      setPickedCourseId(
+        remembered && knownCourseIds.includes(remembered)
+          ? remembered
+          : firstCourseId,
+      );
+      courseInitializedRef.current = true;
+    }).catch(() => {
+      if (!active || courseInitializedRef.current) return;
+      setPickedCourseId(firstCourseId);
+      courseInitializedRef.current = true;
+    });
+    return () => {
+      active = false;
+    };
+  }, [courseSignature, db, firstCourseId, params.courseId]);
+
+  const courseId =
+    routeCourseSelection &&
+    routeCourseSelection.routeCourseId === params.courseId
+      ? routeCourseSelection.selectedCourseId
+      : params.courseId ?? pickedCourseId ?? "";
   const course = useMemo(
     () => courses.find((item) => item.id === courseId),
     [courses, courseId],
   );
-
-  useEffect(() => {
-    draftRef.current = draft;
-  });
 
   // Cached history paints first; a fetch replaces it when online.
   const loadHistory = useCallback(async () => {
@@ -164,6 +179,7 @@ export default function AskSua() {
       setAskError(null);
       setAsking(true);
       setPendingId(`pending:${Date.now()}`);
+      draftRef.current = "";
       setDraft("");
       const tempRow: ChatMessageRow = {
         id: `local:${Date.now()}`,
@@ -202,6 +218,7 @@ export default function AskSua() {
       } catch (error) {
         setMessages((prev) => prev.filter((message) => message.id !== tempRow.id));
         await upsertChatMessage(db, tempRow);
+        draftRef.current = trimmed;
         setDraft(trimmed);
         setAskError(
           error instanceof Error ? error.message : "Ask Sua is unreachable right now.",
@@ -223,7 +240,12 @@ export default function AskSua() {
     void ask(draftRef.current);
   }, [ask]);
 
-  const canSend = draft.trim().length > 0 && !asking && courseId && !mic.micState.startsWith("recor");
+  const canSend = Boolean(
+    draft.trim().length > 0 &&
+      !asking &&
+      courseId &&
+      !mic.micState.startsWith("recor"),
+  );
   const hasAsked = messages.some((message) => message.role === "assistant");
 
   // Inverted list: index 0 paints at the visual bottom, so reverse the order
@@ -247,7 +269,7 @@ export default function AskSua() {
     ({ item }: { item: ChatMessageRow }) => (
       <View className={item.role === "user" ? "items-end" : "flex-row items-end gap-2"}>
         {item.role === "assistant" ? (
-          <View className="h-10 w-10 items-center justify-center rounded-full bg-brand">
+          <View className="h-10 w-10 items-center justify-center rounded-full bg-brand-strong">
             <Text className="text-title font-sans-extrabold text-gold">S</Text>
           </View>
         ) : null}
@@ -259,7 +281,7 @@ export default function AskSua() {
         <View
           className={`max-w-[78%] px-4 py-3 ${
             item.role === "user"
-              ? "rounded-input bg-brand"
+              ? "rounded-input bg-brand-strong"
               : "rounded-input bg-surface shadow-card"
           }`}
         >
@@ -344,9 +366,11 @@ export default function AskSua() {
           keyExtractor={(item) => item.id}
           className="flex-1"
           contentContainerClassName="px-5 pb-4 pt-6"
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
           ListEmptyComponent={
             <View className="mt-24 items-center gap-3 px-6">
-              <View className="h-16 w-16 items-center justify-center rounded-full bg-brand">
+              <View className="h-16 w-16 items-center justify-center rounded-full bg-brand-strong">
                 <Sparkles size={26} color={colors.gold.DEFAULT} />
               </View>
               <Text className="text-body-lg font-sans-bold text-ink">
@@ -407,7 +431,10 @@ export default function AskSua() {
           <View className="h-13 flex-1 flex-row items-center rounded-full bg-surface px-4 shadow-card">
             <TextInput
               value={draft}
-              onChangeText={setDraft}
+              onChangeText={(value) => {
+                draftRef.current = value;
+                setDraft(value);
+              }}
               placeholder="Ask about your notes"
               placeholderTextColor={pv.ink.faint}
               multiline
@@ -453,7 +480,14 @@ export default function AskSua() {
         heading="Ask about which course?"
         onSelect={(next) => {
           setPickerOpen(false);
-          if (next !== courseId) setPickedCourseId(next);
+          if (next !== courseId) {
+            courseInitializedRef.current = true;
+            setRouteCourseSelection({
+              routeCourseId: params.courseId,
+              selectedCourseId: next,
+            });
+            setPickedCourseId(next);
+          }
         }}
         onClose={() => setPickerOpen(false)}
       />

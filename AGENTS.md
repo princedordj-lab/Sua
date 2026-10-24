@@ -29,7 +29,7 @@ Sua/
 │   │   ├── components/ # Shared UI components (markdown.tsx renderer)
 │   │   ├── lib/        # API clients, utilities, types
 │   │   │   ├── notes.ts    # SQLite local data layer (versioned migrations, sync/recordings/uploads)
-│   │   │   ├── uploads.ts  # Cloudinary upload queue flusher
+│   │   │   ├── uploads.ts  # Neon Object Storage upload queue flusher
 │   │   │   └── markdown.ts # Markdown toolbar transforms
 │   │   └── state/      # Global state (Context API, offline hydration)
 │   ├── assets/         # Images and static resources
@@ -65,7 +65,7 @@ Sua/
 | **ORM** | Prisma | Type-safe database access |
 | **Auth** | Clerk | User management and sessions |
 | **AI** | OpenRouter / Gemini | Summaries, flashcards, transcription |
-| **Files** | Cloudinary | Audio and document storage (restricted, signed URLs) |
+| **Files** | Neon Object Storage | Private audio and document storage, accessed through short-lived signed URLs |
 | **Extraction** | pdf-parse + jszip (pure JS) | Server-side PDF/DOCX/PPTX/TXT text extraction |
 | **Payments** | Paystack | Mobile Money (MoMo) and cards |
 | **Jobs** | BullMQ + Redis | Background processing queue |
@@ -89,7 +89,7 @@ Sua/
 1.  **API Security:** All routes must be protected by Clerk authentication middleware unless explicitly public (e.g., webhooks).
 2.  **Database:** Use Prisma for all DB interactions. Ensure Row Level Security (RLS) policies prevent users from accessing others' data.
 3.  **Migrations:** Name migrations with the running-number convention (`0_init`, `1_rls`, … next is `5_…`). Never timestamped names — Prisma replays directories lexicographically, and a `20261015_…` name sorts before `2_notes`/`3_assets`, breaking shadow-database replay.
-4.  **File Handling:** Never expose Cloudinary secrets to the client. Uploads follow sign → direct multipart to Cloudinary → complete. `/sign` validates kind/format and noteId ownership (a noteId that has not synced yet is allowed — its upload can race the note push — but a found note owned by another user is rejected); `/complete` verifies the remote asset before activation.
+4.  **File Handling:** Keep Neon API credentials server-side. New uploads follow sign → direct binary PUT to a short-lived Neon URL → complete. `/sign` validates kind/format and noteId ownership; `/complete` verifies the object and enforces the size limit before activation. Cloudinary support is temporary compatibility for older clients and unmigrated assets; retain it until the migration and rollout window are complete.
 5.  **Text extraction:** Pure JS only (`Sua/backend/src/lib/extract.js`: pdf-parse for PDF, JSZip for DOCX/PPTX, plain UTF-8 for TXT), runs inline at `/complete` for documents ≤ 25 MB, capped at 100k chars, and stores `Asset.extractedText`. Extraction failures return `null` — an upload must never fail because a file was unparseable. Audio transcription and image OCR belong to the AI pipeline (BullMQ, Milestone 3), not here.
 6.  **Jobs:** Long-running tasks (transcription, AI summarization) must be offloaded to BullMQ workers.
 
@@ -116,7 +116,7 @@ Sua/
 -   **User:** Profile, plan status (Free/Pro), university info.
 -   **Course:** Container for notes, exams, and progress.
 -   **Note:** The core content unit — title, markdown `body`, `transcript`, `sourceType` (typed/audio/document/image), `updatedAt` sync guard; always tied to exactly one course.
--   **Asset:** Cloudinary upload record — kind (audio/image/document), signed `publicId`, bytes, format, `status` (pending/active), `noteId`, server-side `extractedText` for documents.
+-   **Asset:** Private object record — kind (audio/image/document), provider and object key, bytes, format, `status` (pending/active), `noteId`, server-side `extractedText` for documents.
 -   **Flashcard:** Spaced repetition data (due date, ease factor).
 -   **Quiz:** Questions and attempt history.
 

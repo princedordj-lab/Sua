@@ -3,7 +3,7 @@ import { Worker } from "bullmq";
 import Ioredis from "ioredis";
 import { prisma } from "./config/prisma.js";
 import { processJob } from "./lib/pipeline.js";
-import { STUDY_QUEUE } from "./lib/queue.js";
+import { redisConnectionUrl, STUDY_QUEUE } from "./lib/queue.js";
 
 if (!process.env.REDIS_URL) {
   console.error("REDIS_URL is not set — the worker cannot run.");
@@ -15,7 +15,7 @@ if (!process.env.DATABASE_URL) {
 }
 
 // One shared Redis connection for the worker; con-neutral for BullMQ.
-const connection = new Ioredis(process.env.REDIS_URL, {
+const connection = new Ioredis(redisConnectionUrl(), {
   maxRetriesPerRequest: null,
   enableOfflineQueue: true,
   connectTimeout: 10_000,

@@ -506,9 +506,29 @@ export async function deleteNote(db: SQLiteDatabase, id: string) {
   }
   const now = new Date().toISOString();
   await db.withTransactionAsync(async () => {
+    // Remove unsent upserts and prior delete markers before writing the final
+    // operation. An older upsert must never recreate a note after its delete.
+    await db.runAsync(
+      "DELETE FROM sync_queue WHERE entity = 'note' AND entity_id = ?",
+      id,
+    );
     await db.runAsync("DELETE FROM notes WHERE id = ?", id);
     // Files queued for upload would sync into an orphaned note; drop them too.
     await db.runAsync("DELETE FROM upload_queue WHERE note_id = ?", id);
+    await db.runAsync("DELETE FROM generation_queue WHERE note_id = ?", id);
+    await db.runAsync("DELETE FROM reviews WHERE note_id = ?", id);
+    await db.runAsync("DELETE FROM card_queue WHERE note_id = ?", id);
+    await db.runAsync("DELETE FROM quiz_attempts WHERE note_id = ?", id);
+    await db.runAsync("DELETE FROM flashcards WHERE note_id = ?", id);
+    await db.runAsync(
+      "DELETE FROM quiz_questions WHERE quiz_id IN (SELECT id FROM quizzes WHERE note_id = ?)",
+      id,
+    );
+    await db.runAsync("DELETE FROM quizzes WHERE note_id = ?", id);
+    if (note?.sourceRef) {
+      await db.runAsync("DELETE FROM recording_segments WHERE session_id = ?", note.sourceRef);
+      await db.runAsync("DELETE FROM recording_sessions WHERE id = ?", note.sourceRef);
+    }
     await db.runAsync(
       "INSERT INTO sync_queue (entity, entity_id, operation, payload, created_at) VALUES ('note', ?, 'delete', '{}', ?)",
       id,

@@ -8,7 +8,11 @@
     "dev": "tsx watch src/index.js",
     "worker": "tsx src/worker.js",
     "eval": "tsx scripts/ai-eval.mjs",
-    "prisma": "prisma"
+    "migrate:cloudinary-assets": "tsx scripts/migrate-cloudinary-assets.js",
+    "check:neon-storage": "tsx scripts/check-neon-storage.js",
+    "setup:neon-storage": "tsx scripts/create-neon-bucket.js",
+    "prisma": "prisma",
+    "postinstall": "prisma generate"
   },
   "keywords": [],
   "author": "",

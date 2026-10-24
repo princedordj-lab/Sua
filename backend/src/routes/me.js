@@ -74,7 +74,7 @@ meRouter.patch("/", async (req, res) => {
   res.json(toProfile(profile));
 });
 
-// Delete the student's account and data: our rows + Cloudinary files first,
+// Delete the student's account and data: our rows + storage objects first,
 // then the Clerk user itself (which revokes every session and triggers the
 // user.deleted webhook for an idempotent second pass). A Clerk API failure is
 // best-effort logged — the student's data is already gone, and the next sign

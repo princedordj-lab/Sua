@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Pressable,
@@ -94,6 +94,9 @@ export default function NoteView() {
   const [reportComment, setReportComment] = useState("");
   const [reportSending, setReportSending] = useState(false);
   const [reported, setReported] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const screenActiveRef = useRef(false);
+  const retryingRef = useRef(false);
 
   const course = courses.find((item) => item.id === note?.courseId);
   const aiActive = note
@@ -103,6 +106,7 @@ export default function NoteView() {
   const load = useCallback(async () => {
     try {
       const row = await getNote(db, id);
+      if (!screenActiveRef.current) return;
       setNote(row);
       setMissing(!row);
       if (!row) {
@@ -117,6 +121,7 @@ export default function NoteView() {
         listFlashcards(db, row.id).catch(() => []),
         listQuizzes(db, row.id).catch(() => []),
       ]);
+      if (!screenActiveRef.current) return;
       setPendingUploads(pending);
       setFlashcardCount(cards.length);
       setQuizCount(quizzes.length);
@@ -128,7 +133,11 @@ export default function NoteView() {
 
   useFocusEffect(
     useCallback(() => {
+      screenActiveRef.current = true;
       void load();
+      return () => {
+        screenActiveRef.current = false;
+      };
     }, [load]),
   );
 
@@ -136,22 +145,25 @@ export default function NoteView() {
     note?.noteKind === "reference" ? "course_reference" : "study_set";
 
   const queueGeneration = async () => {
+    if (retryingRef.current) return;
+    retryingRef.current = true;
+    setRetrying(true);
     try {
       await enqueueGeneration(db, id, generationKind);
-      await setNoteMetaReady();
-      void drainGenerationQueue({ db, getAuthToken }).finally(() => void load());
+      await load();
+      await drainGenerationQueue({ db, getAuthToken });
     } catch {
-      Alert.alert(
+      if (screenActiveRef.current) Alert.alert(
         "Couldn’t queue the generation",
         "Your note is saved — try again in a moment.",
       );
+    } finally {
+      retryingRef.current = false;
+      setRetrying(false);
+      if (screenActiveRef.current) {
+        await load();
+      }
     }
-  };
-
-  // enqueueGeneration flips the note's ai_state internally; re-read for the UI.
-  const setNoteMetaReady = async () => {
-    const row = await getNote(db, id).catch(() => null);
-    if (row) setNote(row);
   };
 
   const pullToRefresh = useCallback(async () => {
@@ -190,7 +202,8 @@ export default function NoteView() {
             void (async () => {
               try {
                 await deleteNote(db, id);
-                router.back();
+                if (router.canGoBack()) router.back();
+                else router.replace("/courses");
               } catch {
                 Alert.alert("Couldn’t delete", "Try again in a moment.");
               }
@@ -325,10 +338,11 @@ export default function NoteView() {
                   </Pressable>
                 ) : null}
                 <Pressable
+                  disabled={retrying}
                   onPress={() => void queueGeneration()}
                   accessibilityRole="button"
                   accessibilityLabel="Try generating again"
-                  className="mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand px-4 active:opacity-80"
+                  className={`mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand-strong px-4 ${retrying ? "opacity-60" : "active:opacity-80"}`}
                 >
                   <RefreshCw size={15} color={colors.ink.inverse} />
                   <Text className="text-label font-sans-bold text-ink-inverse">
@@ -394,7 +408,7 @@ export default function NoteView() {
                     onPress={() => void queueGeneration()}
                     accessibilityRole="button"
                     accessibilityLabel="Generate the course reference"
-                    className="mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand px-4 active:opacity-80"
+                    className="mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand-strong px-4 active:opacity-80"
                   >
                     <RefreshCw size={15} color={colors.ink.inverse} />
                     <Text className="text-label font-sans-bold text-ink-inverse">
@@ -450,7 +464,7 @@ export default function NoteView() {
                       onPress={() => void queueGeneration()}
                       accessibilityRole="button"
                       accessibilityLabel="Generate the study set"
-                      className="mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand px-4 active:opacity-80"
+                      className="mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand-strong px-4 active:opacity-80"
                     >
                       <Sparkles size={15} color={colors.ink.inverse} />
                       <Text className="text-label font-sans-bold text-ink-inverse">
@@ -577,7 +591,7 @@ export default function NoteView() {
               disabled={!reportComment.trim() || reportSending}
               accessibilityRole="button"
               accessibilityLabel="Send report"
-              className={`min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand active:opacity-80 ${
+              className={`min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong active:opacity-80 ${
                 !reportComment.trim() || reportSending ? "opacity-50" : ""
               }`}
             >

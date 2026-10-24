@@ -131,7 +131,7 @@ export default function Profile() {
           />
         </View>
 
-        <View className="mt-4 rounded-card bg-brand p-card-lg">
+        <View className="mt-4 rounded-card bg-brand-strong p-card-lg">
           <View className="flex-row items-center justify-between">
             <Text className="text-body-lg font-sans-extrabold text-ink-inverse">
               {pro ? "Sua Pro" : "Free plan"}

@@ -40,6 +40,7 @@ type DrainDeps = {
 const MAX_ATTEMPTS = 3;
 const POLL_INTERVAL_MS = 4_000;
 const MAX_POLLS = 50;
+const activeDrains = new WeakMap<SQLiteDatabase, Promise<number>>();
 
 async function pullStudySet(deps: DrainDeps, noteId: string) {
   const token = await deps.getAuthToken();
@@ -81,8 +82,12 @@ async function runOne(
     jobId: string | null;
   },
 ) {
+  // A note can be deleted while an earlier drain is waiting for the network.
+  // Do not submit or mirror work for a queue row whose note no longer exists.
+  if (!(await getNote(deps.db, itemName.noteId).catch(() => null))) return false;
   const token = await deps.getAuthToken();
   if (!token) throw new Error("no auth token");
+  if (!(await getNote(deps.db, itemName.noteId).catch(() => null))) return false;
   await updateGeneration(deps.db, itemName.id, { state: "active" });
   await setNoteAiState(deps.db, itemName.noteId, "queued");
 
@@ -100,6 +105,7 @@ async function runOne(
 
   for (let poll = 0; poll < MAX_POLLS; poll += 1) {
     const job = await jobsApi.get(token, jobId);
+    if (!(await getNote(deps.db, itemName.noteId).catch(() => null))) return false;
     if (job.state === "done") {
       await updateGeneration(deps.db, itemName.id, { state: "done", jobId });
       if (itemName.kind === "course_reference") {
@@ -117,9 +123,10 @@ async function runOne(
     deps.onNoteChange?.(itemName.noteId);
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
+  return true;
 }
 
-export async function drainGenerationQueue({ db, getAuthToken, onNoteChange }: DrainDeps) {
+async function drainGenerationQueueNow({ db, getAuthToken, onNoteChange }: DrainDeps) {
   const state = await NetInfo.fetch();
   if (!state.isConnected) return 0;
   const queue = await listGenerationQueue(db);
@@ -134,12 +141,12 @@ export async function drainGenerationQueue({ db, getAuthToken, onNoteChange }: D
     // until every segment is on the server. Leave the row queued; finishing
     // uploads (or the next reconnect/foreground tick) re-triggers the drain.
     const note = await getNote(db, item.noteId).catch(() => null);
+    if (!note) continue;
     if (note?.sourceType === "audio" && (await countPendingUploads(db, item.noteId)) > 0) {
       continue;
     }
     try {
-      await runOne({ db, getAuthToken, onNoteChange }, item);
-      drained += 1;
+      if (await runOne({ db, getAuthToken, onNoteChange }, item)) drained += 1;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const fatal = /not found|unauthor/i.test(message); // server-side permanent rejects
@@ -156,4 +163,20 @@ export async function drainGenerationQueue({ db, getAuthToken, onNoteChange }: D
     }
   }
   return drained;
+}
+
+// Screens, reconnect listeners, and foreground refreshes can all request a
+// drain at once. Share one in-flight pass per database so a retry cannot race
+// the periodic worker over the same SQLite queue rows.
+export function drainGenerationQueue(deps: DrainDeps) {
+  const active = activeDrains.get(deps.db);
+  if (active) return active;
+
+  const drain = drainGenerationQueueNow(deps);
+  activeDrains.set(deps.db, drain);
+  const clearActiveDrain = () => {
+    if (activeDrains.get(deps.db) === drain) activeDrains.delete(deps.db);
+  };
+  void drain.then(clearActiveDrain, clearActiveDrain);
+  return drain;
 }

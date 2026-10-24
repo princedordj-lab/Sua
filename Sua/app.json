@@ -11,6 +11,7 @@
       "icon": "./assets/images/icons/icon.png"
     },
     "android": {
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#005B45",
         "foregroundImage": "./assets/images/icons/icon.png"

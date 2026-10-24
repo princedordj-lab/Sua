@@ -9,7 +9,6 @@ import {
   type TextInputProps,
 } from "react-native";
 import { ChevronRight, Plus } from "lucide-react-native";
-import { colors } from "../config/theme";
 import { usePalette } from "../state/appearance";
 
 
@@ -52,7 +51,7 @@ export function PrimaryButton({
   const styles =
     variant === "danger"
       ? "bg-danger-soft"
-      : "bg-brand";
+      : "bg-brand-strong";
   const text =
     variant === "danger" ? "text-danger" : "text-gold";
   return (
@@ -88,13 +87,14 @@ export function SectionHeader({
   action?: string;
   onAction?: () => void;
 }) {
+  const pv = usePalette();
   return (
     <View className="mb-3 flex-row items-center justify-between">
       <Text className="text-title font-extrabold text-ink">{title}</Text>
       {action && (
         <Pressable onPress={onAction} className="min-h-11 flex-row items-center gap-1 active:opacity-80">
           <Text className="font-bold text-brand">{action}</Text>
-          <ChevronRight size={16} color={colors.brand.DEFAULT} />
+          <ChevronRight size={16} color={pv.brand.DEFAULT} />
         </Pressable>
       )}
     </View>
@@ -108,12 +108,13 @@ export function EmptyAction({
   title: string;
   onPress: () => void;
 }) {
+  const pv = usePalette();
   return (
     <Pressable
       onPress={onPress}
-      className="min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand px-5 active:opacity-80"
+      className="min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong px-5 active:opacity-80"
     >
-      <Plus size={18} color={colors.gold.DEFAULT} />
+      <Plus size={18} color={pv.gold.DEFAULT} />
       <Text className="font-bold text-gold">{title}</Text>
     </Pressable>
   );
@@ -136,8 +137,8 @@ export function SettingsRow({
   nextValue?: string;
 }) {
   const pv = usePalette();
-  const textColor = danger ? colors.danger : pv.ink.DEFAULT;
-  const iconColor = danger ? colors.danger : colors.brand.DEFAULT;
+  const textColor = danger ? pv.danger : pv.ink.DEFAULT;
+  const iconColor = danger ? pv.danger : pv.brand.DEFAULT;
   return (
     <Pressable
       onPress={onPress}
@@ -185,11 +186,11 @@ export function SwitchRow({
   const pv = usePalette();
   return (
     <View className="min-h-12 flex-row items-center px-card py-2">
-      {Icon ? <Icon size={19} color={danger ? colors.danger : colors.brand.DEFAULT} /> : null}
+      {Icon ? <Icon size={19} color={danger ? pv.danger : pv.brand.DEFAULT} /> : null}
       <View className="flex-1 px-3">
         <Text
           className="font-sans-bold text-body"
-          style={{ color: danger ? colors.danger : pv.ink.DEFAULT }}
+          style={{ color: danger ? pv.danger : pv.ink.DEFAULT }}
         >
           {title}
         </Text>
@@ -202,8 +203,8 @@ export function SwitchRow({
       <Switch
         value={value}
         onValueChange={onChange}
-        trackColor={{ true: colors.brand.DEFAULT, false: pv.line }}
-        thumbColor={colors.surface}
+        trackColor={{ true: pv.brand.DEFAULT, false: pv.line }}
+        thumbColor={pv.surface}
         accessibilityLabel={title}
       />
     </View>

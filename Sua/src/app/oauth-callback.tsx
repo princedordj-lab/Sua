@@ -4,10 +4,12 @@ import { router } from "expo-router";
 import { useAuth } from "@clerk/expo";
 import * as WebBrowser from "expo-web-browser";
 import { getPendingAuthDestination } from "../lib/pending-auth-destination";
+import { usePalette } from "../state/appearance";
 
 WebBrowser.maybeCompleteAuthSession();
 
 export default function OAuthCallback() {
+  const pv = usePalette();
   const { isLoaded, isSignedIn } = useAuth();
 
   useEffect(() => {
@@ -32,8 +34,8 @@ export default function OAuthCallback() {
 
   return (
     <View className="flex-1 items-center justify-center gap-3 bg-cream">
-      <ActivityIndicator color="#005B45" />
-      <Text className="font-semibold text-[#6E687D]">Finishing sign in...</Text>
+      <ActivityIndicator color={pv.brand.DEFAULT} />
+      <Text className="font-semibold text-ink-soft">Finishing sign in...</Text>
     </View>
   );
 }

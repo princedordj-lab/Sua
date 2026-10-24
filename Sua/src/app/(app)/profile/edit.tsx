@@ -111,7 +111,7 @@ export default function EditProfile() {
             accessibilityRole="button"
             accessibilityLabel="Save account details"
             className={`mt-6 min-h-14 items-center justify-center rounded-btn px-5 active:opacity-80 ${
-              saving || !dirty ? "bg-ink-faint/30" : "bg-brand"
+              saving || !dirty ? "bg-ink-faint/30" : "bg-brand-strong"
             }`}
           >
             {saving ? (

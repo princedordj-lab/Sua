@@ -225,7 +225,7 @@ export default function Courses() {
             onPress={openNew}
             accessibilityRole="button"
             accessibilityLabel="Add course"
-            className="h-12 w-12 items-center justify-center rounded-btn bg-brand active:opacity-80"
+            className="h-12 w-12 items-center justify-center rounded-btn bg-brand-strong active:opacity-80"
           >
             <Plus color={colors.gold.DEFAULT} size={22} />
           </Pressable>
@@ -264,7 +264,7 @@ export default function Courses() {
                 accessibilityRole="button"
                 accessibilityState={{ selected }}
                 className={`min-h-12 flex-row items-center justify-center rounded-chip border px-4 active:opacity-80 ${
-                  selected ? "border-brand bg-brand" : "border-line bg-surface"
+                  selected ? "border-brand bg-brand-strong" : "border-line bg-surface"
                 }`}
               >
                 <Text
@@ -310,7 +310,7 @@ export default function Courses() {
             </View>
           ) : (
             visibleCourses.map((course) => {
-              const { accent, tint } = courseStyle(course.color);
+              const { accent, tint } = courseStyle(course.color, pv);
               const noteCount = noteCounts[course.id] ?? course.noteCount;
               return (
                 <View
@@ -394,7 +394,7 @@ export default function Courses() {
         </View>
         <Pressable
           onPress={openNew}
-          className="mt-5 min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand px-5 active:opacity-80"
+          className="mt-5 min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong px-5 active:opacity-80"
         >
           <Plus size={18} color={colors.gold.DEFAULT} />
           <Text className="font-bold text-gold">Add another course</Text>

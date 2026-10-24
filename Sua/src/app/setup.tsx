@@ -5,6 +5,7 @@ import { CalendarDays, ChevronRight } from "lucide-react-native";
 import { Field, Logo, PrimaryButton } from "../components/ui";
 import { useApp } from "../state/AppContext";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { usePalette } from "../state/appearance";
 
 const levels = [
   "Level 100",
@@ -14,6 +15,7 @@ const levels = [
   "Postgraduate",
 ];
 export default function Setup() {
+  const pv = usePalette();
   const { profile, completeOnboarding } = useApp();
   const [university, setUniversity] = useState("");
   const [programme, setProgramme] = useState("");
@@ -60,10 +62,10 @@ export default function Setup() {
       <ScrollView contentContainerClassName="px-6 pb-8 pt-5">
         <Logo />
         <View className="mt-10">
-          <Text className="text-[32px] font-black text-[#19152C]">
+          <Text className="text-[32px] font-black text-ink">
             Make Sua yours.
           </Text>
-          <Text className="mt-2 text-base leading-6 text-[#6E687D]">
+          <Text className="mt-2 text-base leading-6 text-ink-soft">
             A few quick details help us build your first study space.
           </Text>
         </View>
@@ -81,7 +83,7 @@ export default function Setup() {
             placeholder="e.g. Computer Science"
           />
           <View className="gap-2">
-            <Text className="text-sm font-semibold text-[#5B566A]">
+            <Text className="text-sm font-semibold text-ink-soft">
               Current level
             </Text>
             <View className="flex-row flex-wrap gap-2">
@@ -89,7 +91,7 @@ export default function Setup() {
                 <Pressable
                   key={item}
                   onPress={() => setLevel(item)}
-                  className={`min-h-11 rounded-input px-4 py-3 ${level === item ? "bg-brand" : "bg-surface"} border border-line active:opacity-80`}
+                  className={`min-h-11 rounded-input px-4 py-3 ${level === item ? "bg-brand-strong" : "bg-surface"} border border-line active:opacity-80`}
                 >
                   <Text
                     className={`font-semibold ${level === item ? "text-gold" : "text-ink-soft"}`}
@@ -102,12 +104,12 @@ export default function Setup() {
           </View>
           <View className="mt-3 rounded-card bg-success-soft p-5">
             <View className="flex-row items-center gap-2">
-              <CalendarDays size={18} color="#005B45" />
+              <CalendarDays size={18} color={pv.brand.DEFAULT} />
               <Text className="font-extrabold text-brand">
                 Add your first course
               </Text>
             </View>
-            <Text className="mt-1 text-sm leading-5 text-[#6E687D]">
+            <Text className="mt-1 text-sm leading-5 text-ink-soft">
               You can add more courses anytime from Courses.
             </Text>
             <View className="mt-4 gap-3">
@@ -129,7 +131,7 @@ export default function Setup() {
         <View className="mt-8 gap-3">
           <PrimaryButton onPress={() => finish(false)}>
             {saving ? "Saving..." : "Go to my Home"}{" "}
-            <ChevronRight size={16} color="#FFBE1A" />
+            <ChevronRight size={16} color={pv.gold.DEFAULT} />
           </PrimaryButton>
           <Pressable
             onPress={() => finish(true)}

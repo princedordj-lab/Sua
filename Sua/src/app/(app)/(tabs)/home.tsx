@@ -17,11 +17,12 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { listNotes, type Note } from "../../../lib/notes";
 import { useApp } from "../../../state/AppContext";
+import { usePalette } from "../../../state/appearance";
 
 const actionTiles = [
   { label: "Record", icon: Mic, tint: "bg-success-soft", route: "record" },
   { label: "Upload", icon: CloudUpload, tint: "bg-info-soft", route: "upload" },
-  { label: "Type", icon: Keyboard, tint: "bg-[#F0EDFC]", route: "type" },
+  { label: "Type", icon: Keyboard, tint: "bg-courseTint-violet", route: "type" },
 ] as const;
 
 function initials(name: string) {
@@ -43,6 +44,7 @@ function relativeDate(value: string) {
 
 export default function Home() {
   const { profile, courses } = useApp();
+  const pv = usePalette();
   const { user } = useUser();
   const db = useSQLiteContext();
   const [notes, setNotes] = useState<Note[]>([]);
@@ -138,7 +140,7 @@ export default function Home() {
           </View>
         </View>
 
-        <View className="overflow-hidden rounded-card bg-brand p-card-lg shadow-card">
+        <View className="overflow-hidden rounded-card bg-brand-strong p-card-lg shadow-card">
           <View className="absolute right-4 top-5 opacity-20">
             <BookOpen size={118} color="#FFFFFF" />
           </View>
@@ -187,7 +189,7 @@ export default function Home() {
               accessibilityLabel={label === "Type" ? "Type a note" : `${label} content`}
             >
               <View className={`h-14 w-14 items-center justify-center rounded-full ${tint}`}>
-                <Icon size={27} color="#005B45" strokeWidth={2.25} />
+                <Icon size={27} color={pv.brand.DEFAULT} strokeWidth={2.25} />
               </View>
               <Text className="mt-3 text-body-lg font-sans-bold text-ink">{label}</Text>
             </Pressable>
@@ -204,7 +206,7 @@ export default function Home() {
               accessibilityLabel="See all courses"
             >
               <Text className="text-body font-sans-bold text-brand">See all</Text>
-              <ChevronRight className="ml-1" size={20} color="#005B45" />
+              <ChevronRight className="ml-1" size={20} color={pv.brand.DEFAULT} />
             </Pressable>
           </View>
           <View className="overflow-hidden rounded-card bg-surface shadow-card">
@@ -237,8 +239,8 @@ export default function Home() {
                         {course?.name || "Study note"} · {relativeDate(note.updatedAt)}
                       </Text>
                     </View>
-                    <Bookmark size={20} color="#005B45" />
-                    <ChevronRight className="ml-3" size={20} color="#8A978F" />
+                    <Bookmark size={20} color={pv.brand.DEFAULT} />
+                    <ChevronRight className="ml-3" size={20} color={pv.ink.faint} />
                   </Pressable>
                 );
               })
@@ -248,7 +250,7 @@ export default function Home() {
                 className="min-h-28 items-center justify-center px-5 active:opacity-80"
                 accessibilityRole="button"
               >
-                <Plus size={22} color="#005B45" />
+                <Plus size={22} color={pv.brand.DEFAULT} />
                 <Text className="mt-2 text-body font-sans-bold text-brand">Create your first note</Text>
                 <Text className="mt-1 text-center text-small text-ink-soft">
                   Your offline notes will appear here.
@@ -261,7 +263,7 @@ export default function Home() {
         <View className="rounded-card bg-surface p-card shadow-card">
           <Text className="text-body font-sans-bold text-ink">Your study library</Text>
           <View className="mt-3 h-2 overflow-hidden rounded-chip bg-line">
-            <View className={`h-full rounded-chip bg-brand ${progressWidth}`} />
+            <View className={`h-full rounded-chip bg-brand-strong ${progressWidth}`} />
           </View>
           <Text className="mt-3 text-small text-ink-soft">
             {courses.length

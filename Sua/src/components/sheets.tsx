@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { Check, X } from "lucide-react-native";
 import type { Course } from "../lib/types";
+import { usePalette } from "../state/appearance";
 
 export function BottomSheet({
   visible,
@@ -60,6 +61,7 @@ export function FormSheet({
   title: string;
   children: ReactNode;
 }) {
+  const pv = usePalette();
   return (
     <Modal
       visible={visible}
@@ -92,7 +94,7 @@ export function FormSheet({
               accessibilityLabel="Close"
               className="h-11 w-11 items-center justify-center active:opacity-80"
             >
-              <X size={20} color="#8A8498" />
+              <X size={20} color={pv.ink.faint} />
             </Pressable>
           </View>
           <View className="gap-4">{children}</View>
@@ -148,6 +150,7 @@ export function CoursePickerSheet({
   onSelect: (courseId: string) => void;
   onClose: () => void;
 }) {
+  const pv = usePalette();
   // Archived courses are not valid move targets, except the note's current
   // course so the sheet always renders a selected row.
   const targets = courses.filter(
@@ -199,7 +202,7 @@ export function CoursePickerSheet({
                           {course.name}
                         </Text>
                       </View>
-                      {selected ? <Check size={18} color="#17B890" /> : null}
+                      {selected ? <Check size={18} color={pv.brand.light} /> : null}
                     </Pressable>
                   );
                 })

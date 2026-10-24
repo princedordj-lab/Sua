@@ -160,7 +160,7 @@ export default function Deck() {
             onPress={() => openEditor(null)}
             accessibilityRole="button"
             accessibilityLabel="Add a flashcard"
-            className="min-h-12 flex-1 items-center justify-center gap-1 flex-row rounded-btn bg-brand px-4 active:opacity-80"
+            className="min-h-12 flex-1 items-center justify-center gap-1 flex-row rounded-btn bg-brand-strong px-4 active:opacity-80"
           >
             <Plus size={17} color={colors.ink.inverse} />
             <Text className="text-label font-sans-extrabold text-ink-inverse">
@@ -301,7 +301,7 @@ export default function Deck() {
                 onPress={() => void saveCard()}
                 accessibilityRole="button"
                 accessibilityLabel="Save the card"
-                className="min-h-12 flex-1 items-center justify-center rounded-btn bg-brand active:opacity-80"
+                className="min-h-12 flex-1 items-center justify-center rounded-btn bg-brand-strong active:opacity-80"
               >
                 <Text className="text-label font-sans-bold text-ink-inverse">Save</Text>
               </Pressable>
