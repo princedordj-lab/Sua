@@ -35,6 +35,13 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+// Root stub. Without it, opening the deployment URL shows Express's plain
+// "Cannot GET /", which reads like an outage; nothing else is served outside
+// /api, so there is nothing to expose here.
+app.get("/", (_req, res) => {
+  res.json({ service: "Sua API", status: "ok", health: "/api/health" });
+});
+
 app.use(
   clerkMiddleware({
     publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
@@ -52,6 +59,13 @@ app.use("/api/study", authenticate, studyRouter);
 // Voice clips post raw audio bodies; express.json ignores non-JSON content.
 app.use("/api/chat/speech", express.raw({ type: "audio/*", limit: "8mb" }));
 app.use("/api/chat", authenticate, chatRouter);
+
+// Unknown /api paths answer in the same { error } shape as every other
+// failure, so a mistyped route never returns Express's HTML page. Mounted
+// after all routers and before the error handler.
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
 
 app.use((err, _req, res, _next) => {
   const status = Number(err.status ?? err.statusCode ?? 500);
