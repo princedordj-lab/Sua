@@ -342,8 +342,8 @@ function SegmentedControl({
         return (
           <View
             key={key}
-            className={`min-h-12 flex-1 flex-row rounded-chip ${
-              selected ? "bg-brand-strong" : ""
+            className={`min-h-12 flex-1 flex-row  ${
+              selected ? "bg-brand-strong rounded-full" : ""
             } ${disabled ? "opacity-60" : ""}`}
           >
             {/* Visual state lives on the wrapper so the pressable's class set
