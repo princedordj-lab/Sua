@@ -42,6 +42,13 @@
           "microphonePermission": "Allow $(PRODUCT_NAME) to record your lectures and classes."
         }
       ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to attach a photo of your slides or notes.",
+          "cameraPermission": "Allow $(PRODUCT_NAME) to photograph the board or your notes."
+        }
+      ],
       "expo-notifications"
     ],
     "experiments": {

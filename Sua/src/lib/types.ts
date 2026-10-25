@@ -114,7 +114,7 @@ export type NoteSyncChange = {
   updatedAt?: string;
 };
 
-export type SyncResultStatus = "accepted" | "rejected" | "conflict";
+export type SyncResultStatus = "accepted" | "rejected" | "conflict" | "deleted";
 
 // Per-change acknowledgement from POST /notes/sync. A conflict carries the
 // newer server copy so the device can adopt it instead of retrying forever.

@@ -373,6 +373,16 @@ const MIGRATIONS: ((db: SQLiteDatabase) => Promise<void>)[] = [
       await db.execAsync("ALTER TABLE courses ADD COLUMN exam_date TEXT");
     }
   },
+  // 13 — deletion tombstones: a deleted id can never be resurrected by a stale
+  // save, a queued upsert, or a pull response that was already in flight.
+  async (db) => {
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS note_tombstones (
+        id TEXT PRIMARY KEY NOT NULL,
+        deleted_at TEXT NOT NULL
+      );
+    `);
+  },
 ];
 
 export async function migrateDb(db: SQLiteDatabase) {
@@ -424,6 +434,18 @@ export async function getNote(db: SQLiteDatabase, id: string) {
   return row ? rowToNote(row) : null;
 }
 
+/**
+ * A tombstoned id was deleted on this device (or acknowledged as deleted by the
+ * server) and must never be written again, whatever a stale save or pull says.
+ */
+export async function isNoteTombstoned(db: SQLiteDatabase, id: string) {
+  const row = await db.getFirstAsync<{ id: string }>(
+    "SELECT id FROM note_tombstones WHERE id = ?",
+    id,
+  );
+  return Boolean(row);
+}
+
 export async function saveNote(
   db: SQLiteDatabase,
   input: Pick<Note, "id" | "courseId" | "title" | "body" | "sourceType"> & {
@@ -431,6 +453,8 @@ export async function saveNote(
     noteKind?: NoteKind;
   },
 ) {
+  // Editor autosave and draft-blur both call this; neither may undo a delete.
+  if (await isNoteTombstoned(db, input.id)) return null;
   const now = new Date().toISOString();
   await db.runAsync(
     `INSERT INTO notes (id, course_id, title, body, source_type, source_ref, note_kind, created_at, updated_at, sync_state)
@@ -506,6 +530,13 @@ export async function deleteNote(db: SQLiteDatabase, id: string) {
   }
   const now = new Date().toISOString();
   await db.withTransactionAsync(async () => {
+    // Tombstone first: a sync pass or pull that overlaps this delete will then
+    // refuse to write the note back.
+    await db.runAsync(
+      "INSERT OR REPLACE INTO note_tombstones (id, deleted_at) VALUES (?, ?)",
+      id,
+      now,
+    );
     // Remove unsent upserts and prior delete markers before writing the final
     // operation. An older upsert must never recreate a note after its delete.
     await db.runAsync(
@@ -602,7 +633,25 @@ export async function purgeCourseLocally(db: SQLiteDatabase, courseId: string) {
 // Only accepted rows leave the queue — rejected changes are marked locally
 // and conflicts adopt the newer server copy (see the timestamp guard in the
 // backend sync route).
-export async function syncPendingNotes(db: SQLiteDatabase, token: string) {
+//
+// Serialised per database: the queue is snapshotted per call, so two overlapping
+// passes could otherwise deliver an upsert that was queued before a delete
+// *after* the delete, resurrecting the note server-side.
+const activeSyncs = new WeakMap<SQLiteDatabase, Promise<number>>();
+
+export function syncPendingNotes(db: SQLiteDatabase, token: string) {
+  const active = activeSyncs.get(db);
+  if (active) return active;
+  const run = syncPendingNotesNow(db, token);
+  activeSyncs.set(db, run);
+  const clearActiveSync = () => {
+    if (activeSyncs.get(db) === run) activeSyncs.delete(db);
+  };
+  void run.then(clearActiveSync, clearActiveSync);
+  return run;
+}
+
+async function syncPendingNotesNow(db: SQLiteDatabase, token: string) {
   const queue = await db.getAllAsync<SyncQueueItem>(
     "SELECT * FROM sync_queue ORDER BY id ASC LIMIT 100",
   );
@@ -627,6 +676,20 @@ export async function syncPendingNotes(db: SQLiteDatabase, token: string) {
   await db.withTransactionAsync(async () => {
     for (const item of batch) {
       const status = results.get(item.entityId)?.status ?? "accepted";
+      if (status === "deleted") {
+        // The server holds a tombstone for this id, so the note is gone for
+        // good. Drop the local copy and remember it so pulls can't re-add it.
+        await db.runAsync(
+          "INSERT OR REPLACE INTO note_tombstones (id, deleted_at) VALUES (?, ?)",
+          item.entityId,
+          new Date().toISOString(),
+        );
+        await db.runAsync("DELETE FROM notes WHERE id = ?", item.entityId);
+        await db.runAsync("DELETE FROM upload_queue WHERE note_id = ?", item.entityId);
+        await db.runAsync("DELETE FROM generation_queue WHERE note_id = ?", item.entityId);
+        await db.runAsync("DELETE FROM sync_queue WHERE id = ?", item.id);
+        continue;
+      }
       if (status === "rejected") {
         // Unrecoverable (bad course, foreign id, malformed payload): drop the
         // queue row and flag the note so it is not silently shown as synced.
@@ -661,6 +724,8 @@ export async function syncPendingNotes(db: SQLiteDatabase, token: string) {
 // Never clobber local rows that still have queued (or newer) changes — a pull
 // delivering a stale server copy must not lose an offline edit.
 export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
+  // A deleted note cannot be re-created by a pull that was already in flight.
+  if (await isNoteTombstoned(db, note.id)) return;
   const queued = await db.getFirstAsync<{ id: number }>(
     "SELECT id FROM sync_queue WHERE entity = 'note' AND entity_id = ?",
     note.id,

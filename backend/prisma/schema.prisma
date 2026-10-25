@@ -35,6 +35,7 @@ model User {
   chatMessages         ChatMessage[]
   reviewLogs           ReviewLog[]
   quizAttempts         QuizAttempt[]
+  noteTombstones       NoteTombstone[]
 
   @@map("users")
 }
@@ -84,6 +85,18 @@ model Note {
   @@index([userId, updatedAt])
   @@index([courseId, updatedAt])
   @@map("notes")
+}
+
+// A deleted note's id, kept so a late or out-of-order upsert cannot resurrect
+// it. Rows are cheap; prune anything older than 90 days when they accumulate.
+model NoteTombstone {
+  id        String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deletedAt DateTime @default(now())
+
+  @@index([userId, deletedAt])
+  @@map("note_tombstones")
 }
 
 model Asset {
