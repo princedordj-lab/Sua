@@ -1,4 +1,3 @@
-import { PDFParse } from "pdf-parse";
 import JSZip from "jszip";
 
 // Server-side text extraction for uploaded documents. Audio transcription and
@@ -36,12 +35,45 @@ export async function extractDocumentText(buffer, format, kind) {
 }
 
 async function extractPdf(buffer) {
+  // pdfjs-dist (pulled in by pdf-parse) evaluates `new DOMMatrix()` at module
+  // scope and expects the canvas globals to exist in Node. It does try to
+  // require "@napi-rs/canvas" itself, but not in a form Vercel's file tracer
+  // can follow, so the package was absent from the deployed function and the
+  // app died on import. Importing it here with a literal specifier gets the
+  // package (including its prebuilt .node binary) into the traced bundle, and
+  // installing the globals before pdf-parse is loaded means pdfjs no longer
+  // needs its own polyfill attempt.
+  //
+  // Both imports stay lazy on purpose: the API should not pay for pdfjs on
+  // cold starts that never touch a PDF, and if the native binary is missing
+  // for the current platform only PDF extraction degrades to null instead of
+  // crashing every route at import time.
+  await installCanvasGlobals();
+  const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: buffer });
   try {
     const result = await parser.getText();
     return result.text ?? null;
   } finally {
     await parser.destroy().catch(() => {});
+  }
+}
+
+let canvasGlobals;
+
+async function installCanvasGlobals() {
+  if (!canvasGlobals) {
+    canvasGlobals = import("@napi-rs/canvas").catch((error) => {
+      console.warn(
+        `Canvas globals unavailable (@napi-rs/canvas): ${error?.message ?? error}`,
+      );
+      return null;
+    });
+  }
+  const canvas = await canvasGlobals;
+  if (!canvas) return;
+  for (const name of ["DOMMatrix", "ImageData", "Path2D"]) {
+    if (!globalThis[name] && canvas[name]) globalThis[name] = canvas[name];
   }
 }
 

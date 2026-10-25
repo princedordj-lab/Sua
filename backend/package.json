@@ -13,7 +13,7 @@
     "setup:neon-storage": "tsx scripts/create-neon-bucket.js",
     "prisma": "prisma",
     "postinstall": "prisma generate",
-    "build": "prisma generate && esbuild src/index.js --bundle --platform=node --format=esm --outfile=dist/index.js --external:@prisma/client --external:express --external:cors --external:@clerk/express --external:pg --external:ioredis --external:bullmq --external:cloudinary --external:svix --external:dotenv --external:pdf-parse --external:jszip"
+    "build": "prisma generate && esbuild src/index.js --bundle --platform=node --format=esm --outfile=dist/index.js --external:@napi-rs/canvas --external:@prisma/client --external:express --external:cors --external:@clerk/express --external:pg --external:ioredis --external:bullmq --external:cloudinary --external:svix --external:dotenv --external:pdf-parse --external:jszip"
   },
   "keywords": [],
   "author": "",
@@ -22,6 +22,7 @@
   "dependencies": {
     "@clerk/backend": "^3.23.2",
     "@clerk/express": "^2.1.78",
+    "@napi-rs/canvas": "0.1.80",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "7.10.0",
     "bullmq": "^6.3.17",

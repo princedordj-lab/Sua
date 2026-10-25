@@ -43,6 +43,7 @@ There is **no test suite**. Verification is `npx tsc --noEmit` + `npx expo lint`
 - Plain JS ESM (`"type": "module"`) — no TS build step. API entry `src/index.js`, worker `src/worker.js`, Vercel entry `api/index.js`.
 - Public routes are `/api/health` and the Clerk webhook (mounted before `express.json()` because svix needs the raw body); every other router sits behind `authenticate`.
 - Uploads are sign → direct PUT to a short-lived Neon Object Storage URL → complete. `/complete` verifies the object and enforces size, then extracts document text inline (PDF/DOCX/PPTX/TXT ≤ 25 MB, 100k-char cap). Extraction failure returns `null` and **must not fail the upload**. Cloudinary remains a compatibility fallback until its migration window closes.
+- PDF extraction depends on `@napi-rs/canvas` being imported from `src/lib/extract.js` with a *literal* specifier before `pdf-parse` is loaded: pdfjs-dist evaluates `new DOMMatrix()` at module scope, and its own `createRequire` lookup is invisible to Vercel's file tracer (missing package → `ReferenceError: DOMMatrix is not defined` at boot). Both imports must stay lazy so a missing native binary degrades PDF text to `null` instead of crashing every route on import.
 - Long-running AI work belongs to BullMQ. Free-plan caps (`FREE_MONTHLY_*`) are warn-only until billing ships.
 - Never log or return `NEON_API_KEY`, Clerk secrets, or signed URLs beyond their TTL.
 
