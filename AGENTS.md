@@ -1,171 +1,80 @@
 # Sua — Agent Instructions
 
-**Product:** Sua ("soo-ah"), an offline-first study app for African university students.  
-**Tagline:** Hear it once. Know it for the exam.  
-**Repository Root:** `d:\Sua`
+Sua ("soo-ah") is an offline-first exam-prep app for African university students: lectures, slides and typed notes become summaries, flashcards and quizzes. There is **no root `package.json` or workspace config** — three independent npm projects, each installed and run from its own directory:
 
----
+| Path | What it is |
+| :--- | :--- |
+| `Sua/` | Expo SDK 57 / React Native 0.86 / React 19 app (the product) |
+| `backend/` | Express 5 API (JS ESM) + BullMQ worker, Prisma 7 + Neon Postgres, Clerk auth |
+| `web/` | Next.js 16 marketing site + `/health` page |
 
-## 1. Project Overview
+Nested instruction files are authoritative for their directory: `Sua/AGENTS.md` (Expo rules — fetch the SDK 57 docs, do not trust memory) and `web/AGENTS.md` (Next.js 16 block, rewritten by `next dev`; commit it rather than reverting). `README.md` is a stale copy of an older AGENTS file — trust this file and the code over it.
 
-Sua is a mobile study companion that turns lectures, slides, and typed notes into summaries, flashcards, and quizzes. It is built around **exam readiness** rather than simple note storage. The app works offline for all core study features, syncing to the cloud when connectivity is available.
+## Commands
 
-### Key Differentiators
-- **Offline-First:** Notes, flashcards, and quizzes work without internet. AI generation queues until online.
-- **Exam Focus:** Includes Exam Mode (countdown, daily plans) and Past Questions integration.
-- **Africa-First Design:** Optimized for low-data environments, mobile money payments (GHS), and Ghanaian university contexts.
-
----
-
-## 2. Repository Structure
-
-This is a monorepo containing the frontend and backend workspaces.
-
-```text
-Sua/
-├── Sua/                # Expo React Native Frontend (Android/iOS)
-│   ├── src/
-│   │   ├── app/        # Expo Router routes (create.tsx = record/type/upload)
-│   │   ├── components/ # Shared UI components (markdown.tsx renderer)
-│   │   ├── lib/        # API clients, utilities, types
-│   │   │   ├── notes.ts    # SQLite local data layer (versioned migrations, sync/recordings/uploads)
-│   │   │   ├── uploads.ts  # Neon Object Storage upload queue flusher
-│   │   │   └── markdown.ts # Markdown toolbar transforms
-│   │   └── state/      # Global state (Context API, offline hydration)
-│   ├── assets/         # Images and static resources
-│   └── package.json
-├── backend/            # Node.js Express API
-│   ├── src/
-│   │   ├── routes/     # API endpoints (notes sync, uploads sign/complete)
-│   │   ├── middleware/ # Auth and error handling
-│   │   ├── lib/        # DB, user, identity, and extract.js (PDF/DOCX/PPTX/TXT)
-│   │   └── generated/  # Prisma client
-│   ├── prisma/         # Schema + numbered migrations (0_… through 4_…)
-│   └── package.json
-├── web/                # Next.js web MVP (App Router, TS, Tailwind v4) — see buildstep.md
-├── design_tokens/      # Tailwind config and shared theme
-└── images/             # Marketing and screenshot assets
-```
-
----
-
-## 3. Tech Stack
-
-| Layer | Technology | Purpose |
-| :--- | :--- | :--- |
-| **Mobile** | React Native (Expo SDK 57) | Cross-platform mobile app |
-| **Routing** | Expo Router | File-based navigation |
-| **Styling** | NativeWind (Tailwind CSS) | Inline `className` styling |
-| **Local DB** | Expo SQLite | Offline-first data storage (versioned via `PRAGMA user_version`) |
-| **Audio** | expo-audio | Chunked lecture recording (pause/resume, 2-min m4a segments) |
-| **Network** | @react-native-community/netinfo | Connectivity-aware sync and upload triggers |
-| **Pickers** | expo-document-picker / expo-image-picker | PDF and image capture for uploads |
-| **Backend** | Node.js + Express.js | Authenticated REST API |
-| **Cloud DB** | NeonDB (PostgreSQL) | Persistent user data |
-| **ORM** | Prisma | Type-safe database access |
-| **Auth** | Clerk | User management and sessions |
-| **AI** | OpenRouter / Gemini | Summaries, flashcards, transcription |
-| **Files** | Neon Object Storage | Private audio and document storage, accessed through short-lived signed URLs |
-| **Extraction** | pdf-parse + jszip (pure JS) | Server-side PDF/DOCX/PPTX/TXT text extraction |
-| **Payments** | Paystack | Mobile Money (MoMo) and cards |
-| **Jobs** | BullMQ + Redis | Background processing queue |
-
----
-
-## 4. Engineering Rules & Conventions
-
-### Frontend (React Native)
-1.  **Styling:** Always use NativeWind `className` for styling views and components. Use the `style` prop **only** on `SafeAreaView`.
-2.  **Offline First:** Every screen must function without network access, except for AI generation and the Assistant. Queue mutations and sync when online.
-3.  **Paths:** Routes live in `Sua/src/app`. Shared components live in `Sua/src/components`.
-4.  **Theme:** Use design tokens from `Sua/src/config/theme.ts`. Do not hardcode colors.
-5.  **Local DB:** Schema changes are additive migrations in `Sua/src/lib/notes.ts` versioned with `PRAGMA user_version`. Never edit a migration that has shipped — append a new version.
-6.  **Sync conflicts:** The client pushes `updatedAt`; the server rejects stale writes with a timestamp guard and pulls use pending-safe upserts (a local pending row is never clobbered by server data).
-7.  **Recording:** Audio is recorded as 2-minute m4a segments with a unique file name per segment; only `finalized` segments are uploadable. On crash recovery, drop the in-progress segment (m4a moov is written at stop, so truncated files are unplayable) and keep finalized ones as the resume base. Never hand-edit `android/`/`ios/` — regenerate with `npx expo prebuild` (e.g., for RECORD_AUDIO permission via the expo-audio plugin).
-8.  **Markdown:** Use the in-house renderer (`Sua/src/components/markdown.tsx` + `Sua/src/lib/markdown.ts`). No third-party markdown libraries (React 19 compatibility).
-9.  **Upload queue:** Save the local note first, then enqueue; drain in order — note sync before uploads (uploads may reference a note still in the push queue). Respect the persisted Wi-Fi-only toggle.
-
-### Backend (Node.js)
-1.  **API Security:** All routes must be protected by Clerk authentication middleware unless explicitly public (e.g., webhooks).
-2.  **Database:** Use Prisma for all DB interactions. Ensure Row Level Security (RLS) policies prevent users from accessing others' data.
-3.  **Migrations:** Name migrations with the running-number convention (`0_init`, `1_rls`, … next is `5_…`). Never timestamped names — Prisma replays directories lexicographically, and a `20261015_…` name sorts before `2_notes`/`3_assets`, breaking shadow-database replay.
-4.  **File Handling:** Keep Neon API credentials server-side. New uploads follow sign → direct binary PUT to a short-lived Neon URL → complete. `/sign` validates kind/format and noteId ownership; `/complete` verifies the object and enforces the size limit before activation. Cloudinary support is temporary compatibility for older clients and unmigrated assets; retain it until the migration and rollout window are complete.
-5.  **Text extraction:** Pure JS only (`Sua/backend/src/lib/extract.js`: pdf-parse for PDF, JSZip for DOCX/PPTX, plain UTF-8 for TXT), runs inline at `/complete` for documents ≤ 25 MB, capped at 100k chars, and stores `Asset.extractedText`. Extraction failures return `null` — an upload must never fail because a file was unparseable. Audio transcription and image OCR belong to the AI pipeline (BullMQ, Milestone 3), not here.
-6.  **Jobs:** Long-running tasks (transcription, AI summarization) must be offloaded to BullMQ workers.
-
-### General
--   **Type Safety:** Prefer TypeScript. Ensure Prisma client types are used consistently.
--   **Error Handling:** Gracefully handle network failures. Show clear "Retry" states for failed background jobs.
--   **Privacy:** Do not use student recordings or notes to train AI models. Support full data deletion.
-
----
-
-## 5. Core Features & Flow
-
-### User Journey
-`Welcome → Onboarding → Sign In → Setup (University/Courses) → Home`
-
-### Navigation Tabs
-1.  **Home:** Daily study plan, streak, recent notes, quick actions.
-2.  **Courses:** List of courses containing notes, decks, and quizzes.
-3.  **Create:** Record audio, upload PDFs/slides, or type notes.
-4.  **Study:** Flashcard reviews, quizzes, and Ask Sua assistant.
-5.  **Profile:** Account settings, billing, and preferences.
-
-### Data Model (Simplified)
--   **User:** Profile, plan status (Free/Pro), university info.
--   **Course:** Container for notes, exams, and progress.
--   **Note:** The core content unit — title, markdown `body`, `transcript`, `sourceType` (typed/audio/document/image), `updatedAt` sync guard; always tied to exactly one course.
--   **Asset:** Private object record — kind (audio/image/document), provider and object key, bytes, format, `status` (pending/active), `noteId`, server-side `extractedText` for documents.
--   **Flashcard:** Spaced repetition data (due date, ease factor).
--   **Quiz:** Questions and attempt history.
-
-Local-only (SQLite, not synced as tables): recording sessions/segments, upload queue with attempt counts, pending sync metadata on notes/courses.
-
----
-
-## 6. Build Milestones
-
-### V1 (MVP) - Current Focus
--   [x] Onboarding & Authentication (Clerk)
--   [x] Course Management (CRUD)
--   [x] Content Creation (Record, Upload, Type)
--   [x] AI Pipeline (Transcribe → Summary → Flashcards → Quiz) — Milestone 3
--   [x] Offline Sync (SQLite ↔ Postgres, conflict guard + pending-safe pulls)
--   [x] Local-First Capture (chunked recorder with crash recovery, 25 MB uploads with server-side text extraction, markdown editor) — Milestone 2
--   [ ] Billing (Paystack Integration)
--   [ ] Ask Sua Assistant
-
-### V1.5 (Post-Launch)
--   **Exam Mode:** Countdown timers and adaptive study plans.
--   **Past Questions:** Upload past papers and link to notes.
--   **Study Circles:** Collaborative groups and shared decks.
-
----
-
-## 7. Useful Commands
-
-### Frontend (`cd Sua`)
+Mobile (`cd Sua`):
 ```bash
-npm start          # Start Expo dev server
-npm run android    # Build & run native Android dev build (expo run:android)
-npm run ios        # Build & run native iOS dev build (expo run:ios)
-npx expo prebuild  # Regenerate android/ and ios/ after app.json plugin changes
-npx expo lint      # Check for linting errors
-npx tsc --noEmit   # Type check
+npx expo install <pkg>   # never npm install for Expo/RN deps — pins SDK-compatible versions
+npx tsc --noEmit         # typecheck
+npx expo lint            # eslint (eslint-config-expo)
+npm run android          # expo run:android — project uses expo-dev-client, so use a dev build
+npx expo prebuild        # after app.json/plugin changes; never hand-edit android/ or ios/
 ```
 
-### Backend (`cd backend`)
+Backend (`cd backend`):
 ```bash
-npm run dev        # Start dev server with watch mode
-npm run prisma     # Run Prisma CLI commands
-npx prisma migrate dev  # Apply DB migrations (also regenerates the client)
-npx prisma generate   # Regenerate Prisma client
+npm run dev              # API on :4000 (tsx watch)
+npm run worker           # BullMQ worker — AI jobs never finish without this second process
+npx prisma migrate deploy   # apply migrations to the Neon dev DB (uses DIRECT_URL)
+npx prisma generate         # after schema edits; client goes to gitignored src/generated/prisma
+npm run build               # esbuild bundle -> dist/index.js (Vercel build)
+npm run eval -- <sample> --kind lecture_note|reference   # prompt/validation harness
 ```
 
----
+Web (`cd web`): `npm run dev`, `npm run build`, `npm run lint`.
 
-## 8. References
--   [Project Overview](./Sua%20—%20Project%20Overview.md)
--   [Product Requirements (PRD)](./Sua%20—%20Product%20Requirements%20Document%20(PRD).md)
--   [Build Checklist](./todo.md)
+There is **no test suite**. Verification is `npx tsc --noEmit` + `npx expo lint` (mobile), `npm run build` (backend/web); for backend-only edits an `npx esbuild <files> --outdir=.tmp --format=esm` parse pass is enough.
+
+## Backend invariants
+
+- Every request-scoped query goes through `withUser(clerkId, tx => …)` (`src/lib/db.js`), which sets `app.current_user_id` inside a transaction for the RLS policies. Gotcha: the Neon role behind `DATABASE_URL` (`neondb_owner`) has **BYPASSRLS**, so the database does not enforce isolation today — the convention does. Use direct `prisma` only for cross-user/infra work (`lib/pipeline.js`, `worker.js`, usage counters). Keep external I/O outside `withUser`; its transaction times out after 15s.
+- Migrations are numbered `0_init` … `12_reference_usage`; **next is `13_…`**. No timestamps: Prisma replays directories lexicographically, so `2026…` sorts before `2_notes`. Never edit or rename an applied migration — append a new one.
+- Prisma uses a custom ESM client output (`src/generated/prisma`, gitignored). CLI URLs come from `prisma7.config.ts` → `DIRECT_URL`; the running app uses pooled `DATABASE_URL` via `@prisma/adapter-pg`.
+- Plain JS ESM (`"type": "module"`) — no TS build step. API entry `src/index.js`, worker `src/worker.js`, Vercel entry `api/index.js`.
+- Public routes are `/api/health` and the Clerk webhook (mounted before `express.json()` because svix needs the raw body); every other router sits behind `authenticate`.
+- Uploads are sign → direct PUT to a short-lived Neon Object Storage URL → complete. `/complete` verifies the object and enforces size, then extracts document text inline (PDF/DOCX/PPTX/TXT ≤ 25 MB, 100k-char cap). Extraction failure returns `null` and **must not fail the upload**. Cloudinary remains a compatibility fallback until its migration window closes.
+- Long-running AI work belongs to BullMQ. Free-plan caps (`FREE_MONTHLY_*`) are warn-only until billing ships.
+- Never log or return `NEON_API_KEY`, Clerk secrets, or signed URLs beyond their TTL.
+
+## AI generation contract (server owns it)
+
+`Job.kind` is one of `study_set | lecture_note | course_reference`; `Note.noteKind` is `note | reference`.
+
+- `study_set` — summary + flashcards + quiz; note `body` untouched.
+- `lecture_note` — AI rewrites `body`, original capture preserved in `transcript`, then summary + cards + quiz (typed notes included).
+- `course_reference` — condensed reference sheet only, no cards/quiz; one page per upload.
+- `pipeline.startAttempt` re-asserts `noteKind`; `POST /jobs` returns **409** when a non-reference kind targets a `reference` note; references increment `Usage.references`, not `summaries`.
+- Client side: `Sua/src/lib/generate.ts` (`generationKindFor`, queue drain, finishers, `reconcileAiOutputs`) and `create.tsx` (`jobKindForTarget` / `noteKindForTarget`). Pending notes are synced **before** `POST /jobs` or the server 404s. Upload-triggered conversions have no local queue row, so `reconcileAiOutputs` backfills cards/quiz.
+- When touching this area, update all four layers together: Prisma schema/usage, `pipeline.js`, `routes/jobs.js`, and the mobile queue/UI copy.
+
+## Mobile conventions
+
+- Styling: NativeWind `className` only; the `style` prop is allowed **only** on `SafeAreaView`. Colors are CSS variables declared in `Sua/tailwind.config.js` and remapped for dark mode by `Sua/src/state/appearance.tsx`; use `colors` from `Sua/src/config/theme.ts` for icon/style values instead of hex literals. Gold is fill-only (never text), one gold button per screen, 48px minimum tap targets.
+- Routes live in `Sua/src/app`; shared components/hooks/libs stay outside it. `@/*` maps to `Sua/src/*`.
+- SQLite migrations are the `MIGRATIONS` array in `Sua/src/lib/notes.ts`, tracked by `PRAGMA user_version`. Append a step; every step must be idempotent because fresh installs replay all of them and a throw retries on next launch.
+- Sync: the client pushes `updatedAt`; the server rejects stale writes; pulls use pending-safe upserts so a locally pending note is never clobbered. Drain order is notes **then** uploads (uploads may reference an unsynced note), and the persisted Wi-Fi-only toggle must be respected.
+- Recording: 2-minute m4a segments with unique filenames; only `finalized` segments upload. On crash recovery drop the in-progress segment (truncated m4a is unplayable) and resume from the finalized ones.
+- Markdown: note bodies render through the in-house subset parser (`Sua/src/components/markdown.tsx` + `lib/markdown.ts`), not a third-party renderer (React 19 compatibility). The editor *input* uses `react-native-enriched-markdown` (math/code/video disabled in `package.json`).
+- Every screen must work offline except AI generation and Ask Sua.
+
+## Environment & deploy
+
+- `backend/.env` (copy `backend/.env.example`): pooled `DATABASE_URL`, direct `DIRECT_URL`, Clerk keys + webhook secret, Neon storage (`NEON_API_KEY`, `NEON_PROJECT_ID`, `NEON_BRANCH_ID`, `NEON_STORAGE_BUCKET`), `REDIS_URL`, `GEMINI_API_KEY` (transcription/OCR), `OPENROUTER_API_KEY` (bulk generation).
+- `Sua/.env.local` (copy `Sua/.env.example`): `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY`, `EXPO_PUBLIC_API_URL`. Android emulator needs `http://10.0.2.2:4000/api`; `api.ts` falls back to that when unset.
+- Backend deploys to Vercel from `backend/` (`vercel.json` → `npm run build`); the AI worker needs a long-running host with Redis, not a serverless function.
+
+## References
+
+- `buildstep.md` — web MVP build log; `todo.md` — build checklist (may lag the code).
+- `Sua — Project Overview.md`, `Sua — Product Requirements Document (PRD).md` — local, untracked product docs.
+- `Sua/src/lib/notes.ts` (local schema + sync), `backend/src/lib/pipeline.js` (AI stages), `backend/src/routes/uploads.js` (storage flow).
