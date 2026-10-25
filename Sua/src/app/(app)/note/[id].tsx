@@ -337,18 +337,20 @@ export default function NoteView() {
                     </Text>
                   </Pressable>
                 ) : null}
-                <Pressable
-                  disabled={retrying}
-                  onPress={() => void queueGeneration()}
-                  accessibilityRole="button"
-                  accessibilityLabel="Try generating again"
-                  className={`mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand-strong px-4 ${retrying ? "opacity-60" : "active:opacity-80"}`}
-                >
-                  <RefreshCw size={15} color={colors.ink.inverse} />
-                  <Text className="text-label font-sans-bold text-ink-inverse">
-                    Try again
-                  </Text>
-                </Pressable>
+                <View className={`mt-3 self-start ${retrying ? "opacity-60" : ""}`}>
+                  <Pressable
+                    disabled={retrying}
+                    onPress={() => void queueGeneration()}
+                    accessibilityRole="button"
+                    accessibilityLabel="Try generating again"
+                    className="min-h-10 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong px-4 active:opacity-80"
+                  >
+                    <RefreshCw size={15} color={colors.ink.inverse} />
+                    <Text className="text-label font-sans-bold text-ink-inverse">
+                      Try again
+                    </Text>
+                  </Pressable>
+                </View>
               </View>
             ) : aiActive ? (
               <View className="mt-4 flex-row items-center justify-between gap-2 rounded-card bg-surface p-card shadow-card">
@@ -484,11 +486,11 @@ export default function NoteView() {
                 }
                 accessibilityRole="button"
                 accessibilityLabel="Open this note's deck"
-                className={
-                  flashcardCount
-                    ? "flex-1 rounded-card bg-surface p-card shadow-card active:opacity-80"
-                    : "flex-1 rounded-card bg-surface p-card shadow-card"
-                }
+                // NativeWind #1711/#1712: a className that toggles (shadow-card
+                // + active:opacity here) on a Pressable crashes the navigation
+                // tree on RN 0.86 — the class set stays static; `disabled`
+                // already gates interaction.
+                className="flex-1 rounded-card bg-surface p-card shadow-card active:opacity-80"
               >
                 <Text className="text-caption font-sans-extrabold text-ink-soft">
                   FLASHCARDS

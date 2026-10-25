@@ -217,7 +217,9 @@ export default function AskSua() {
         await setSetting(db, ASK_SUA_COARSE_KEY, courseId);
       } catch (error) {
         setMessages((prev) => prev.filter((message) => message.id !== tempRow.id));
-        await upsertChatMessage(db, tempRow);
+        // Keep the failed question under "try again" even if the local write
+        // cannot run (e.g. the database closed behind the screen).
+        await upsertChatMessage(db, tempRow).catch(() => {});
         draftRef.current = trimmed;
         setDraft(trimmed);
         setAskError(
@@ -442,6 +444,11 @@ export default function AskSua() {
               returnKeyType="send"
               onSubmitEditing={send}
             />
+          <View
+            className={`h-10 w-10 items-center justify-center rounded-full ${
+              mic.micState === "recording" ? "bg-danger-soft" : "bg-cream"
+            }`}
+          >
             <Pressable
               onPress={mic.micState === "recording" ? () => void mic.stop() : () => void mic.start()}
               accessibilityRole="button"
@@ -449,9 +456,7 @@ export default function AskSua() {
                 mic.micState === "recording" ? "Stop recording" : "Record voice question"
               }
               hitSlop={8}
-              className={`h-10 w-10 items-center justify-center rounded-full ${
-                mic.micState === "recording" ? "bg-danger-soft" : "bg-cream"
-              }`}
+              className="h-10 w-10 items-center justify-center rounded-full"
             >
               <Mic
                 size={18}
@@ -459,17 +464,26 @@ export default function AskSua() {
               />
             </Pressable>
           </View>
-          <Pressable
-            disabled={!canSend}
-            onPress={send}
-            accessibilityRole="button"
-            accessibilityLabel="Send"
+          </View>
+          {/* Toggling shadow or bg classes on a Pressable's className crashes
+              NativeWind's interop on RN 0.86 (nativewind#1711, #1712) with a
+              bogus "Couldn't find a navigation context" — the dynamic classes
+              live on the wrapper View, the Pressable stays static. */}
+          <View
             className={`h-12 w-12 items-center justify-center rounded-full ${
               canSend ? "bg-gold shadow-gold" : "bg-gold/60"
             }`}
           >
-            <Send size={20} color={colors.brand.DEFAULT} />
-          </Pressable>
+            <Pressable
+              disabled={!canSend}
+              onPress={send}
+              accessibilityRole="button"
+              accessibilityLabel="Send"
+              className="h-12 w-12 items-center justify-center rounded-full"
+            >
+              <Send size={20} color={colors.brand.DEFAULT} />
+            </Pressable>
+          </View>
         </View>
       </KeyboardAvoidingView>
 

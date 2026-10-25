@@ -328,28 +328,33 @@ function SegmentedControl({
       {MODES.map(({ key, label, Icon }) => {
         const selected = mode === key;
         return (
-          <Pressable
+          <View
             key={key}
-            onPress={() => {
-              if (!disabled) onChange(key);
-            }}
-            disabled={disabled}
-            accessibilityRole="tab"
-            accessibilityState={{ selected, disabled }}
-            accessibilityLabel={label}
-            className={`min-h-12 flex-1 flex-row items-center justify-center gap-2 rounded-chip active:opacity-80 ${
+            className={`min-h-12 flex-1 flex-row rounded-chip ${
               selected ? "bg-brand-strong" : ""
             } ${disabled ? "opacity-60" : ""}`}
           >
-            <Icon size={18} color={selected ? colors.ink.inverse : pv.ink.soft} />
-            <Text
-              className={`text-label font-sans-bold ${
-                selected ? "text-ink-inverse" : "text-ink-soft"
-              }`}
+            {/* NativeWind #1711/#1712: conditional classes stay off the Pressable. */}
+            <Pressable
+              onPress={() => {
+                if (!disabled) onChange(key);
+              }}
+              disabled={disabled}
+              accessibilityRole="tab"
+              accessibilityState={{ selected, disabled }}
+              accessibilityLabel={label}
+              className="flex-1 self-stretch flex-row items-center justify-center gap-2 active:opacity-80"
             >
-              {label}
-            </Text>
-          </Pressable>
+              <Icon size={18} color={selected ? colors.ink.inverse : pv.ink.soft} />
+              <Text
+                className={`text-label font-sans-bold ${
+                  selected ? "text-ink-inverse" : "text-ink-soft"
+                }`}
+              >
+                {label}
+              </Text>
+            </Pressable>
+          </View>
         );
       })}
     </View>
@@ -368,20 +373,25 @@ function CourseSelect({
   const pv = usePalette();
   const style = course ? courseStyle(course.color, pv) : null;
   return (
-    <Pressable
-      onPress={() => {
-        if (!disabled) onPress();
-      }}
-      disabled={disabled}
-      accessibilityRole="button"
-      accessibilityState={{ disabled }}
-      accessibilityLabel={
-        course ? `Course: ${course.name}. Tap to change` : "Choose a course"
-      }
-      className={`mt-4 self-start flex-row items-center gap-3 rounded-chip border border-line bg-surface px-4 py-3 active:opacity-80 ${
+    <View
+      className={`mt-4 self-start flex-row rounded-chip border border-line bg-surface px-4 py-3 ${
         disabled ? "opacity-60" : ""
       }`}
     >
+      {/* NativeWind #1711/#1712: the disabled dim lives on the wrapper View
+          so the Pressable's class set never changes. */}
+      <Pressable
+        onPress={() => {
+          if (!disabled) onPress();
+        }}
+        disabled={disabled}
+        accessibilityRole="button"
+        accessibilityState={{ disabled }}
+        accessibilityLabel={
+          course ? `Course: ${course.name}. Tap to change` : "Choose a course"
+        }
+        className="flex-1 self-stretch flex-row items-center gap-3 active:opacity-80"
+      >
       <View
         style={{ backgroundColor: style ? style.tint : pv.successSoft }}
         className="h-9 w-9 items-center justify-center rounded-full"
@@ -397,7 +407,8 @@ function CourseSelect({
           : "Choose a course"}
       </Text>
       <ChevronDown size={18} color={pv.ink.faint} />
-    </Pressable>
+      </Pressable>
+    </View>
   );
 }
 
@@ -1561,14 +1572,16 @@ export default function Create() {
                     accessibilityState={{
                       busy: recordPhase === "starting" || stopping,
                     }}
-                    className={`active:opacity-90 ${
-                      recordPhase === "starting" || stopping || limitReached
-                        ? "opacity-60"
-                        : ""
-                    }`}
+                    className="active:opacity-90"
                   >
+                    {/* NativeWind #1711/#1712: keep conditional classes off the
+                        Pressable — the dim state lives on the inner circle. */}
                     <View
                       className={`h-44 w-44 items-center justify-center rounded-full ${
+                        recordPhase === "starting" || stopping || limitReached
+                          ? "opacity-60"
+                          : ""
+                      } ${
                         isRecording || isPaused ? "bg-success-soft/70" : "bg-gold-soft/60"
                       }`}
                     >
@@ -1993,24 +2006,23 @@ export default function Create() {
                                     ? styleState.orderedList.isActive
                                     : false;
                         return (
-                          <Pressable
-                            key={key}
-                            disabled={disabledTool}
-                            onPress={() => runEditorTool(key)}
-                            accessibilityRole="button"
-                            accessibilityLabel={label}
-                            accessibilityState={{ disabled: disabledTool }}
-                            className={`h-11 w-11 items-center justify-center rounded-input active:bg-line ${
-                              disabledTool ? "opacity-40" : ""
-                            }`}
-                          >
-                            <Icon
-                              size={19}
-                              color={
-                                activeStyle ? colors.brand.DEFAULT : pv.ink.DEFAULT
-                              }
-                            />
-                          </Pressable>
+                          <View key={key} className={disabledTool ? "opacity-40" : ""}>
+                            <Pressable
+                              disabled={disabledTool}
+                              onPress={() => runEditorTool(key)}
+                              accessibilityRole="button"
+                              accessibilityLabel={label}
+                              accessibilityState={{ disabled: disabledTool }}
+                              className="h-11 w-11 items-center justify-center rounded-input active:bg-line"
+                            >
+                              <Icon
+                                size={19}
+                                color={
+                                  activeStyle ? colors.brand.DEFAULT : pv.ink.DEFAULT
+                                }
+                              />
+                            </Pressable>
+                          </View>
                         );
                       })}
                     </View>
@@ -2108,41 +2120,44 @@ export default function Create() {
                 ) : null}
 
                 <View className="mt-4 flex-row gap-3">
-                  <Pressable
-                    onPress={() => persistNote(false)}
-                    disabled={!canSave}
-                    className={`min-h-12 flex-1 flex-row items-center justify-center gap-2 rounded-btn border border-brand bg-surface active:opacity-80 ${
-                      canSave ? "" : "opacity-45"
-                    }`}
-                    accessibilityRole="button"
-                    accessibilityLabel="Save note"
-                  >
-                    <Save size={17} color={colors.brand.DEFAULT} />
-                    <Text className="text-label font-sans-bold text-brand">Save</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => {
-                      if (body.trim().length < 80) {
-                        Alert.alert(
-                          "Note is a bit short",
-                          "Add a little more detail (at least a few sentences) before generating summaries and flashcards.",
-                        );
-                        return;
-                      }
-                      setPendingPrompt({ mode: "typing", target: "lecture_note" });
-                    }}
-                    disabled={!canSave}
-                    className={`min-h-12 flex-1 flex-row items-center justify-center gap-2 rounded-btn bg-gold shadow-gold active:opacity-80 ${
-                      canSave ? "" : "opacity-45"
-                    }`}
-                    accessibilityRole="button"
-                    accessibilityLabel="Save and summarise"
-                  >
-                    <Sparkles size={17} color={pv.ink.DEFAULT} />
-                    <Text className="text-label font-sans-extrabold text-ink">
-                      Save and summarise
-                    </Text>
-                  </Pressable>
+                  {/* NativeWind #1711/#1712: conditional classes on Pressable crash
+                      the navigation tree on RN 0.86 — the disabled dim (opacity-45)
+                      lives on the wrapper View, the Pressable class set is static. */}
+                  <View className={`flex-1 ${canSave ? "" : "opacity-45"}`}>
+                    <Pressable
+                      onPress={() => persistNote(false)}
+                      disabled={!canSave}
+                      className="min-h-12 w-full flex-row items-center justify-center gap-2 rounded-btn border border-brand bg-surface active:opacity-80"
+                      accessibilityRole="button"
+                      accessibilityLabel="Save note"
+                    >
+                      <Save size={17} color={colors.brand.DEFAULT} />
+                      <Text className="text-label font-sans-bold text-brand">Save</Text>
+                    </Pressable>
+                  </View>
+                  <View className={`flex-1 ${canSave ? "" : "opacity-45"}`}>
+                    <Pressable
+                      onPress={() => {
+                        if (body.trim().length < 80) {
+                          Alert.alert(
+                            "Note is a bit short",
+                            "Add a little more detail (at least a few sentences) before generating summaries and flashcards.",
+                          );
+                          return;
+                        }
+                        setPendingPrompt({ mode: "typing", target: "lecture_note" });
+                      }}
+                      disabled={!canSave}
+                      className="min-h-12 w-full flex-row items-center justify-center gap-2 rounded-btn bg-gold shadow-gold active:opacity-80"
+                      accessibilityRole="button"
+                      accessibilityLabel="Save and summarise"
+                    >
+                      <Sparkles size={17} color={pv.ink.DEFAULT} />
+                      <Text className="text-label font-sans-extrabold text-ink">
+                        Save and summarise
+                      </Text>
+                    </Pressable>
+                  </View>
                 </View>
               </KeyboardAvoidingView>
             )}
@@ -2303,40 +2318,46 @@ export default function Create() {
               className="min-h-24 rounded-input border border-line bg-surface p-3 text-body leading-6 text-ink"
               accessibilityLabel="Report comment"
             />
-            <Pressable
-              onPress={() => {
-                if (!reportComment.trim() || reportSending) return;
-                setReportSending(true);
-                void (async () => {
-                  try {
-                    const token = await getAuthToken();
-                    if (!token) throw new Error("Not signed in");
-                    await jobsApi.feedback(token, {
-                      targetType: "summary",
-                      noteId: typedNoteId,
-                      comment: reportComment.trim(),
-                      sourceText: sourceTranscript ?? undefined,
-                    });
-                    setReported(true);
-                    setReportComment("");
-                  } catch {
-                    Alert.alert("Couldn’t send the report", "Try again when you’re connected.");
-                  } finally {
-                    setReportSending(false);
-                  }
-                })();
-              }}
-              disabled={!reportComment.trim() || reportSending}
-              accessibilityRole="button"
-              accessibilityLabel="Send report"
-              className={`min-h-12 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong active:opacity-80 ${
+            {/* NativeWind #1711/#1712: the busy dim lives on the wrapper View so
+                the Pressable's class set never changes. */}
+            <View
+              className={`min-h-12 self-stretch ${
                 !reportComment.trim() || reportSending ? "opacity-50" : ""
               }`}
             >
-              <Text className="text-label font-sans-bold text-ink-inverse">
-                {reportSending ? "Sending…" : "Send report"}
-              </Text>
-            </Pressable>
+              <Pressable
+                onPress={() => {
+                  if (!reportComment.trim() || reportSending) return;
+                  setReportSending(true);
+                  void (async () => {
+                    try {
+                      const token = await getAuthToken();
+                      if (!token) throw new Error("Not signed in");
+                      await jobsApi.feedback(token, {
+                        targetType: "summary",
+                        noteId: typedNoteId,
+                        comment: reportComment.trim(),
+                        sourceText: sourceTranscript ?? undefined,
+                      });
+                      setReported(true);
+                      setReportComment("");
+                    } catch {
+                      Alert.alert("Couldn’t send the report", "Try again when you’re connected.");
+                    } finally {
+                      setReportSending(false);
+                    }
+                  })();
+                }}
+                disabled={!reportComment.trim() || reportSending}
+                accessibilityRole="button"
+                accessibilityLabel="Send report"
+                className="self-stretch flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong active:opacity-80"
+              >
+                <Text className="text-label font-sans-bold text-ink-inverse">
+                  {reportSending ? "Sending…" : "Send report"}
+                </Text>
+              </Pressable>
+            </View>
           </View>
         )}
       </BottomSheet>

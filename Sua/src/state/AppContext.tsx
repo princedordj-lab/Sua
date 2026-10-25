@@ -206,7 +206,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         requestRefresh();
         void flushUploads({ db, getAuthToken });
         void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
-        void flushStudyProgress({ db, getAuthToken });
+        void flushStudyProgress({ db, getAuthToken }).catch(() => {});
       }
     });
     const appState = AppState.addEventListener("change", (next) => {
@@ -214,7 +214,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         requestRefresh();
         void flushUploads({ db, getAuthToken });
         void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
-        void flushStudyProgress({ db, getAuthToken });
+        void flushStudyProgress({ db, getAuthToken }).catch(() => {});
       }
     });
     return () => {
@@ -283,7 +283,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             getAuthToken,
             onNoteChange: () => requestRefresh(2_000),
           }).catch(() => {});
-          void flushStudyProgress({ db, getAuthToken });
+          void flushStudyProgress({ db, getAuthToken }).catch(() => {});
         }
       } catch {
         // Backend unreachable. Fall back to the cached course list so notes

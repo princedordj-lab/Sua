@@ -165,11 +165,11 @@ export default function Review() {
         <View className="h-10 w-10" />
       </View>
 
-      <Pressable
-        onPress={() => setFlipped(true)}
-        accessibilityRole="button"
-        accessibilityLabel={flipped ? "Answer shown" : "Reveal the answer"}
-        className={`mx-5 mt-3 flex-1 items-center justify-center rounded-card p-card-lg shadow-card ${
+      {/* NativeWind #1711/#1712: className toggles on a Pressable crash the
+          navigation tree on RN 0.86 — the card visuals (incl. the bg toggle)
+          stay on the View, the Pressable is a static hit-area overlay. */}
+      <View
+        className={`mx-5 mt-3 flex-1 flex-col items-center justify-center rounded-card p-card-lg shadow-card ${
           flipped ? "bg-success-soft" : "bg-surface"
         }`}
       >
@@ -189,7 +189,13 @@ export default function Review() {
         ) : (
           <Text className="mt-8 text-small text-ink-faint">Tap to reveal</Text>
         )}
-      </Pressable>
+        <Pressable
+          onPress={() => setFlipped(true)}
+          accessibilityRole="button"
+          accessibilityLabel={flipped ? "Answer shown" : "Reveal the answer"}
+          className="absolute inset-0"
+        />
+      </View>
 
       {flipped ? (
         <View className="flex-row gap-2 px-5 pb-4 pt-3">
