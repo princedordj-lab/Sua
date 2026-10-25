@@ -3,7 +3,11 @@ generator client {
   output              = "../src/generated/prisma"
   runtime             = "nodejs"
   moduleFormat        = "esm"
-  importFileExtension = "ts"
+  // Imports must be ".js": the files are generated as .ts, but every runtime
+  // that compiles them (esbuild, Vercel's builder) emits .js, and ESM resolution
+  // is literal. ".ts" specifiers only work under tsx, which is why the Vercel
+  // function crashed with ERR_MODULE_NOT_FOUND on internal/class.ts.
+  importFileExtension = "js"
 }
 
 datasource db {
@@ -35,6 +39,7 @@ model User {
   chatMessages         ChatMessage[]
   reviewLogs           ReviewLog[]
   quizAttempts         QuizAttempt[]
+  noteTombstones       NoteTombstone[]
 
   @@map("users")
 }
@@ -84,6 +89,18 @@ model Note {
   @@index([userId, updatedAt])
   @@index([courseId, updatedAt])
   @@map("notes")
+}
+
+// A deleted note's id, kept so a late or out-of-order upsert cannot resurrect
+// it. Rows are cheap; prune anything older than 90 days when they accumulate.
+model NoteTombstone {
+  id        String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deletedAt DateTime @default(now())
+
+  @@index([userId, deletedAt])
+  @@map("note_tombstones")
 }
 
 model Asset {

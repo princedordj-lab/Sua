@@ -106,6 +106,9 @@ export default function NoteView() {
   const [retrying, setRetrying] = useState(false);
   const screenActiveRef = useRef(false);
   const retryingRef = useRef(false);
+  // Set before navigating away from a delete so the 5 s stage poll and any
+  // in-flight load/refresh cannot put the note back on screen.
+  const deletedRef = useRef(false);
 
   const course = courses.find((item) => item.id === note?.courseId);
   const aiActive = note
@@ -113,9 +116,10 @@ export default function NoteView() {
     : false;
 
   const load = useCallback(async () => {
+    if (deletedRef.current) return;
     try {
       const row = await getNote(db, id);
-      if (!screenActiveRef.current) return;
+      if (!screenActiveRef.current || deletedRef.current) return;
       setNote(row);
       setMissing(!row);
       if (!row) {
@@ -220,10 +224,11 @@ export default function NoteView() {
   useEffect(() => {
     if (!aiActive) return;
     const timer = setInterval(() => {
+      if (deletedRef.current) return;
       void refreshNoteFromServer({ db, getAuthToken }, id)
         .catch(() => {})
         .finally(() => {
-          if (screenActiveRef.current) void load();
+          if (screenActiveRef.current && !deletedRef.current) void load();
         });
       void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
     }, 5000);
@@ -259,11 +264,15 @@ export default function NoteView() {
           style: "destructive",
           onPress: () => {
             void (async () => {
+              // Mark first: the stage poll may fire between the await below and
+              // the navigation, and it must not reload the row we just removed.
+              deletedRef.current = true;
               try {
                 await deleteNote(db, id);
                 if (router.canGoBack()) router.back();
                 else router.replace("/courses");
               } catch {
+                deletedRef.current = false;
                 Alert.alert("Couldn’t delete", "Try again in a moment.");
               }
             })();

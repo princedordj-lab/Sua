@@ -7,3 +7,6 @@ npm-debug.log*
 skills-lock.json
 
 /src/generated/prisma
+
+# esbuild bundle from `npm run build` (Vercel rebuilds it on deploy)
+/dist

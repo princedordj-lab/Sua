@@ -184,12 +184,13 @@ async function drainGenerationQueueNow({ db, getAuthToken, onNoteChange }: Drain
       await setNoteAiState(db, item.noteId, "failed");
       continue;
     }
-    // Recordings generate against transcribed audio, so their job must wait
-    // until every segment is on the server. Leave the row queued; finishing
-    // uploads (or the next reconnect/foreground tick) re-triggers the drain.
+    // Conversion jobs read the uploaded asset, so they must wait until every
+    // queued upload for the note is on the server — for files and photos too,
+    // not just audio. Leave the row queued; the upload flush (or the next
+    // reconnect/foreground tick) re-triggers the drain.
     const note = await getNote(db, item.noteId).catch(() => null);
     if (!note) continue;
-    if (note?.sourceType === "audio" && (await countPendingUploads(db, item.noteId)) > 0) {
+    if ((await countPendingUploads(db, item.noteId)) > 0) {
       continue;
     }
     try {

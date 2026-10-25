@@ -271,6 +271,32 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
   if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
 
   let asset = outcome.asset;
+  // The note may have been deleted while the bytes were in flight. Asset.noteId
+  // is SetNull, so a null here means the note was removed after signing; do not
+  // extract text for, or enqueue work against, a note the student deleted.
+  if (asset.noteId) {
+    const noteAlive = await withUser(identity.clerkId, async (tx) => {
+      const user = await ensureUser(tx, identity);
+      const note = await tx.note.findFirst({
+        where: { id: asset.noteId, userId: user.id },
+        select: { id: true },
+      });
+      return Boolean(note);
+    });
+    if (!noteAlive) {
+      const orphan = asset;
+      await withUser(identity.clerkId, async (tx) => {
+        const user = await ensureUser(tx, identity);
+        await tx.asset.deleteMany({ where: { id: orphan.id, userId: user.id } });
+      }).catch(() => {});
+      try {
+        await deleteAssetObject(orphan);
+      } catch (error) {
+        console.warn(`Orphan asset cleanup failed for ${orphan.publicId}:`, error);
+      }
+      return res.status(410).json({ error: "Note was deleted" });
+    }
+  }
   // Parse the document once its bytes are confirmed — outside the transaction
   // so a slow download can't hold a database connection open. Re-runs only if
   // a previous attempt failed (extractedText still null).

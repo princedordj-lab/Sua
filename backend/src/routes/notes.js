@@ -42,6 +42,10 @@ notesRouter.post("/sync", async (req, res) => {
   const changes = Array.isArray(req.body?.changes) ? req.body.changes : [];
   if (changes.length > 100) return res.status(400).json({ error: "Too many changes" });
 
+  // Storage deletes are external I/O, so they happen after the transaction
+  // (withUser caps a transaction at 15 s).
+  const storageDeletes = [];
+
   const { notes, results } = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
     const notes = [];
@@ -52,22 +56,49 @@ notesRouter.post("/sync", async (req, res) => {
         continue;
       }
       if (change.operation === "delete") {
+        const tombstone = await tx.noteTombstone.findUnique({
+          where: { id: change.id },
+          select: { userId: true },
+        });
+        if (tombstone && tombstone.userId !== user.id) {
+          results.push({ id: change.id, status: "rejected", reason: "id not available" });
+          continue;
+        }
+        const owned = await tx.note.findUnique({
+          where: { id: change.id },
+          select: { userId: true },
+        });
+        if (owned && owned.userId !== user.id) {
+          results.push({ id: change.id, status: "rejected", reason: "id not available" });
+          continue;
+        }
+        // Record the deletion before touching the note. A concurrent upsert
+        // that lands after this transaction must find the tombstone, not a
+        // free id it can recreate the note under.
+        await tx.noteTombstone.createMany({
+          data: [{ id: change.id, userId: user.id }],
+          skipDuplicates: true,
+        });
         const assets = await tx.asset.findMany({
           where: { noteId: change.id, userId: user.id },
         });
         for (const asset of assets) {
-          if (asset.publicId && asset.publicId !== "pending") {
-            try {
-              await deleteAssetObject(asset);
-            } catch (err) {
-              console.warn(`Storage object delete failed for asset ${asset.publicId}:`, err);
-            }
-          }
+          if (asset.publicId && asset.publicId !== "pending") storageDeletes.push(asset);
         }
         await tx.asset.deleteMany({ where: { noteId: change.id, userId: user.id } });
         await tx.note.deleteMany({ where: { id: change.id, userId: user.id } });
         // Idempotent: deleting a note that is already gone still succeeds.
         results.push({ id: change.id, status: "accepted" });
+        continue;
+      }
+      // A tombstoned id can never come back. Tell the device so it removes its
+      // copy instead of retrying the upsert forever.
+      const tombstone = await tx.noteTombstone.findUnique({
+        where: { id: change.id },
+        select: { userId: true },
+      });
+      if (tombstone) {
+        results.push({ id: change.id, status: "deleted" });
         continue;
       }
       if (!change.courseId || typeof change.title !== "string" || typeof change.body !== "string") {
@@ -121,6 +152,15 @@ notesRouter.post("/sync", async (req, res) => {
     return { notes, results };
   });
   res.json({ notes: notes.map(shapeNote), results });
+
+  // Best-effort storage cleanup for deleted notes, outside the transaction.
+  for (const asset of storageDeletes) {
+    try {
+      await deleteAssetObject(asset);
+    } catch (err) {
+      console.warn(`Storage object delete failed for asset ${asset.publicId}:`, err);
+    }
+  }
 
   // A pushed note may be the missing half of a conversion-marked upload that
   // landed first (the /complete route covers the reverse order). Idempotent.

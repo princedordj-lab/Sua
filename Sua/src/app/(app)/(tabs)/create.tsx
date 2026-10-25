@@ -15,7 +15,6 @@ import type { SQLiteDatabase } from "expo-sqlite";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import {
-  AudioModule,
   RecordingPresets,
   setAudioModeAsync,
   useAudioRecorder,
@@ -25,7 +24,6 @@ import { getDocumentAsync } from "expo-document-picker";
 import {
   launchCameraAsync,
   launchImageLibraryAsync,
-  requestCameraPermissionsAsync,
 } from "expo-image-picker";
 import { Directory, File, Paths } from "expo-file-system";
 import { EnrichedMarkdownTextInput } from "react-native-enriched-markdown";
@@ -108,6 +106,11 @@ import type {
 import { drainGenerationQueue, generationKindFor } from "../../../lib/generate";
 import { jobsApi } from "../../../lib/api";
 import { flushUploads } from "../../../lib/uploads";
+import {
+  ensureCameraPermission,
+  ensureMicPermission,
+  promptForSettings,
+} from "../../../lib/permissions";
 import { useApp } from "../../../state/AppContext";
 import type { Course } from "../../../lib/types";
 
@@ -860,12 +863,13 @@ export default function Create() {
     setRecordPhase("starting");
     const sessionId = newId();
     try {
-      const permission = await AudioModule.requestRecordingPermissionsAsync();
+      const permission = await ensureMicPermission();
       if (!permission.granted) {
         setRecordPhase("idle");
-        Alert.alert(
+        promptForSettings(
           "Microphone access needed",
-          "Allow microphone access in Settings to record your lectures.",
+          "Allow microphone access to record your lectures.",
+          permission.canAskAgain,
         );
         return;
       }
@@ -925,6 +929,9 @@ export default function Create() {
           localPath: segment.path,
           format: extensionOf(segment.path, segment.path, "m4a"),
           bytes: fileSizeOf(segment.path),
+          // Carry the destination through the upload so /complete can start the
+          // conversion server-side and the local row mirrors its stages.
+          target: opts.target,
         });
       }
       await completeRecordingSession(db, session.id);
@@ -939,19 +946,11 @@ export default function Create() {
         setRecordMs(0);
       }, 3000);
       if (opts.target) {
-        // The auto-generate preference (Data & AI settings) decides whether a
-        // capture immediately queues summary→cards→quiz. When it is off the
-        // note saves with its chosen kind and generation stays manual on the
-        // note viewer. The generation waits (in the drain) for all segments
-        // to upload, so queueing right away is safe even offline.
-        const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
-        if (autoGenerate) {
-          await enqueueGeneration(
-            db,
-            noteId,
-            jobKindForTarget(opts.target),
-          );
-        }
+        // Choosing "Lecture note" or "Course reference" is a promise: queue the
+        // job even when the auto-generate preference is off (that setting only
+        // governs captures with no explicit choice). The drain waits for every
+        // segment to upload, so queueing while offline is safe.
+        await enqueueGeneration(db, noteId, jobKindForTarget(opts.target));
       }
       runUploadFlush();
     } catch {
@@ -1132,12 +1131,13 @@ export default function Create() {
     if (recordPhase !== "idle" || stopping) return;
     setRecordPhase("starting");
     try {
-      const permission = await AudioModule.requestRecordingPermissionsAsync();
+      const permission = await ensureMicPermission();
       if (!permission.granted) {
         setRecordPhase("idle");
-        Alert.alert(
+        promptForSettings(
           "Microphone access needed",
-          "Allow microphone access in Settings to record your lectures.",
+          "Allow microphone access to resume the recording.",
+          permission.canAskAgain,
         );
         return;
       }
@@ -1180,9 +1180,12 @@ export default function Create() {
       });
       void rememberLastCourse(course.id);
       const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
-      setTypedStatus(queueSummary && autoGenerate ? "queued" : "saved");
+      // An explicit destination always generates; the preference only decides
+      // for a plain save with no chosen output.
+      const shouldGenerate = queueSummary && (Boolean(target) || autoGenerate);
+      setTypedStatus(shouldGenerate ? "queued" : "saved");
       setDirty(false);
-      if (queueSummary && autoGenerate) {
+      if (shouldGenerate) {
         // Local-first: the note's ai_state flips immediately; the drain call
         // self-gates on connectivity and mirrors pipeline stages to this UI.
         await enqueueGeneration(
@@ -1385,6 +1388,10 @@ export default function Create() {
         bytes: input.size,
         target: input.target,
       });
+      // The conversion also starts server-side from /complete, but a local queue
+      // row keeps the stage UI live and makes "retry" possible. POST /jobs reuses
+      // the active server job for this note, so the two never duplicate work.
+      await enqueueGeneration(db, noteId, jobKindForTarget(input.target));
       void rememberLastCourse(course.id);
       refreshUploads();
       runUploadFlush();
@@ -1454,11 +1461,12 @@ export default function Create() {
   const pickImage = async (source: "library" | "camera") => {
     try {
       if (source === "camera") {
-        const permission = await requestCameraPermissionsAsync();
+        const permission = await ensureCameraPermission();
         if (!permission.granted) {
-          Alert.alert(
+          promptForSettings(
             "Camera access needed",
-            "Allow camera access in Settings to photograph the board.",
+            "Allow camera access to photograph the board.",
+            permission.canAskAgain,
           );
           return;
         }

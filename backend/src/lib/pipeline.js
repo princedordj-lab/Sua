@@ -113,7 +113,11 @@ export async function processJob(jobId) {
       note: { include: { course: true, assets: true } },
     },
   });
-  if (!job) throw new Error(`Job ${jobId} not found`);
+  if (!job) {
+    // Deleting a note cascades its jobs away. Nothing to run, and retrying
+    // would only log the same miss three times.
+    return;
+  }
   if (job.state === "done") return;
   if (job.kind === "course_reference") {
     await processReference(job);
@@ -124,6 +128,55 @@ export async function processJob(jobId) {
     return;
   }
   await processStudySet(job);
+}
+
+// A note deleted mid-run surfaces as a missing row (P2025) from any later
+// write. It is not a retryable failure, so the pipeline closes the job quietly.
+class NoteDeletedError extends Error {
+  constructor(noteId) {
+    super("Note was deleted");
+    this.name = "NoteDeletedError";
+    this.noteId = noteId;
+  }
+}
+
+function isNoteGone(error) {
+  return error instanceof NoteDeletedError;
+}
+
+/**
+ * P2025 means "record to update not found" — usually the note, but it could be
+ * an asset. Confirm against the note itself before treating the run as deleted.
+ */
+async function jobTargetDeleted(job, error) {
+  if (isNoteGone(error)) return true;
+  if (error?.code !== "P2025") return false;
+  const note = await withUser(job.user.clerkId, (tx) =>
+    tx.note.findFirst({ where: { id: job.noteId }, select: { id: true } }),
+  ).catch(() => null);
+  return !note;
+}
+
+/** Cheap guard so a deleted note stops costing AI calls at the next stage. */
+async function assertNoteAlive(job) {
+  const note = await withUser(job.user.clerkId, (tx) =>
+    tx.note.findFirst({ where: { id: job.noteId }, select: { id: true } }),
+  );
+  if (!note) throw new NoteDeletedError(job.noteId);
+}
+
+async function closeDeletedJob(job) {
+  await prisma.job
+    .updateMany({
+      where: { id: job.id },
+      data: {
+        state: "failed",
+        stage: "failed",
+        error: "Note was deleted",
+        finishedAt: new Date(),
+      },
+    })
+    .catch(() => {});
 }
 
 async function startAttempt(job) {
@@ -244,6 +297,7 @@ export async function processStudySet(job) {
 
   try {
     // ---- 1. Assemble the raw source text --------------------------------
+    await assertNoteAlive(job);
     await setStage(job, "transcribing");
     const raw = await collectRawSource(job, note);
     if (raw.length < 80) throw new Error(WEAK_SOURCE_ERROR);
@@ -307,12 +361,18 @@ export async function processStudySet(job) {
     await setStage(job, "making_cards");
 
     // ---- 4. Persist outputs (replace), usage, spend alert, notify ---------
+    // Another deletion check: the note may be gone by the time the cards exist.
+    await assertNoteAlive(job);
     await persistStudySet(job, note, studySet);
     await bumpUsage(job.userId, job.kind);
     await checkDailySpend();
     await finishJob(job, sourceHashOf(cleaned));
     await notifyStudent(job, note);
   } catch (error) {
+    if (await jobTargetDeleted(job, error)) {
+      await closeDeletedJob(job);
+      return;
+    }
     const message = error?.message ?? String(error);
     await setFailed(job, message);
     throw error;
@@ -472,6 +532,7 @@ export async function processReference(job) {
   await startAttempt(job);
 
   try {
+    await assertNoteAlive(job);
     await setStage(job, "transcribing");
     const raw = await collectRawSource(job, note);
     if (raw.length < 80) throw new Error(WEAK_SOURCE_ERROR);
@@ -488,6 +549,7 @@ export async function processReference(job) {
       courseContext,
       jobId: job.id,
     });
+    await assertNoteAlive(job);
     await withUser(user.clerkId, (tx) =>
       tx.note.update({ where: { id: note.id }, data: { body: reference } }),
     );
@@ -496,6 +558,10 @@ export async function processReference(job) {
     await finishJob(job, sourceHashOf(cleaned));
     await notifyStudent(job, note);
   } catch (error) {
+    if (await jobTargetDeleted(job, error)) {
+      await closeDeletedJob(job);
+      return;
+    }
     const message = error?.message ?? String(error);
     await setFailed(job, message);
     throw error;
@@ -503,20 +569,18 @@ export async function processReference(job) {
 }
 
 async function setFailed(job, message) {
+  const data = {
+    state: "failed",
+    stage: "failed",
+    error: message.slice(0, 2000),
+    finishedAt: new Date(),
+  };
+  // Two independent writes: a missing job must not hide the note update, and a
+  // deleted note must not throw over the original failure.
+  await prisma.job.updateMany({ where: { id: job.id }, data }).catch(() => {});
   await withUser(job.user.clerkId, (tx) =>
-    tx.$transaction([
-      tx.job.update({
-        where: { id: job.id },
-        data: {
-          state: "failed",
-          stage: "failed",
-          error: message.slice(0, 2000),
-          finishedAt: new Date(),
-        },
-      }),
-      tx.note.update({ where: { id: job.noteId }, data: { aiState: "failed" } }),
-    ]),
-  );
+    tx.note.updateMany({ where: { id: job.noteId }, data: { aiState: "failed" } }),
+  ).catch(() => {});
 }
 
 // 2-minute chunks are the source unit; audio minutes ≈ asset count × 2.
@@ -920,7 +984,14 @@ export async function maybeEnqueueGeneration(clerkId, noteId) {
             row.kind === "audio" ||
             (row.extractedText ?? "").length > 0),
       )
-      .find((row) => !note.jobs.some((job) => job.kind === row.task));
+      // A failed run must not permanently block this destination: the student
+      // is allowed to retry a lecture note that died on a model error.
+      .find(
+        (row) =>
+          !note.jobs.some(
+            (job) => job.kind === row.task && job.state !== "failed",
+          ),
+      );
     if (!asset) return null;
     const created = await tx.job.create({
       data: { userId: note.userId, noteId: note.id, kind: asset.task },

@@ -14,6 +14,7 @@ import {
   updateUploadState,
 } from "./notes";
 import type { UploadQueueItem } from "./notes";
+import { drainGenerationQueue } from "./generate";
 
 // Map accepted extensions to canonical MIME types for Neon signed PUTs.
 const MIME_BY_FORMAT: Record<string, string> = {
@@ -109,6 +110,12 @@ export async function flushUploads(opts: {
     // Connectivity or auth hiccup — rows stay queued for the next trigger.
   } finally {
     flushRunning = false;
+    // A settled upload can unblock a queued conversion (the drain deliberately
+    // waits for it). Fan out fire-and-forget; the drain is serialised per db.
+    void drainGenerationQueue({
+      db: opts.db,
+      getAuthToken: opts.getAuthToken,
+    }).catch(() => {});
   }
 }
 
@@ -152,17 +159,16 @@ async function uploadOne(
     onProgress?.(next);
   };
   try {
-    // The auto-generate preference (Data & AI settings) applies at sign time:
-    // with generation set to manual the upload still carries the note kind
-    // locally, but the server must not auto-start an AI job for it.
-    const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
+    // The destination chosen in the "What should Sua make?" sheet is carried on
+    // the queue row. An explicit choice always converts, whatever the
+    // auto-generate preference says; captures with no target send "none".
     let sign;
     try {
       sign = await uploadsApi.sign(token, {
         kind: item.kind,
         format: item.format,
         noteId: item.noteId,
-        task: autoGenerate ? item.target ?? "none" : "none",
+        task: item.target ?? "none",
         storageProvider: "neon",
       });
     } catch {
@@ -172,7 +178,7 @@ async function uploadOne(
         kind: item.kind,
         format: item.format,
         noteId: item.noteId,
-        task: autoGenerate ? item.target ?? "none" : "none",
+        task: item.target ?? "none",
         storageProvider: "neon",
       });
     }

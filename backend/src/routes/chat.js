@@ -156,7 +156,10 @@ chatRouter.post("/ask", async (req, res) => {
     return res.status(400).json({ error: "question is required (max 2000 chars)" });
   }
 
-  const outcome = await withUser(identity.clerkId, async (tx) => {
+  // Read-only transaction: gather grounding material and history, then hand
+  // them to the model outside the transaction. `withUser` caps a transaction at
+  // 15 s, while a grounded answer can legitimately take two minutes.
+  const prepared = await withUser(identity.clerkId, async (tx) => {
     const user = await ensureUser(tx, identity);
     const course = await tx.course.findFirst({ where: { id: courseId, userId: user.id } });
     if (!course) return { status: 404, error: "Course not found" };
@@ -179,14 +182,33 @@ chatRouter.post("/ask", async (req, res) => {
       orderBy: { createdAt: "desc" },
       take: HISTORY_TURNS,
     });
-    const history = recent.reverse();
+    return {
+      status: 200,
+      course,
+      built,
+      history: recent.reverse(),
+    };
+  });
 
-    const answer = await openRouterChat({
-      system: systemPrompt(course),
-      user: buildUserTurn(question, quickAction, built.context, history),
-      model: strongModel(),
-      maxTokens: ANSWER_MAX_TOKENS,
+  if (prepared.error) return res.status(prepared.status).json({ error: prepared.error });
+
+  const answer = await openRouterChat({
+    system: systemPrompt(prepared.course),
+    user: buildUserTurn(question, quickAction, prepared.built.context, prepared.history),
+    model: strongModel(),
+    maxTokens: ANSWER_MAX_TOKENS,
+  });
+
+  // Short write transaction: the student's turn is only persisted once there is
+  // an answer to show, which is why the client keeps the optimistic bubble.
+  const outcome = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    const course = await tx.course.findFirst({
+      where: { id: prepared.course.id, userId: user.id },
+      select: { id: true },
     });
+    // The course may have been deleted while the model was thinking.
+    if (!course) return { status: 404, error: "Course not found" };
 
     const userMessage = await tx.chatMessage.create({
       data: { userId: user.id, courseId: course.id, role: "user", content: question },
@@ -197,14 +219,14 @@ chatRouter.post("/ask", async (req, res) => {
         courseId: course.id,
         role: "assistant",
         content: answer.text,
-        sourceNoteIds: built.sources.map((source) => source.id),
+        sourceNoteIds: prepared.built.sources.map((source) => source.id),
       },
     });
     await touchAssistantUsage(tx, user);
     return {
       user: shapeMessage(userMessage),
       assistant: shapeMessage(assistantMessage),
-      sources: built.sources,
+      sources: prepared.built.sources,
       model: answer.model,
     };
   });
