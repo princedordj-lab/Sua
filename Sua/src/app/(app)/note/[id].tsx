@@ -548,10 +548,7 @@ export default function NoteView() {
                   }
                   accessibilityRole="button"
                   accessibilityLabel="Open this note's deck"
-                  // NativeWind #1711/#1712: a className that toggles (shadow-card
-                  // + active:opacity here) on a Pressable crashes the navigation
-                  // tree on RN 0.86 — the class set stays static; `disabled`
-                  // already gates interaction.
+                  // Class set is static; `disabled` already gates interaction.
                   className="flex-1 rounded-card bg-surface p-card shadow-card active:opacity-80"
                 >
                   <Text className="text-caption font-sans-extrabold text-ink-soft">

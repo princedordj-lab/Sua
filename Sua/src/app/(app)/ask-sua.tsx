@@ -324,10 +324,12 @@ export default function AskSua() {
 
   return (
     <SafeAreaView className="flex-1 bg-cream" edges={["top", "left", "right"]}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-        className="flex-1"
-      >
+      {/* Android needs an explicit behavior too: with edge-to-edge (default since
+          SDK 54) the window no longer resizes for the keyboard, so the composer
+          would stay pinned behind it. `padding` lifts the input row just above
+          the keyboard on both platforms; the SafeAreaView excludes the bottom
+          edge, so the measured overlap equals the real keyboard height. */}
+      <KeyboardAvoidingView behavior="padding" className="flex-1">
         {/* Header */}
         <View className="flex-row items-center gap-2 px-5 pt-2">
           <Pressable
@@ -465,13 +467,14 @@ export default function AskSua() {
             </Pressable>
           </View>
           </View>
-          {/* Toggling shadow or bg classes on a Pressable's className crashes
-              NativeWind's interop on RN 0.86 (nativewind#1711, #1712) with a
-              bogus "Couldn't find a navigation context" — the dynamic classes
-              live on the wrapper View, the Pressable stays static. */}
+          {/* Never add or remove --tw-* utilities after first render. NativeWind's
+              dev-only upgrade warning deep-walks props, trips React Navigation's
+              throwing context getters, and redboxes as "Couldn't find a
+              navigation context" (nativewind#1812). Keep the background and shadow
+              variables static; only the plain opacity value toggles. */}
           <View
-            className={`h-12 w-12 items-center justify-center rounded-full ${
-              canSend ? "bg-gold shadow-gold" : "bg-gold/60"
+            className={`h-12 w-12 items-center justify-center rounded-full bg-gold shadow-gold ${
+              canSend ? "opacity-100" : "opacity-60"
             }`}
           >
             <Pressable

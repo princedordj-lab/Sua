@@ -60,6 +60,7 @@ There is **no test suite**. Verification is `npx tsc --noEmit` + `npx expo lint`
 ## Mobile conventions
 
 - Styling: NativeWind `className` only; the `style` prop is allowed **only** on `SafeAreaView`. Colors are CSS variables declared in `Sua/tailwind.config.js` and remapped for dark mode by `Sua/src/state/appearance.tsx`; use `colors` from `Sua/src/config/theme.ts` for icon/style values instead of hex literals. Gold is fill-only (never text), one gold button per screen, 48px minimum tap targets.
+- Never add or remove `--tw-*` utilities (`shadow-*`, `ring-*`, transform, gradient, `vars()`) after an element's first render: NativeWind's dev-only upgrade warning crashes with a bogus "Couldn't find a navigation context" (nativewind#1812). Keep those utilities static and toggle plain values such as `opacity-*`. Note `bg-gold/60` omits `--tw-bg-opacity` while `bg-gold` sets it, so alpha/non-alpha toggles on one element are unsafe too.
 - Routes live in `Sua/src/app`; shared components/hooks/libs stay outside it. `@/*` maps to `Sua/src/*`.
 - SQLite migrations are the `MIGRATIONS` array in `Sua/src/lib/notes.ts`, tracked by `PRAGMA user_version`. Append a step; every step must be idempotent because fresh installs replay all of them and a throw retries on next launch.
 - Sync: the client pushes `updatedAt`; the server rejects stale writes; pulls use pending-safe upserts so a locally pending note is never clobbered. Drain order is notes **then** uploads (uploads may reference an unsynced note), and the persisted Wi-Fi-only toggle must be respected.

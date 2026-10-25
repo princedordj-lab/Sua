@@ -165,9 +165,8 @@ export default function Review() {
         <View className="h-10 w-10" />
       </View>
 
-      {/* NativeWind #1711/#1712: className toggles on a Pressable crash the
-          navigation tree on RN 0.86 — the card visuals (incl. the bg toggle)
-          stay on the View, the Pressable is a static hit-area overlay. */}
+      {/* The card visuals (incl. the bg toggle) stay on the wrapper View; the
+          Pressable is a static hit-area overlay. */}
       <View
         className={`mx-5 mt-3 flex-1 flex-col items-center justify-center rounded-card p-card-lg shadow-card ${
           flipped ? "bg-success-soft" : "bg-surface"

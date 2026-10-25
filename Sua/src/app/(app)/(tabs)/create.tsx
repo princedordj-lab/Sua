@@ -346,7 +346,8 @@ function SegmentedControl({
               selected ? "bg-brand-strong" : ""
             } ${disabled ? "opacity-60" : ""}`}
           >
-            {/* NativeWind #1711/#1712: conditional classes stay off the Pressable. */}
+            {/* Visual state lives on the wrapper so the pressable's class set
+                stays static; only plain value utilities toggle after mount. */}
             <Pressable
               onPress={() => {
                 if (!disabled) onChange(key);
@@ -390,8 +391,8 @@ function CourseSelect({
         disabled ? "opacity-60" : ""
       }`}
     >
-      {/* NativeWind #1711/#1712: the disabled dim lives on the wrapper View
-          so the Pressable's class set never changes. */}
+      {/* The disabled dim lives on the wrapper View so the Pressable's class
+          set never changes. */}
       <Pressable
         onPress={() => {
           if (!disabled) onPress();
@@ -1595,8 +1596,8 @@ export default function Create() {
                     }}
                     className="active:opacity-90"
                   >
-                    {/* NativeWind #1711/#1712: keep conditional classes off the
-                        Pressable — the dim state lives on the inner circle. */}
+                    {/* The dim state lives on the inner circle, keeping the
+                        pressable's class set static. */}
                     <View
                       className={`h-44 w-44 items-center justify-center rounded-full ${
                         recordPhase === "starting" || stopping || limitReached
@@ -2156,9 +2157,8 @@ export default function Create() {
                 ) : null}
 
                 <View className="mt-4 flex-row gap-3">
-                  {/* NativeWind #1711/#1712: conditional classes on Pressable crash
-                      the navigation tree on RN 0.86 — the disabled dim (opacity-45)
-                      lives on the wrapper View, the Pressable class set is static. */}
+                  {/* The disabled dim (opacity-45) lives on the wrapper View so
+                      the Pressable's class set is static. */}
                   <View className={`flex-1 ${canSave ? "" : "opacity-45"}`}>
                     <Pressable
                       onPress={() => persistNote(false)}
@@ -2354,8 +2354,8 @@ export default function Create() {
               className="min-h-24 rounded-input border border-line bg-surface p-3 text-body leading-6 text-ink"
               accessibilityLabel="Report comment"
             />
-            {/* NativeWind #1711/#1712: the busy dim lives on the wrapper View so
-                the Pressable's class set never changes. */}
+            {/* The busy dim lives on the wrapper View so the Pressable's class
+                set stays static. */}
             <View
               className={`min-h-12 self-stretch ${
                 !reportComment.trim() || reportSending ? "opacity-50" : ""
