@@ -280,6 +280,8 @@ model Usage {
   month            String
   summaries        Int      @default(0)
   studySets        Int      @default(0)
+  // Course-reference sheets are their own AI product, so they count separately.
+  references       Int      @default(0)
   assistantQueries Int      @default(0)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt

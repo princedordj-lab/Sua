@@ -1361,6 +1361,45 @@ export async function listGenerationQueue(db: SQLiteDatabase) {
   return rows.map(rowToGeneration);
 }
 
+/**
+ * The destination the student last asked for on this note. Retries reuse it so
+ * a failed lecture-note run is retried as a lecture note, not a plain summary.
+ */
+export async function getLastGenerationKind(
+  db: SQLiteDatabase,
+  noteId: string,
+): Promise<GenerationKind | null> {
+  const row = await db.getFirstAsync<{ kind: string | null }>(
+    "SELECT kind FROM generation_queue WHERE note_id = ? ORDER BY id DESC LIMIT 1",
+    noteId,
+  );
+  if (!row?.kind) return null;
+  return row.kind === "lecture_note" || row.kind === "course_reference"
+    ? row.kind
+    : "study_set";
+}
+
+/**
+ * Notes whose AI run finished on the server but whose study set never reached
+ * this device. Upload-triggered conversions have no local queue row, so this
+ * is how their cards and quiz get cached locally.
+ */
+export async function listNotesMissingStudySet(
+  db: SQLiteDatabase,
+  limit = 5,
+): Promise<{ id: string }[]> {
+  return db.getAllAsync<{ id: string }>(
+    `SELECT n.id AS id FROM notes n
+     WHERE n.note_kind != 'reference'
+       AND n.ai_state = 'ready'
+       AND NOT EXISTS (SELECT 1 FROM flashcards f WHERE f.note_id = n.id)
+       AND NOT EXISTS (SELECT 1 FROM quizzes q WHERE q.note_id = n.id)
+     ORDER BY n.updated_at DESC
+     LIMIT ?`,
+    limit,
+  );
+}
+
 export async function updateGeneration(
   db: SQLiteDatabase,
   id: number,

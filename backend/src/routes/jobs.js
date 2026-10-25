@@ -10,7 +10,7 @@ export const jobsRouter = Router();
 
 const ACTIVE_STATES = ["queued", "running"];
 // Mirrors the pipeline's dispatcher (processJob) — anything else is a 400.
-const KINDS = new Set(["study_set", "course_reference"]);
+const KINDS = new Set(["study_set", "lecture_note", "course_reference"]);
 // What the client reads to drive status UI.
 function shapeJob(job) {
   return {
@@ -56,6 +56,14 @@ jobsRouter.post("/", async (req, res) => {
       include: { course: { select: { id: true } } },
     });
     if (!note) return { status: 404, error: "Note not found" };
+    // A reference page must never be overwritten by a study set. Turning a
+    // normal note into a reference is allowed (it is an explicit destination).
+    if (note.noteKind === "reference" && kind !== "course_reference") {
+      return {
+        status: 409,
+        error: "This note is a course reference; only the reference can be regenerated.",
+      };
+    }
     const active = await tx.job.findFirst({
       where: { noteId: note.id, state: { in: ACTIVE_STATES } },
     });
@@ -64,6 +72,15 @@ jobsRouter.post("/", async (req, res) => {
     if (active) return { existing: active };
     const created = await tx.job.create({
       data: { userId: user.id, noteId: note.id, kind },
+    });
+    // Mirror the destination immediately; the pipeline re-asserts it when the
+    // attempt starts and on finish.
+    await tx.note.update({
+      where: { id: note.id },
+      data: {
+        aiState: "queued",
+        noteKind: kind === "course_reference" ? "reference" : "note",
+      },
     });
     return { job: created };
   });

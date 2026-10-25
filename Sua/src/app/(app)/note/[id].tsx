@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Pressable,
@@ -38,16 +38,23 @@ import {
   countPendingUploads,
   deleteNote,
   enqueueGeneration,
+  getLastGenerationKind,
   getNote,
   listFlashcards,
   listQuizzes,
   pullCourseNotes,
   type Note,
 } from "../../../lib/notes";
-import { drainGenerationQueue } from "../../../lib/generate";
+import {
+  drainGenerationQueue,
+  generationKindFor,
+  reconcileAiOutputs,
+  refreshNoteFromServer,
+} from "../../../lib/generate";
 import { colors } from "../../../config/theme";
 import { usePalette } from "../../../state/appearance";
 import { useApp } from "../../../state/AppContext";
+import type { GenerationKind } from "../../../lib/types";
 
 const AI_ACTIVE_STATES = [
   "queued",
@@ -88,6 +95,8 @@ export default function NoteView() {
   const [flashcardCount, setFlashcardCount] = useState(0);
   const [quizCount, setQuizCount] = useState(0);
   const [quizId, setQuizId] = useState<string | null>(null);
+  const [lastGenerationKind, setLastGenerationKind] =
+    useState<GenerationKind | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
@@ -114,18 +123,21 @@ export default function NoteView() {
         setFlashcardCount(0);
         setQuizCount(0);
         setQuizId(null);
+        setLastGenerationKind(null);
         return;
       }
-      const [pending, cards, quizzes] = await Promise.all([
+      const [pending, cards, quizzes, lastKind] = await Promise.all([
         countPendingUploads(db, row.id),
         listFlashcards(db, row.id).catch(() => []),
         listQuizzes(db, row.id).catch(() => []),
+        getLastGenerationKind(db, row.id).catch(() => null),
       ]);
       if (!screenActiveRef.current) return;
       setPendingUploads(pending);
       setFlashcardCount(cards.length);
       setQuizCount(quizzes.length);
       setQuizId(quizzes[0]?.id ?? null);
+      setLastGenerationKind(lastKind);
     } catch {
       setMissing(true);
     }
@@ -141,8 +153,32 @@ export default function NoteView() {
     }, [load]),
   );
 
-  const generationKind: "study_set" | "course_reference" =
-    note?.noteKind === "reference" ? "course_reference" : "study_set";
+  // Retries reuse the destination the student originally chose; a reference
+  // always regenerates as a reference. See generationKindFor().
+  const generationKind = generationKindFor(note, lastGenerationKind);
+
+  // The empty-state call to action follows the destination this note is for.
+  const emptyStateCopy = useMemo(() => {
+    if (generationKind === "course_reference") {
+      return {
+        title: "Make a course reference from this?",
+        body: "A condensed reference sheet with key terms and key facts — no flashcards or quiz.",
+        cta: "Make reference",
+      };
+    }
+    if (generationKind === "lecture_note") {
+      return {
+        title: "Turn this capture into a lecture note?",
+        body: "Sua writes a full note, then adds a summary, flashcards and a quiz.",
+        cta: "Write note",
+      };
+    }
+    return {
+      title: "Turn this note into a study set?",
+      body: "A summary with flashcards and a quiz, in one tap.",
+      cta: "Generate",
+    };
+  }, [generationKind]);
 
   const queueGeneration = async () => {
     if (retryingRef.current) return;
@@ -179,15 +215,38 @@ export default function NoteView() {
     }
   }, [db, getAuthToken, load, note?.courseId]);
 
-  // Mirror pipeline stages live while a generation is in flight.
+  // Mirror pipeline stages live while a generation is in flight. Upload
+  // conversions have no local queue row, so the server job is the source.
   useEffect(() => {
     if (!aiActive) return;
     const timer = setInterval(() => {
-      void load();
+      void refreshNoteFromServer({ db, getAuthToken }, id)
+        .catch(() => {})
+        .finally(() => {
+          if (screenActiveRef.current) void load();
+        });
       void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
     }, 5000);
     return () => clearInterval(timer);
-  }, [aiActive, db, getAuthToken, load]);
+  }, [aiActive, db, getAuthToken, id, load]);
+
+  // Upload conversions run server-side and finish without a local queue row.
+  // When a ready note has no cards cached, pull them once per visit.
+  const reconciledRef = useRef(false);
+  useEffect(() => {
+    if (!note || note.noteKind === "reference") return;
+    if (note.aiState !== "ready" || flashcardCount > 0 || quizCount > 0) return;
+    if (reconciledRef.current) return;
+    reconciledRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      await reconcileAiOutputs({ db, getAuthToken }).catch(() => {});
+      if (!cancelled) await load();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [db, flashcardCount, getAuthToken, load, note, quizCount]);
 
   const confirmDelete = () => {
     Alert.alert(
@@ -319,7 +378,9 @@ export default function NoteView() {
                 <View className="flex-row items-center gap-2">
                   <AlertTriangle size={18} color={colors.warning} />
                   <Text className="text-body-lg font-sans-extrabold text-ink">
-                    Couldn’t finish the summary
+                    {reference
+                      ? "Couldn’t finish the reference"
+                      : "Couldn’t finish the summary"}
                   </Text>
                 </View>
                 <Text className="mt-1 text-small leading-5 text-ink-soft">
@@ -457,20 +518,20 @@ export default function NoteView() {
                 ) : !aiActive && note.aiState === "none" && !note.summary ? (
                   <View className="mt-4 rounded-card bg-surface p-card shadow-card">
                     <Text className="text-body font-sans-bold text-ink">
-                      Turn this note into a study set?
+                      {emptyStateCopy.title}
                     </Text>
                     <Text className="mt-1 text-small leading-5 text-ink-soft">
-                      A summary with flashcards and a quiz, in one tap.
+                      {emptyStateCopy.body}
                     </Text>
                     <Pressable
                       onPress={() => void queueGeneration()}
                       accessibilityRole="button"
-                      accessibilityLabel="Generate the study set"
+                      accessibilityLabel={`Generate ${generationKind === "course_reference" ? "a course reference" : generationKind === "lecture_note" ? "a lecture note" : "a study set"}`}
                       className="mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand-strong px-4 active:opacity-80"
                     >
                       <Sparkles size={15} color={colors.ink.inverse} />
                       <Text className="text-label font-sans-bold text-ink-inverse">
-                        Generate
+                        {emptyStateCopy.cta}
                       </Text>
                     </Pressable>
                   </View>
@@ -478,44 +539,46 @@ export default function NoteView() {
               </>
             )}
 
-            <View className="mt-4 flex-row gap-3">
-              <Pressable
-                disabled={flashcardCount === 0}
-                onPress={() =>
-                  router.push({ pathname: "/deck/[id]", params: { id: String(id) } })
-                }
-                accessibilityRole="button"
-                accessibilityLabel="Open this note's deck"
-                // NativeWind #1711/#1712: a className that toggles (shadow-card
-                // + active:opacity here) on a Pressable crashes the navigation
-                // tree on RN 0.86 — the class set stays static; `disabled`
-                // already gates interaction.
-                className="flex-1 rounded-card bg-surface p-card shadow-card active:opacity-80"
-              >
-                <Text className="text-caption font-sans-extrabold text-ink-soft">
-                  FLASHCARDS
-                </Text>
-                <Text className="mt-1 text-body-lg font-sans-extrabold text-ink">
-                  {flashcardCount}
-                </Text>
-              </Pressable>
-              <Pressable
-                disabled={quizCount === 0}
-                onPress={() =>
-                  router.push({ pathname: "/quiz/[id]", params: { id: quizId ?? "" } })
-                }
-                accessibilityRole="button"
-                accessibilityLabel="Open this note's quiz"
-                className="flex-1 rounded-card bg-surface p-card shadow-card"
-              >
-                <Text className="text-caption font-sans-extrabold text-ink-soft">
-                  QUIZ
-                </Text>
-                <Text className="mt-1 text-body-lg font-sans-extrabold text-ink">
-                  {quizCount}
-                </Text>
-              </Pressable>
-            </View>
+            {reference ? null : (
+              <View className="mt-4 flex-row gap-3">
+                <Pressable
+                  disabled={flashcardCount === 0}
+                  onPress={() =>
+                    router.push({ pathname: "/deck/[id]", params: { id: String(id) } })
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel="Open this note's deck"
+                  // NativeWind #1711/#1712: a className that toggles (shadow-card
+                  // + active:opacity here) on a Pressable crashes the navigation
+                  // tree on RN 0.86 — the class set stays static; `disabled`
+                  // already gates interaction.
+                  className="flex-1 rounded-card bg-surface p-card shadow-card active:opacity-80"
+                >
+                  <Text className="text-caption font-sans-extrabold text-ink-soft">
+                    FLASHCARDS
+                  </Text>
+                  <Text className="mt-1 text-body-lg font-sans-extrabold text-ink">
+                    {flashcardCount}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  disabled={quizCount === 0}
+                  onPress={() =>
+                    router.push({ pathname: "/quiz/[id]", params: { id: quizId ?? "" } })
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel="Open this note's quiz"
+                  className="flex-1 rounded-card bg-surface p-card shadow-card"
+                >
+                  <Text className="text-caption font-sans-extrabold text-ink-soft">
+                    QUIZ
+                  </Text>
+                  <Text className="mt-1 text-body-lg font-sans-extrabold text-ink">
+                    {quizCount}
+                  </Text>
+                </Pressable>
+              </View>
+            )}
 
             {note.transcript ? (
               <Pressable

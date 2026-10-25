@@ -37,6 +37,7 @@ const MIME_BY_FORMAT = {
 export const FREE_MONTHLY_LIMITS = {
   summaries: Number(process.env.FREE_MONTHLY_SUMMARIES ?? 10),
   studySets: Number(process.env.FREE_MONTHLY_SETS ?? 10),
+  references: Number(process.env.FREE_MONTHLY_REFERENCES ?? 20),
 };
 
 const USD_TO_GHS = Number(process.env.USD_TO_GHS_RATE ?? 15);
@@ -130,6 +131,15 @@ async function startAttempt(job) {
     where: { id: job.id },
     data: { startedAt: new Date(), attempts: { increment: 1 } },
   });
+  // The pipeline, not the device, owns what kind of page a note is. A rerun
+  // after a client-side mismatch therefore self-corrects on the next attempt.
+  const noteKind = job.kind === "course_reference" ? "reference" : "note";
+  await withUser(job.user.clerkId, (tx) =>
+    tx.note.update({ where: { id: job.noteId }, data: { noteKind } }),
+  ).catch((error) => {
+    // A deleted note must fail the job via its own path, not here.
+    console.warn(`noteKind update failed for note ${job.noteId}: ${error?.message ?? error}`);
+  });
 }
 
 function courseContextOf(note) {
@@ -209,9 +219,17 @@ async function persistTranscript(user, note, raw) {
 }
 
 async function guardRerun(job, hash) {
-  // Caching: an identical source reuses existing outputs.
+  // Caching: an identical source for the same destination reuses existing
+  // outputs. The kind is part of the identity — a study_set run must never
+  // make a later lecture_note run skip writing the note body.
   const priorDone = await prisma.job.findFirst({
-    where: { noteId: job.noteId, state: "done", sourceHash: hash, id: { not: job.id } },
+    where: {
+      noteId: job.noteId,
+      kind: job.kind,
+      state: "done",
+      sourceHash: hash,
+      id: { not: job.id },
+    },
   });
   if (priorDone) {
     await finishJob(job, hash);
@@ -290,7 +308,7 @@ export async function processStudySet(job) {
 
     // ---- 4. Persist outputs (replace), usage, spend alert, notify ---------
     await persistStudySet(job, note, studySet);
-    await bumpUsage(job.userId);
+    await bumpUsage(job.userId, job.kind);
     await checkDailySpend();
     await finishJob(job, sourceHashOf(cleaned));
     await notifyStudent(job, note);
@@ -473,7 +491,7 @@ export async function processReference(job) {
     await withUser(user.clerkId, (tx) =>
       tx.note.update({ where: { id: note.id }, data: { body: reference } }),
     );
-    await bumpUsage(job.userId);
+    await bumpUsage(job.userId, job.kind);
     await checkDailySpend();
     await finishJob(job, sourceHashOf(cleaned));
     await notifyStudent(job, note);
@@ -621,7 +639,7 @@ export function validateStudySet(set) {
   return null;
 }
 
-async function generateStudySet({ cleaned, courseContext, durationMinutes, jobId, reduceNote }) {
+export async function generateStudySet({ cleaned, courseContext, durationMinutes, jobId, reduceNote }) {
   const prompt = studySetPrompt({ courseContext, durationMinutes, reduceNote });
   const attempt = async (stricter) => {
     const result = await openRouterChat({
@@ -737,7 +755,7 @@ const LECTURE_SYSTEM =
   "study tool, not the student's lecturer; students verify important facts against " +
   "their textbook.";
 
-async function generateLectureNote({ cleaned, courseContext, jobId }) {
+export async function generateLectureNote({ cleaned, courseContext, jobId }) {
   const parts = splitSections(cleaned, { sectionLimit: NOTE_PART_CHARS });
   const bodyIntro =
     `Course context: ${courseContext}. Write the material into a complete,` +
@@ -750,9 +768,16 @@ async function generateLectureNote({ cleaned, courseContext, jobId }) {
 
   const generated = [];
   for (const [index, part] of parts.entries()) {
+    // Long lectures are written part by part; feed the tail of the previous
+    // part so the model continues the same structure instead of restarting it.
+    const tail =
+      generated.length > 0
+        ? generated[generated.length - 1].slice(-900).trim()
+        : "";
     const partHeader =
       parts.length > 1
-        ? `This is part ${index + 1}/${parts.length} of one long material. Continue the note seamlessly from the previous parts — keep the markdown heading structure coherent, do not repeat headings.`
+        ? `This is part ${index + 1}/${parts.length} of one long material. Continue the note seamlessly from the previous parts — keep the markdown heading structure coherent, do not repeat headings.` +
+          (tail ? `\nThe previous part ended with:\n"""\n${tail}\n"""\nContinue from there.` : "")
         : "";
     const result = await openRouterChat({
       system: LECTURE_SYSTEM,
@@ -769,6 +794,11 @@ async function generateLectureNote({ cleaned, courseContext, jobId }) {
   if (body.length < NOTE_MIN_CHARS) {
     throw new Error(
       "Generated lecture note was too short. Tap Try again.",
+    );
+  }
+  if (!/^##\s/m.test(body)) {
+    throw new Error(
+      "Generated lecture note had no sections. Tap Try again.",
     );
   }
   return body.slice(0, NOTE_BODY_MAX_CHARS);
@@ -801,10 +831,10 @@ function referenceToMarkdown(reference) {
   return lines.join("\n");
 }
 
-function validateReference(reference) {
+function validateReference(reference, minTerms = 3) {
   if (!reference || !char(reference.overview)) return "missing overview";
   const keyTerms = reference.keyTerms ?? [];
-  if (keyTerms.length < 3) return "too few key terms";
+  if (keyTerms.length < minTerms) return "too few key terms";
   for (const term of keyTerms) {
     if (!char(term?.term) || !char(term?.definition)) return "malformed key term";
   }
@@ -813,7 +843,10 @@ function validateReference(reference) {
   return null;
 }
 
-async function generateReference({ cleaned, courseContext, jobId }) {
+export async function generateReference({ cleaned, courseContext, jobId }) {
+  // A single photographed slide rarely carries three distinct terms; keep the
+  // bar high for real lecture material and low for short sources.
+  const minTerms = cleaned.length < 2000 ? 1 : 3;
   const prompt =
     `Course context: ${courseContext}\nFrom the lecture material below, produce a compact ` +
     "course reference sheet as a single JSON object:\n" +
@@ -836,7 +869,7 @@ async function generateReference({ cleaned, courseContext, jobId }) {
     });
     await recordAiCall(jobId, stricter ? "generate_reference_retry" : "generate_reference", result);
     const reference = parseStudySetJson(result.text);
-    const problem = validateReference(reference);
+    const problem = validateReference(reference, minTerms);
     return { reference, problem };
   };
 
@@ -869,26 +902,25 @@ export async function maybeEnqueueGeneration(clerkId, noteId) {
       include: { jobs: true, assets: true },
     });
     if (!note) return null;
-    // One conversion per upload: any non-study_set job, or an active one,
-    // means the request is already accounted for.
-    if (
-      note.jobs.some(
-        (row) =>
-          row.kind !== "study_set" ||
-          row.state === "queued" ||
-          row.state === "running",
-      )
-    ) {
-      return null;
-    }
+    // One conversion per requested destination: dedupe on active work and on
+    // a job that already produced this kind for the note. A completed
+    // study_set must not block a later lecture_note or reference conversion.
+    const active = note.jobs.some(
+      (row) => row.state === "queued" || row.state === "running",
+    );
+    if (active) return null;
     // Images and audio start with no extracted text (OCR/transcription happens
     // inside the job), so their conversions trigger immediately; documents wait for extraction.
-    const asset = note.assets.find(
-      (row) =>
-        row.status === "active" &&
-        row.task !== "none" &&
-        (row.kind === "image" || row.kind === "audio" || (row.extractedText ?? "").length > 0),
-    );
+    const asset = note.assets
+      .filter(
+        (row) =>
+          row.status === "active" &&
+          (row.task === "lecture_note" || row.task === "course_reference") &&
+          (row.kind === "image" ||
+            row.kind === "audio" ||
+            (row.extractedText ?? "").length > 0),
+      )
+      .find((row) => !note.jobs.some((job) => job.kind === row.task));
     if (!asset) return null;
     const created = await tx.job.create({
       data: { userId: note.userId, noteId: note.id, kind: asset.task },
@@ -914,8 +946,16 @@ export async function maybeEnqueueGeneration(clerkId, noteId) {
 // Usage, cost, notifications
 // ---------------------------------------------------------------------------
 
-async function bumpUsage(userId) {
+async function bumpUsage(userId, kind = "study_set") {
   const month = monthKey();
+  if (kind === "course_reference") {
+    await prisma.usage.upsert({
+      where: { userId_month: { userId, month } },
+      update: { references: { increment: 1 } },
+      create: { userId, month, references: 1 },
+    });
+    return;
+  }
   await prisma.usage.upsert({
     where: { userId_month: { userId, month } },
     update: { summaries: { increment: 1 }, studySets: { increment: 1 } },
@@ -1003,6 +1043,9 @@ export async function warnIfOverCaps(userId) {
   }
   if (usage.studySets > FREE_MONTHLY_LIMITS.studySets) {
     return `Free plan: ${usage.studySets} study sets this month (limit ${FREE_MONTHLY_LIMITS.studySets})`;
+  }
+  if (usage.references > FREE_MONTHLY_LIMITS.references) {
+    return `Free plan: ${usage.references} course references this month (limit ${FREE_MONTHLY_LIMITS.references})`;
   }
   return null;
 }

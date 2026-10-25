@@ -82,6 +82,7 @@ import {
   finalizeSegment,
   getNote,
   getSetting,
+  getLastGenerationKind,
   listInProgressRecordings,
   listSessionSegments,
   listUploadQueue,
@@ -95,6 +96,7 @@ import {
 } from "../../../lib/notes";
 import type {
   AiState,
+  GenerationKind,
   Note,
   NoteKind,
   RecordingSegment,
@@ -103,7 +105,7 @@ import type {
   UploadQueueItem,
   UploadTarget,
 } from "../../../lib/notes";
-import { drainGenerationQueue } from "../../../lib/generate";
+import { drainGenerationQueue, generationKindFor } from "../../../lib/generate";
 import { jobsApi } from "../../../lib/api";
 import { flushUploads } from "../../../lib/uploads";
 import { useApp } from "../../../state/AppContext";
@@ -119,6 +121,16 @@ const RECORDING_LIMIT_MS = 60 * 60 * 1000;
 const SEGMENT_MS = 2 * 60 * 1000;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const AUTOSAVE_DELAY_MS = 1500;
+
+// The two destinations the student picks map to three server job kinds.
+// "Lecture note" always requests a real AI-written note (not just a summary).
+function jobKindForTarget(target: UploadTarget): GenerationKind {
+  return target === "course_reference" ? "course_reference" : "lecture_note";
+}
+
+function noteKindForTarget(target: UploadTarget): NoteKind {
+  return target === "course_reference" ? "reference" : "note";
+}
 
 // Third-party native component without NativeWind support: typography flows
 // through StyleSheet with theme tokens, matching the renderer's size classes.
@@ -475,7 +487,12 @@ export default function Create() {
   // AI pipeline state for the loaded note; server-owned fields mirrored into SQLite.
   const [aiState, setAiState] = useState<AiState>("none");
   const [summaryMarkdown, setSummaryMarkdown] = useState<string | null>(null);
-  const [openedNoteKind, setOpenedNoteKind] = useState<NoteKind>("note");  const [reportOpen, setReportOpen] = useState(false);
+  const [openedNoteKind, setOpenedNoteKind] = useState<NoteKind>("note");
+  // Destination of the last AI request for this note, so retries and failure
+  // copy match what was asked for (a lecture note is not just a summary).
+  const [lastRequestedKind, setLastRequestedKind] =
+    useState<GenerationKind | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
   const [reportComment, setReportComment] = useState("");
   const [reportSending, setReportSending] = useState(false);
   const [reported, setReported] = useState(false);
@@ -898,7 +915,7 @@ export default function Create() {
         body: "",
         sourceType: "audio",
         sourceRef: session.id,
-        noteKind: opts.target === "course_reference" ? "reference" : undefined,
+        noteKind: opts.target ? noteKindForTarget(opts.target) : undefined,
       });
       for (const segment of segments) {
         await enqueueUpload(db, {
@@ -931,7 +948,7 @@ export default function Create() {
           await enqueueGeneration(
             db,
             noteId,
-            opts.target === "course_reference" ? "course_reference" : "study_set",
+            jobKindForTarget(opts.target),
           );
         }
       }
@@ -1091,7 +1108,8 @@ export default function Create() {
       refreshRecoveries();
       const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
       if (autoGenerate) {
-        await enqueueGeneration(db, noteId, "study_set");
+        // A recovered lecture becomes a full lecture note, like a normal take.
+        await enqueueGeneration(db, noteId, "lecture_note");
       }
       runUploadFlush();
     } catch {
@@ -1157,7 +1175,7 @@ export default function Create() {
         title: title.trim() || "Untitled note",
         body,
         sourceType: noteSourceType ?? "typed",
-        noteKind: target === "course_reference" ? "reference" : undefined,
+        noteKind: target ? noteKindForTarget(target) : undefined,
       });
       void rememberLastCourse(course.id);
       const autoGenerate = (await getSetting(db, "auto_generate")) !== "0";
@@ -1169,7 +1187,7 @@ export default function Create() {
         await enqueueGeneration(
           db,
           typedNoteId,
-          target === "course_reference" ? "course_reference" : "study_set",
+          target ? jobKindForTarget(target) : "study_set",
         );
         setAiState("queued");
         void drainGenerationQueue({
@@ -1194,6 +1212,9 @@ export default function Create() {
     setAiState(note.aiState);
     setSummaryMarkdown(note.summary);
     setOpenedNoteKind(note.noteKind);
+    setLastRequestedKind(
+      await getLastGenerationKind(db, note.id).catch(() => null),
+    );
     if (note.aiState === "failed") {
       const generation = await db
         .getFirstAsync<{ error: string }>(
@@ -1353,7 +1374,7 @@ export default function Create() {
         title: input.name.replace(/\.[^.]+$/, "").trim() || "Untitled file",
         body: "",
         sourceType: input.kind === "audio" ? "audio" : "file",
-        noteKind: input.target === "course_reference" ? "reference" : "note",
+        noteKind: noteKindForTarget(input.target),
       });
       await enqueueUpload(db, {
         noteId,
@@ -2043,7 +2064,11 @@ export default function Create() {
                     <View className="flex-row items-center gap-2">
                       <AlertTriangle size={18} color={colors.warning} />
                       <Text className="text-body-lg font-sans-extrabold text-ink">
-                        Couldn’t finish the summary
+                        {lastRequestedKind === "lecture_note"
+                          ? "Couldn’t finish the lecture note"
+                          : openedNoteKind === "reference"
+                            ? "Couldn’t finish the reference"
+                            : "Couldn’t finish the summary"}
                       </Text>
                     </View>
                     <Text className="mt-1 text-small leading-5 text-ink-soft">
@@ -2054,7 +2079,18 @@ export default function Create() {
                       <Pressable
                         onPress={() => {
                           void (async () => {
-                            await enqueueGeneration(db, typedNoteId);
+                            const note = await getNote(db, typedNoteId).catch(
+                              () => null,
+                            );
+                            const lastKind = await getLastGenerationKind(
+                              db,
+                              typedNoteId,
+                            ).catch(() => null);
+                            await enqueueGeneration(
+                              db,
+                              typedNoteId,
+                              generationKindFor(note, lastKind),
+                            );
                             setAiState("queued");
                             void drainGenerationQueue({
                               db,
@@ -2066,7 +2102,7 @@ export default function Create() {
                           })();
                         }}
                         accessibilityRole="button"
-                        accessibilityLabel="Try generating the summary again"
+                        accessibilityLabel="Try generating again"
                         className="min-h-10 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong px-4 active:opacity-80"
                       >
                         <RefreshCw size={15} color={colors.ink.inverse} />
@@ -2150,11 +2186,11 @@ export default function Create() {
                       disabled={!canSave}
                       className="min-h-12 w-full flex-row items-center justify-center gap-2 rounded-btn bg-gold shadow-gold active:opacity-80"
                       accessibilityRole="button"
-                      accessibilityLabel="Save and summarise"
+                      accessibilityLabel="Save and generate"
                     >
                       <Sparkles size={17} color={pv.ink.DEFAULT} />
                       <Text className="text-label font-sans-extrabold text-ink">
-                        Save and summarise
+                        Save and generate
                       </Text>
                     </Pressable>
                   </View>
@@ -2199,7 +2235,7 @@ export default function Create() {
                   target: "lecture_note" as UploadTarget,
                   Icon: FileText,
                   title: "Lecture note",
-                  body: "Full summary with flashcards and a quiz. Lives in the course notes list.",
+                  body: "An AI-written note, plus a summary, flashcards and a quiz. Your original capture stays in Transcript.",
                 },
                 {
                   target: "course_reference" as UploadTarget,

@@ -84,7 +84,10 @@ export type NoteKind = "note" | "reference";
 export type UploadTask = "lecture_note" | "course_reference";
 
 // What a generation job should produce (server job `kind`).
-export type GenerationKind = "study_set" | "course_reference";
+// - study_set: summary + flashcards + quiz; the note body is never rewritten.
+// - lecture_note: an AI-written note body, then summary + flashcards + quiz.
+// - course_reference: the condensed reference sheet (no cards or quiz).
+export type GenerationKind = "study_set" | "lecture_note" | "course_reference";
 
 export type ServerNote = {
   id: string;

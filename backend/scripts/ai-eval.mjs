@@ -19,21 +19,62 @@ import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { geminiTranscribe, bulkModel, openRouterChat } from "../src/lib/ai.js";
-import { generateStudySet, validateStudySet } from "../src/lib/pipeline.js";
+import {
+  generateLectureNote,
+  generateReference,
+  generateStudySet,
+  validateStudySet,
+} from "../src/lib/pipeline.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const samplesDir = path.join(dirname, "eval-samples");
 const outDir = path.join(samplesDir, "out");
 
-async function evaluateTextFile(file) {
+async function evaluateTextFile(file, kind = "study_set") {
   const text = await readFile(file, "utf8");
   const started = Date.now();
+  const context = "Introductory course (eval sample)";
+  const jobId = `eval:${path.basename(file)}`;
   try {
+    if (kind === "lecture_note") {
+      const body = await generateLectureNote({ cleaned: text, courseContext: context, jobId });
+      await writeFile(
+        path.join(outDir, `${path.basename(file)}.lecture-note.md`),
+        body,
+      );
+      const headings = (body.match(/^## /gm) ?? []).length;
+      return {
+        file: path.basename(file),
+        kind,
+        ok: body.length >= 400 && headings >= 1,
+        problem: headings < 1 ? "no sections" : undefined,
+        ms: Date.now() - started,
+        headings,
+        chars: body.length,
+      };
+    }
+    if (kind === "reference") {
+      const markdown = await generateReference({ cleaned: text, courseContext: context, jobId });
+      await writeFile(
+        path.join(outDir, `${path.basename(file)}.reference.md`),
+        markdown,
+      );
+      const terms = (markdown.match(/^- \*\*/gm) ?? []).length;
+      return {
+        file: path.basename(file),
+        kind,
+        ok: markdown.includes("## Key Terms") && terms >= 1,
+        problem: terms < 1 ? "no key terms" : undefined,
+        ms: Date.now() - started,
+        terms,
+        chars: markdown.length,
+      };
+    }
     const set = await generateStudySet({
       cleaned: text,
-      courseContext: "Introductory course (eval sample)",
+      courseContext: context,
       durationMinutes: 50,
-      jobId: `eval:${path.basename(file)}`,
+      jobId,
     });
     const problem = validateStudySet(set);
     await writeFile(
@@ -42,6 +83,7 @@ async function evaluateTextFile(file) {
     );
     return {
       file: path.basename(file),
+      kind,
       ok: !problem,
       problem,
       ms: Date.now() - started,
@@ -50,7 +92,7 @@ async function evaluateTextFile(file) {
       summaryHeadings: (set.summaryMarkdown.match(/^## /gm) ?? []).length,
     };
   } catch (error) {
-    return { file: path.basename(file), ok: false, problem: error.message, ms: Date.now() - started };
+    return { file: path.basename(file), kind, ok: false, problem: error.message, ms: Date.now() - started };
   }
 }
 
@@ -76,6 +118,8 @@ async function evaluateAudio(file) {
 async function main() {
   const args = process.argv.slice(2);
   const audio = args.includes("--audio") ? args[args.indexOf("--audio") + 1] : null;
+  const kindFlag = args.includes("--kind") ? args[args.indexOf("--kind") + 1] : "study_set";
+  const kind = KINDS.has(kindFlag) ? kindFlag : "study_set";
 
   if (!existsSync(outDir)) await mkdir(outDir, { recursive: true });
 
@@ -84,7 +128,7 @@ async function main() {
     console.log(`Transcribing ${audio}…`);
     results = [await evaluateAudio(path.resolve(audio))];
   } else {
-    const single = args[0] ? path.resolve(args[0]) : null;
+    const single = args[0] && !args[0].startsWith("--") ? path.resolve(args[0]) : null;
     const files = single
       ? [single]
       : readdirSync(samplesDir).filter((f) => /\.(txt|md)$/.test(f));
@@ -96,8 +140,8 @@ async function main() {
     }
     results = [];
     for (const file of files) {
-      console.log(`Evaluating ${file}…`);
-      results.push(await evaluateTextFile(file));
+      console.log(`Evaluating ${file} as ${kind}…`);
+      results.push(await evaluateTextFile(file, kind));
     }
   }
 
@@ -105,8 +149,10 @@ async function main() {
   console.log("\n=== RESULTS ===");
   for (const r of results) {
     console.log(
-      `${r.ok ? "PASS" : "FAIL"} ${r.file} — ${r.ms}ms` +
+      `${r.ok ? "PASS" : "FAIL"} ${r.file} [${r.kind ?? "transcribe"}] — ${r.ms}ms` +
         (r.flashcards ? `, ${r.flashcards} cards, ${r.quiz} quiz, ${r.summaryHeadings} sections` : "") +
+        (r.headings ? `, ${r.headings} sections, ${r.chars} chars` : "") +
+        (r.terms ? `, ${r.terms} terms, ${r.chars} chars` : "") +
         (r.problem ? `, problem: ${r.problem}` : ""),
     );
   }

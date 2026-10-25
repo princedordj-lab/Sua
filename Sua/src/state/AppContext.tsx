@@ -28,7 +28,7 @@ import {
   type LocalCourse,
 } from "../lib/notes";
 import { flushUploads } from "../lib/uploads";
-import { drainGenerationQueue } from "../lib/generate";
+import { drainGenerationQueue, reconcileAiOutputs } from "../lib/generate";
 import { flushStudyProgress } from "../lib/progress";
 import { registerForPushAndReport } from "../lib/notifications";
 import type {
@@ -206,6 +206,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         requestRefresh();
         void flushUploads({ db, getAuthToken });
         void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+        void reconcileAiOutputs({ db, getAuthToken }).catch(() => {});
         void flushStudyProgress({ db, getAuthToken }).catch(() => {});
       }
     });
@@ -214,6 +215,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         requestRefresh();
         void flushUploads({ db, getAuthToken });
         void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
+        void reconcileAiOutputs({ db, getAuthToken }).catch(() => {});
         void flushStudyProgress({ db, getAuthToken }).catch(() => {});
       }
     });
@@ -279,6 +281,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (!cancelled) {
           void flushUploads({ db, getAuthToken });
           void drainGenerationQueue({
+            db,
+            getAuthToken,
+            onNoteChange: () => requestRefresh(2_000),
+          }).catch(() => {});
+          // Upload conversions finish server-side; pull any study set whose
+          // outputs never reached this device.
+          void reconcileAiOutputs({
             db,
             getAuthToken,
             onNoteChange: () => requestRefresh(2_000),
