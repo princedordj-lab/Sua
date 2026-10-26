@@ -1,12 +1,22 @@
 import { Router } from "express";
 import { cloudinary, cloudinaryConfigured } from "../config/cloudinary.js";
 import { neonStorageConfigured, presignNeonObject } from "../config/neon-storage.js";
-import { assetDownloadUrl, deleteAssetObject, readAssetBytes, storageProviderOf, verifyNeonObject } from "../lib/storage.js";
+import {
+  MAX_UPLOAD_BYTES,
+  MAX_AUDIO_BYTES,
+  assetDownloadUrl,
+  deleteAssetObject,
+  readAssetBytes,
+  storageProviderOf,
+  verifyNeonObject,
+} from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
 import { extractDocumentText } from "../lib/extract.js";
 import { maybeEnqueueGeneration } from "../lib/pipeline.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
+
+export { MAX_UPLOAD_BYTES };
 
 export const uploadsRouter = Router();
 export const assetsRouter = Router();
@@ -25,17 +35,17 @@ function mimeForFormat(format, kind) {
 }
 
 const MAX_BYTES = {
-  document: 25 * 1024 * 1024,
-  image: 25 * 1024 * 1024,
+  document: MAX_UPLOAD_BYTES,
+  image: MAX_UPLOAD_BYTES,
   // 60-minute Pro recordings at the ~0.5 MB/min compression target.
-  audio: 50 * 1024 * 1024,
+  audio: MAX_AUDIO_BYTES,
 };
 
 // Where the student wants a document/photo converted once it lands.
 const TASKS = new Set(["lecture_note", "course_reference"]);
 
 // Upper bound for files we attempt to parse on upload-complete.
-const MAX_EXTRACT_BYTES = 25 * 1024 * 1024;
+const MAX_EXTRACT_BYTES = MAX_UPLOAD_BYTES;
 
 const ALLOWED_FORMATS = {
   document: ["pdf", "pptx", "ppt", "txt", "docx", "md"],
@@ -66,6 +76,25 @@ function shapeAsset(asset) {
     extractedText: asset.extractedText ?? null,
     createdAt: asset.createdAt,
   };
+}
+
+function matchesFileSignature(buffer, format) {
+  if (!buffer || buffer.length < 4) return true;
+  if (format === "pdf") {
+    return buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46;
+  }
+  if (format === "docx" || format === "pptx") {
+    return (
+      buffer[0] === 0x50 &&
+      buffer[1] === 0x4b &&
+      (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07) &&
+      (buffer[3] === 0x04 || buffer[3] === 0x06 || buffer[3] === 0x08)
+    );
+  }
+  if (format === "ppt") {
+    return buffer[0] === 0xd0 && buffer[1] === 0xcf && buffer[2] === 0x11 && buffer[3] === 0xe0;
+  }
+  return true;
 }
 
 // Downloads the confirmed bytes through a signed URL (the media itself never
@@ -297,9 +326,9 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
       return res.status(410).json({ error: "Note was deleted" });
     }
   }
-  // Parse the document once its bytes are confirmed — outside the transaction
-  // so a slow download can't hold a database connection open. Re-runs only if
-  // a previous attempt failed (extractedText still null).
+  // Parse the document synchronously once its bytes are confirmed — outside
+  // the transaction so external parsing never blocks database locks.
+  // Re-runs only if a previous attempt failed (extractedText still null).
   if (
     asset.kind === "document" &&
     !asset.extractedText &&
@@ -307,7 +336,13 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     asset.bytes <= MAX_EXTRACT_BYTES
   ) {
     try {
-      const text = await extractFromStorage(asset);
+      const buffer = remote?.buffer ?? (await readAssetBytes(asset));
+      if (!matchesFileSignature(buffer, asset.format)) {
+        console.warn(
+          `File signature check skipped/failed for asset ${asset.id} (format ${asset.format})`,
+        );
+      }
+      const text = await extractDocumentText(buffer, asset.format, asset.kind);
       if (text) {
         const targetId = asset.id;
         asset = await withUser(identity.clerkId, (tx) =>

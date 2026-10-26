@@ -21,10 +21,105 @@ const connection = new Ioredis(redisConnectionUrl(), {
   connectTimeout: 10_000,
 });
 
+export const ALLOWED_JOB_KINDS = [
+  "study_set",
+  "lecture_note",
+  "course_reference",
+];
+
+export const MIN_NOTE_CHARS = 40;
+export const MAX_NOTE_CHARS = 60_000;
+
 const worker = new Worker(
   STUDY_QUEUE,
   async (bullJob) => {
-    const { jobId } = bullJob.data;
+    const { jobId, noteId, userId, kind } = bullJob.data ?? {};
+    if (!jobId) {
+      console.warn("Worker received job without jobId; discarding.");
+      return;
+    }
+
+    // 1. Validate that the job kind is allowed
+    const declaredKind = kind;
+    if (declaredKind && !ALLOWED_JOB_KINDS.includes(declaredKind)) {
+      console.warn(`Job ${jobId} rejected: disallowed kind "${declaredKind}"`);
+      await prisma.job.updateMany({
+        where: { id: jobId },
+        data: {
+          state: "failed",
+          stage: "failed",
+          error: `Disallowed job kind: ${declaredKind}`,
+          finishedAt: new Date(),
+        },
+      }).catch(() => {});
+      return;
+    }
+
+    // 2. Retrieve job and note from Neon Postgres
+    const job = await prisma.job.findUnique({
+      where: { id: jobId },
+      include: {
+        note: { include: { assets: true } },
+        user: { select: { id: true, clerkId: true } },
+      },
+    });
+
+    if (!job) {
+      console.warn(`Job ${jobId} row not found in database; skipping.`);
+      return;
+    }
+    if (job.state === "done") return;
+
+    if (!ALLOWED_JOB_KINDS.includes(job.kind)) {
+      console.warn(`Job ${jobId} rejected from DB record: disallowed kind "${job.kind}"`);
+      await prisma.job.updateMany({
+        where: { id: jobId },
+        data: {
+          state: "failed",
+          stage: "failed",
+          error: `Disallowed job kind: ${job.kind}`,
+          finishedAt: new Date(),
+        },
+      }).catch(() => {});
+      return;
+    }
+
+    // 3. Confirm note ownership
+    const expectedUserId = userId || job.userId;
+    const expectedNoteId = noteId || job.noteId;
+    if (!job.note || job.note.id !== expectedNoteId) {
+      throw new Error(`Note ${expectedNoteId} not found for job ${jobId}`);
+    }
+    if (job.note.userId !== expectedUserId) {
+      throw new Error(`Note ${expectedNoteId} does not belong to user ${expectedUserId}`);
+    }
+
+    // 4. Validate note content length before dispatching to LLM
+    // For typed notes without media assets or prior transcript, check body directly.
+    const hasMedia = job.note.assets && job.note.assets.some((a) => a.status === "active");
+    const hasTranscript = Boolean(job.note.transcript && job.note.transcript.trim());
+    if (!hasMedia && !hasTranscript) {
+      const normalizedBody = String(job.note.body ?? "").trim();
+      if (normalizedBody.length < MIN_NOTE_CHARS) {
+        console.warn(`Job ${jobId} aborted: note body too short (${normalizedBody.length} chars)`);
+        const errorMessage = "Note content is too short (minimum 40 characters required).";
+        await prisma.job.updateMany({
+          where: { id: jobId },
+          data: {
+            state: "failed",
+            stage: "failed",
+            error: errorMessage,
+            finishedAt: new Date(),
+          },
+        }).catch(() => {});
+        await prisma.note.updateMany({
+          where: { id: job.note.id },
+          data: { aiState: "failed" },
+        }).catch(() => {});
+        return;
+      }
+    }
+
     const started = Date.now();
     try {
       await processJob(jobId);

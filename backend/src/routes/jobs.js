@@ -187,7 +187,12 @@ jobsRouter.post("/", async (req, res) => {
   if (warning) console.warn(`[CAP WARNING] ${identity.email}: ${warning}`);
 
   try {
-    await enqueueStudyJob(job.id);
+    await enqueueStudyJob({
+      jobId: job.id,
+      noteId: job.noteId,
+      userId: job.userId,
+      kind: job.kind,
+    });
   } catch (error) {
     // The row exists but nothing will ever consume it. Close it now so the
     // student gets the standard retry card instead of a job that never runs.

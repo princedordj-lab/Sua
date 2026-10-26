@@ -7,7 +7,29 @@ import JSZip from "jszip";
 //
 // Failures return null instead of throwing: an upload must succeed even when
 // a file turns out to be unparseable, the note simply has no source text.
-const MAX_TEXT_CHARS = 100_000;
+export const MAX_TEXT_CHARS = 100_000;
+
+/**
+ * Normalizes input (Buffer, Uint8Array, or stream) into a Buffer.
+ */
+export async function toBuffer(input) {
+  if (!input) return Buffer.alloc(0);
+  if (Buffer.isBuffer(input)) return input;
+  if (input instanceof Uint8Array) {
+    return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  }
+  if (typeof input.arrayBuffer === "function") {
+    return Buffer.from(await input.arrayBuffer());
+  }
+  if (typeof input[Symbol.asyncIterator] === "function") {
+    const chunks = [];
+    for await (const chunk of input) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  return Buffer.from(String(input));
+}
 
 /**
  * Extract text with its source structure intact.
@@ -16,26 +38,38 @@ const MAX_TEXT_CHARS = 100_000;
  * `{ index, label, text }` and `label` is "p. 12", "Slide 4" or null when the
  * format has no pages (DOCX/TXT). Returns null on any failure.
  */
-export async function extractDocument(buffer, format, kind) {
+export async function extractDocument(input, format, kind = "document") {
   if (kind !== "document") return null;
   try {
+    const buffer = await toBuffer(input);
+    if (!buffer || buffer.length === 0) return null;
+
+    const normalizedFormat = String(format ?? "").toLowerCase().replace(/^\./, "");
     let segments = [];
     let pageCount = 0;
 
-    if (format === "pdf") {
+    if (normalizedFormat === "pdf") {
       const result = await extractPdfPages(buffer);
       if (!result) return null;
       segments = result.segments;
       pageCount = result.pageCount;
-    } else if (format === "txt" || format === "md") {
+    } else if (normalizedFormat === "txt" || normalizedFormat === "md") {
       segments = [{ index: 1, label: null, text: buffer.toString("utf8") }];
       pageCount = 1;
-    } else if (format === "docx") {
-      segments = [{ index: 1, label: null, text: await extractDocx(buffer) }];
+    } else if (normalizedFormat === "docx") {
+      const docxText = await extractDocx(buffer);
+      if (!docxText) return null;
+      segments = [{ index: 1, label: null, text: docxText }];
       pageCount = 1;
-    } else if (format === "pptx") {
+    } else if (normalizedFormat === "pptx") {
       segments = await extractPptxSlides(buffer);
+      if (!segments || !segments.length) return null;
       pageCount = segments.length;
+    } else if (normalizedFormat === "ppt") {
+      // Legacy binary .ppt format requires system binaries not available in serverless JS.
+      // Handled gracefully: return null without throwing, preserving the upload.
+      console.warn("Legacy .ppt binary presentation format is unsupported for text extraction; skipping inline text.");
+      return null;
     } else {
       return null;
     }
@@ -47,7 +81,7 @@ export async function extractDocument(buffer, format, kind) {
       const text = normalizeText(segment.text);
       // A blank PDF page is kept as a placeholder so the pipeline can decide to
       // OCR it; other formats have no page concept and drop blank blocks.
-      if (!text && format !== "pdf") continue;
+      if (!text && normalizedFormat !== "pdf") continue;
       const room = MAX_TEXT_CHARS - size;
       if (room <= 0) {
         truncated = true;
@@ -66,7 +100,7 @@ export async function extractDocument(buffer, format, kind) {
     if (!normalized.length) return null;
     return {
       segments: normalized,
-      text: normalized.map((segment) => segment.text).join("\n\n"),
+      text: normalized.map((segment) => segment.text).join("\n\n").slice(0, MAX_TEXT_CHARS).trim(),
       pageCount: pageCount || normalized.length,
       truncated,
     };
@@ -80,11 +114,20 @@ export async function extractDocument(buffer, format, kind) {
 }
 
 /** Back-compat wrapper: the flat string `/complete` stores on the asset. */
-export async function extractDocumentText(buffer, format, kind) {
-  const result = await extractDocument(buffer, format, kind);
-  // A scanned PDF extracts to "" (placeholders only). The asset keeps a null
-  // text so the pipeline knows it still has to OCR the pages.
-  return result?.text?.trim() ? result.text : null;
+export async function extractDocumentText(input, format, kind = "document") {
+  try {
+    const result = await extractDocument(input, format, kind);
+    // A scanned PDF extracts to "" (placeholders only). The asset keeps a null
+    // text so the pipeline knows it still has to OCR the pages.
+    const text = result?.text?.trim() ? result.text : null;
+    return text ? text.slice(0, MAX_TEXT_CHARS).trim() : null;
+  } catch (error) {
+    console.warn(
+      `Text extraction wrapper failed (${kind}/${format}):`,
+      error?.message ?? error,
+    );
+    return null;
+  }
 }
 
 /**

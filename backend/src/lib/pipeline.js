@@ -757,7 +757,12 @@ export async function maybeEnqueueGeneration(clerkId, noteId) {
   });
   if (!job) return null;
   try {
-    await enqueueStudyJob(job.id);
+    await enqueueStudyJob({
+      jobId: job.id,
+      noteId: job.noteId,
+      userId: job.userId,
+      kind: job.kind,
+    });
   } catch (error) {
     console.warn(
       `enqueue failed for generation job ${job.id}: ${error?.message ?? error}`,

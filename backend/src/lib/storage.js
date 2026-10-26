@@ -6,7 +6,14 @@ import {
   presignNeonObject,
 } from "../config/neon-storage.js";
 
-const MAX_BYTES = { audio: 50 * 1024 * 1024, document: 25 * 1024 * 1024, image: 25 * 1024 * 1024 };
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
+
+const MAX_BYTES = {
+  audio: MAX_AUDIO_BYTES,
+  document: MAX_UPLOAD_BYTES,
+  image: MAX_UPLOAD_BYTES,
+};
 
 export function storageProviderOf(asset) {
   return asset.storageProvider ?? "cloudinary";
@@ -14,7 +21,7 @@ export function storageProviderOf(asset) {
 
 export async function readAssetBytes(asset) {
   if (storageProviderOf(asset) === "neon") {
-    return getNeonObject(asset.publicId, MAX_BYTES[asset.kind] ?? 50 * 1024 * 1024);
+    return getNeonObject(asset.publicId, MAX_BYTES[asset.kind] ?? MAX_UPLOAD_BYTES);
   }
   if (!cloudinaryConfigured()) throw new Error("Cloudinary compatibility storage is not configured");
   const url = cloudinary.url(asset.publicId, {
@@ -57,7 +64,7 @@ export async function deleteAssetObject(asset) {
   }
 }
 
-export async function verifyNeonObject(key, maxBytes) {
+export async function verifyNeonObject(key, maxBytes = MAX_UPLOAD_BYTES) {
   if (!neonStorageConfigured()) throw new Error("Neon Object Storage is not configured");
   let bytes;
   try {
@@ -70,7 +77,10 @@ export async function verifyNeonObject(key, maxBytes) {
     }
     throw error;
   }
-  if (!bytes.length) throw new Error("Uploaded object is empty");
-  if (bytes.length > maxBytes) throw new Error("Uploaded object exceeds the allowed size");
-  return { bytes: bytes.length };
+  if (!bytes || !bytes.length) throw new Error("Uploaded object is empty");
+  if (bytes.length > maxBytes) {
+    await deleteNeonObject(key).catch(() => {});
+    throw new Error("Uploaded object exceeds the allowed size");
+  }
+  return { bytes: bytes.length, buffer: bytes };
 }

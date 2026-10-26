@@ -193,6 +193,15 @@ async function documentSegments(asset, deps, onScan) {
   if (!asset.bytes || asset.bytes <= 0) {
     return { segments: [], truncated: false, pageCount: 0 };
   }
+  // For non-PDF documents where text was already extracted inline on upload completion,
+  // reuse the persisted text directly rather than re-downloading from storage.
+  if (asset.format !== "pdf" && text(asset.extractedText)) {
+    return {
+      segments: [{ index: 1, label: null, text: text(asset.extractedText) }],
+      truncated: false,
+      pageCount: 1,
+    };
+  }
   let bytes;
   try {
     bytes = await deps.readBytes(asset);

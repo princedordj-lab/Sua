@@ -92,10 +92,24 @@ export function getStudyQueue() {
   return queue;
 }
 
-/** Idempotent enqueue; the jobId ties the BullMQ job to the database row. */
-export async function enqueueStudyJob(jobId) {
+/**
+ * Idempotent enqueue with lightweight payload: { jobId, noteId, userId, kind }.
+ * Never passes file buffers, base64 strings, or document text in BullMQ job data.
+ */
+export async function enqueueStudyJob(payload) {
   const queue = getStudyQueue();
-  // BullMQ 6 also rejects ":" in a custom job id ("Custom Id cannot contain :"),
+  const data =
+    typeof payload === "object" && payload !== null
+      ? {
+          jobId: payload.jobId ?? payload.id,
+          noteId: payload.noteId,
+          userId: payload.userId,
+          kind: payload.kind ?? "study_set",
+        }
+      : { jobId: String(payload) };
+
+  const jobKind = data.kind || "study_set";
+  // BullMQ 6 rejects ":" in a custom job id ("Custom Id cannot contain :"),
   // which broke every enqueue even after the queue name was fixed.
-  await queue.add("study_set", { jobId }, { jobId: `study-${jobId}` });
+  await queue.add(jobKind, data, { jobId: `study-${data.jobId}` });
 }
