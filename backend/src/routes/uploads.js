@@ -252,6 +252,7 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
   });
 
   if (!existingAsset) return res.status(404).json({ error: "Asset not found" });
+  let remote = null;
   let outcome;
   if (existingAsset.status === "active") {
     outcome = { status: 200, asset: existingAsset };
@@ -263,7 +264,6 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     // Verify storage outside the RLS transaction. Neon's object read can take
     // longer than Prisma's interactive transaction window, so keeping network
     // I/O here prevents holding a database connection while waiting on storage.
-    let remote;
     try {
       remote = storageProviderOf(existingAsset) === "neon"
         ? await verifyNeonObject(existingAsset.publicId, MAX_BYTES[existingAsset.kind])
@@ -354,8 +354,7 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
       }
     } catch (error) {
       console.warn(
-        `Extraction failed for asset ${asset.id}:`,
-        error?.message ?? error,
+        `Extraction failed for asset ${asset.id} (format ${asset.format}; ${error?.name ?? "Error"}: ${error?.message ?? String(error)})`,
       );
     }
   }
