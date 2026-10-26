@@ -13,7 +13,7 @@ export const assetsRouter = Router();
 
 function mimeForFormat(format, kind) {
   const mimeByFormat = {
-    pdf: "application/pdf", txt: "text/plain; charset=utf-8",
+    pdf: "application/pdf", txt: "text/plain; charset=utf-8", md: "text/markdown; charset=utf-8",
     pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ppt: "application/vnd.ms-powerpoint",
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -38,7 +38,7 @@ const TASKS = new Set(["lecture_note", "course_reference"]);
 const MAX_EXTRACT_BYTES = 25 * 1024 * 1024;
 
 const ALLOWED_FORMATS = {
-  document: ["pdf", "pptx", "ppt", "txt", "docx"],
+  document: ["pdf", "pptx", "ppt", "txt", "docx", "md"],
   image: ["jpg", "jpeg", "png", "webp", "heic", "heif"],
   audio: ["m4a", "mp3", "wav", "ogg", "aac"],
 };

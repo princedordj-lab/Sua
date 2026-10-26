@@ -377,6 +377,10 @@ function TypedEditor({
   }
 
   async function generate() {
+    if (body.trim().length < 40) {
+      setSaveError("Note content must be at least 40 characters to generate a study set.");
+      return;
+    }
     setGenerating(true);
     setSaveError(null);
     try {

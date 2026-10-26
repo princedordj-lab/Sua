@@ -1,11 +1,11 @@
 import type { ApiClient } from "./use-api";
 import type { AssetKind, GenerationKind, ServerAsset, ServerJob, UploadTask } from "./types";
 
-export const DOCUMENT_FORMATS = ["pdf", "pptx", "ppt", "txt", "docx"] as const;
+export const DOCUMENT_FORMATS = ["pdf", "pptx", "ppt", "txt", "docx", "md"] as const;
 export const IMAGE_FORMATS = ["jpg", "jpeg", "png", "webp", "heic", "heif"] as const;
 export const AUDIO_FORMATS = ["m4a", "mp3", "wav", "ogg", "aac"] as const;
 
-export const ACCEPT_DOCUMENTS = ".pdf,.pptx,.ppt,.txt,.docx,application/pdf";
+export const ACCEPT_DOCUMENTS = ".pdf,.pptx,.ppt,.txt,.docx,.md,text/markdown,text/plain,application/pdf";
 export const ACCEPT_IMAGES = ".jpg,.jpeg,.png,.webp,.heic,.heif,image/*";
 export const ACCEPT_AUDIO = ".m4a,.mp3,.wav,.ogg,.aac,audio/*";
 export const ACCEPT_ALL = `${ACCEPT_DOCUMENTS},${ACCEPT_IMAGES},${ACCEPT_AUDIO}`;
@@ -15,6 +15,7 @@ export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const MIME_BY_FORMAT: Record<string, string> = {
   pdf: "application/pdf",
   txt: "text/plain; charset=utf-8",
+  md: "text/markdown; charset=utf-8",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ppt: "application/vnd.ms-powerpoint",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

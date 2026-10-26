@@ -20,6 +20,7 @@ import { drainGenerationQueue } from "./generate";
 const MIME_BY_FORMAT: Record<string, string> = {
   pdf: "application/pdf",
   txt: "text/plain; charset=utf-8",
+  md: "text/markdown; charset=utf-8",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ppt: "application/vnd.ms-powerpoint",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

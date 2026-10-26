@@ -27,7 +27,7 @@ export async function extractDocument(buffer, format, kind) {
       if (!result) return null;
       segments = result.segments;
       pageCount = result.pageCount;
-    } else if (format === "txt") {
+    } else if (format === "txt" || format === "md") {
       segments = [{ index: 1, label: null, text: buffer.toString("utf8") }];
       pageCount = 1;
     } else if (format === "docx") {

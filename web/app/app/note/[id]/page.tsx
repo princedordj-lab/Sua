@@ -7,6 +7,8 @@ import {
   ArrowLeft,
   BookOpen,
   Brain,
+  Check,
+  ChevronLeft,
   ChevronRight,
   Flag,
   Layers,
@@ -14,10 +16,12 @@ import {
   Pencil,
   Play,
   RefreshCw,
+  RotateCcw,
   Sparkles,
   Trash2,
   Type,
   Volume2,
+  X,
 } from "lucide-react";
 import { useAppData } from "@/components/app-data";
 import {
@@ -48,7 +52,7 @@ import {
   sourceMetaFor,
 } from "@/lib/generation";
 import { splitNotices } from "@/lib/markdown";
-import type { AiState, ServerJob, ServerNote, ServerStudy } from "@/lib/types";
+import type { AiState, ServerJob, ServerNote, ServerQuiz, ServerStudy } from "@/lib/types";
 
 type Tab = "notes" | "summary" | "cards" | "quiz";
 
@@ -483,29 +487,32 @@ export default function NoteViewPage() {
           </div>
 
           {cards.length ? (
-            <div className="card-list">
-              {cards.map((card, index) => (
-                <Card key={card.id} className="flashcard-row">
-                  <span className="flashcard-index">{index + 1}</span>
-                  <div className="flashcard-row-copy">
-                    <strong>{card.front}</strong>
-                    <p>{card.back}</p>
-                    <small>{dueLabel(card.dueAt)}</small>
-                  </div>
-                  <ReportButton
-                    compact
-                    label={`Report a mistake in card ${index + 1}`}
-                    onClick={() =>
-                      setReport({
-                        targetType: "flashcard",
-                        targetId: card.id,
-                        label: `Card ${index + 1}: ${card.front}`,
-                      })
-                    }
-                  />
-                </Card>
-              ))}
-            </div>
+            <>
+              <FlipCardViewer cards={cards} noteId={note.id} />
+              <div className="card-list">
+                {cards.map((card, index) => (
+                  <Card key={card.id} className="flashcard-row">
+                    <span className="flashcard-index">{index + 1}</span>
+                    <div className="flashcard-row-copy">
+                      <strong>{card.front}</strong>
+                      <p>{card.back}</p>
+                      <small>{dueLabel(card.dueAt)}</small>
+                    </div>
+                    <ReportButton
+                      compact
+                      label={`Report a mistake in card ${index + 1}`}
+                      onClick={() =>
+                        setReport({
+                          targetType: "flashcard",
+                          targetId: card.id,
+                          label: `Card ${index + 1}: ${card.front}`,
+                        })
+                      }
+                    />
+                  </Card>
+                ))}
+              </div>
+            </>
           ) : (
             <Card className="note-empty-card">
               <Brain size={26} />
@@ -532,32 +539,8 @@ export default function NoteViewPage() {
 
       {tab === "quiz" ? (
         <div className="note-quizzes">
-          <div className="note-panel-head">
-            <div>
-              <h2>Quizzes</h2>
-              <p>{quizzes.length ? `${quizzes.length} quiz${quizzes.length === 1 ? "" : "zes"} from this note.` : "No quizzes yet."}</p>
-            </div>
-          </div>
-          {quizzes.length ? (
-            <div className="quiz-tile-grid">
-              {quizzes.map((entry) => (
-                <div key={entry.id} className="quiz-tile card">
-                  <span className="quiz-tile-icon">
-                    <Flag size={19} />
-                  </span>
-                  <div>
-                    <strong>{entry.title}</strong>
-                    <p>
-                      {entry.questions.length} question{entry.questions.length === 1 ? "" : "s"} ·
-                      short answers marked by AI
-                    </p>
-                  </div>
-                  <Link href={`/app/quiz/${entry.id}`} className="btn btn-primary btn-sm">
-                    Start quiz
-                  </Link>
-                </div>
-              ))}
-            </div>
+          {quiz ? (
+            <InlineQuizPlayer quiz={quiz} />
           ) : (
             <Card className="note-empty-card">
               <Flag size={24} />
@@ -666,4 +649,199 @@ function notesBody(note: ServerNote) {
   const body = String(note.body ?? "").trim();
   if (body) return body;
   return String(note.summary ?? "").trim();
+}
+
+function FlipCardViewer({
+  cards,
+  noteId,
+}: {
+  cards: { id: string; front: string; back: string }[];
+  noteId: string;
+}) {
+  const [index, setIndex] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+
+  const card = cards[index] ?? cards[0];
+  if (!card) return null;
+
+  function goPrev() {
+    setFlipped(false);
+    setIndex((curr) => Math.max(0, curr - 1));
+  }
+
+  function goNext() {
+    setFlipped(false);
+    setIndex((curr) => Math.min(cards.length - 1, curr + 1));
+  }
+
+  return (
+    <Card className="flip-card-container" style={{ padding: "1.25rem", marginBottom: "1.5rem" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
+        <Chip tone="brand">
+          Card {index + 1} of {cards.length}
+        </Chip>
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <Button variant="ghost" size="sm" onClick={() => setFlipped((f) => !f)}>
+            <RotateCcw size={14} /> Flip card
+          </Button>
+          <Link href={`/app/review?noteId=${noteId}`} className="btn btn-gold btn-sm">
+            <Play size={14} /> Review Deck (SRS)
+          </Link>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        className="review-card"
+        onClick={() => setFlipped((f) => !f)}
+        aria-label={flipped ? "Hide answer" : "Show answer"}
+        style={{ width: "100%", minHeight: "220px", cursor: "pointer", border: "none" }}
+      >
+        <span className="review-card-face">
+          <span className="review-card-label">{flipped ? "Answer" : "Question / Active Recall"}</span>
+          <span className="review-card-text">
+            <Markdown text={flipped ? card.back : card.front} scale="large" />
+          </span>
+          <span className="review-card-hint">
+            <Sparkles size={14} /> {flipped ? "Click to view question" : "Click or tap to reveal answer"}
+          </span>
+        </span>
+      </button>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "1rem" }}>
+        <Button variant="secondary" size="sm" onClick={goPrev} disabled={index === 0}>
+          <ChevronLeft size={16} /> Previous
+        </Button>
+        <small style={{ color: "var(--text-muted, #888)" }}>
+          {index + 1} / {cards.length}
+        </small>
+        <Button variant="secondary" size="sm" onClick={goNext} disabled={index === cards.length - 1}>
+          Next <ChevronRight size={16} />
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+function InlineQuizPlayer({ quiz }: { quiz: ServerQuiz }) {
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+
+  const questions = quiz.questions;
+  const answeredCount = Object.keys(answers).length;
+  const correctCount = questions.filter(
+    (q) => answers[q.id] && answers[q.id].trim().toLowerCase() === q.answer.trim().toLowerCase(),
+  ).length;
+
+  function pick(questionId: string, option: string) {
+    if (answers[questionId]) return;
+    setAnswers((prev) => ({ ...prev, [questionId]: option }));
+  }
+
+  function resetQuiz() {
+    setAnswers({});
+  }
+
+  return (
+    <div className="inline-quiz-player" style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.75rem" }}>
+        <div>
+          <h3 style={{ margin: 0, fontSize: "1.15rem", fontWeight: 600 }}>{quiz.title}</h3>
+          <p style={{ margin: "0.25rem 0 0", fontSize: "0.875rem", color: "var(--text-muted, #888)" }}>
+            {questions.length} questions · instant answer feedback & explanations
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          {answeredCount > 0 ? (
+            <Chip tone={correctCount === answeredCount ? "success" : "brand"}>
+              Score: {correctCount} / {answeredCount}
+            </Chip>
+          ) : null}
+          {answeredCount > 0 ? (
+            <Button variant="ghost" size="sm" onClick={resetQuiz}>
+              <RotateCcw size={14} /> Retake
+            </Button>
+          ) : null}
+          <Link href={`/app/quiz/${quiz.id}`} className="btn btn-secondary btn-sm">
+            Full Screen Mode
+          </Link>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+        {questions.map((question, qIdx) => {
+          const selected = answers[question.id];
+          const isAnswered = selected !== undefined;
+          const isCorrect = isAnswered && selected.trim().toLowerCase() === question.answer.trim().toLowerCase();
+          const options = question.options ?? (question.type === "true_false" ? ["True", "False"] : []);
+
+          return (
+            <Card key={question.id} className="quiz-question-card" style={{ padding: "1.25rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem", marginBottom: "0.75rem" }}>
+                <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-start" }}>
+                  <span className="quiz-tile-icon" style={{ minWidth: "28px", height: "28px", display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: "6px", fontSize: "0.85rem", fontWeight: 700 }}>
+                    {qIdx + 1}
+                  </span>
+                  <strong style={{ fontSize: "1rem", lineHeight: 1.4 }}>{question.prompt}</strong>
+                </div>
+                {isAnswered ? (
+                  <Chip tone={isCorrect ? "success" : "danger"}>
+                    {isCorrect ? "Correct" : "Incorrect"}
+                  </Chip>
+                ) : null}
+              </div>
+
+              {options.length > 0 ? (
+                <div className="quiz-options" style={{ display: "grid", gridTemplateColumns: "1fr", gap: "0.5rem", marginTop: "0.75rem" }}>
+                  {options.map((option, optIdx) => {
+                    const picked = selected === option;
+                    const isOptionCorrect = option.trim().toLowerCase() === question.answer.trim().toLowerCase();
+                    const className = isAnswered
+                      ? isOptionCorrect
+                        ? "is-correct"
+                        : picked
+                          ? "is-wrong"
+                          : ""
+                      : picked
+                        ? "is-picked"
+                        : "";
+
+                    return (
+                      <button
+                        key={option}
+                        type="button"
+                        disabled={isAnswered}
+                        className={`quiz-option ${className}`}
+                        onClick={() => pick(question.id, option)}
+                        style={{ textAlign: "left", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: isAnswered ? "default" : "pointer" }}
+                      >
+                        <span style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                          <span className="quiz-option-key" style={{ fontWeight: 700 }}>
+                            {question.type === "true_false" ? option.charAt(0) : String.fromCharCode(65 + optIdx)}
+                          </span>
+                          <span>{option}</span>
+                        </span>
+                        {isAnswered && isOptionCorrect ? <Check size={16} /> : null}
+                        {isAnswered && picked && !isOptionCorrect ? <X size={16} /> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ marginTop: "0.5rem" }}>
+                  <p><strong>Answer:</strong> {question.answer}</p>
+                </div>
+              )}
+
+              {isAnswered && question.explanation ? (
+                <div style={{ marginTop: "1rem", padding: "0.75rem 1rem", borderRadius: "8px", background: "var(--card-subtle, rgba(255,255,255,0.04))", fontSize: "0.875rem" }}>
+                  <strong>Explanation: </strong>
+                  <span>{question.explanation}</span>
+                </div>
+              ) : null}
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import type { ButtonHTMLAttributes, ComponentPropsWithRef, ReactNode } from "react";
+import type { ButtonHTMLAttributes, ComponentPropsWithRef, HTMLAttributes, ReactNode } from "react";
 import { useEffect, useId, useRef } from "react";
 import { AlertCircle, Check, Loader2, RefreshCw, X } from "lucide-react";
 
@@ -55,12 +55,17 @@ export function Card({
   children,
   className = "",
   as: Tag = "div",
-}: {
+  ...props
+}: HTMLAttributes<HTMLElement> & {
   children: ReactNode;
   className?: string;
   as?: "div" | "section" | "article" | "aside";
 }) {
-  return <Tag className={`card ${className}`}>{children}</Tag>;
+  return (
+    <Tag className={`card ${className}`} {...props}>
+      {children}
+    </Tag>
+  );
 }
 
 export function PageHeader({

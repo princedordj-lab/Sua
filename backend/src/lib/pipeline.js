@@ -10,6 +10,7 @@ import {
   isUserFacing,
   notePipeline,
 } from "../config/ai-pipeline.js";
+import { validateStudyPack } from "../config/study-pack-schema.js";
 import { prisma } from "../config/prisma.js";
 
 // Free-plan monthly caps; warn-only until Milestone 5 flips ENFORCE_CAPS on.
@@ -260,8 +261,12 @@ export async function processStudySet(job) {
       await persistTranscript(job, note, prepared.source.transcript);
       material = prepared.material;
     }
-    if (material.length < 80) {
-      throw new UserFacingError(USER_MESSAGES.unreadable);
+    const MAX_NOTE_CHARS = 60_000;
+    if (material.length > MAX_NOTE_CHARS) {
+      material = material.slice(0, MAX_NOTE_CHARS);
+    }
+    if (material.length < 40) {
+      throw new UserFacingError(USER_MESSAGES.unreadable || "Note content is too short (minimum 40 characters required).");
     }
 
     // ---- 5. Summary, flashcards and quiz ---------------------------------
@@ -522,30 +527,38 @@ const REQUIRED_SECTIONS = {
 };
 
 function studySetPrompt({ courseContext, durationMinutes, reduceNote = "" }) {
-  const cardTarget = Math.min(25, Math.max(10, Math.round((durationMinutes / 60) * 10 + 10)));
+  const cardTarget = Math.min(20, Math.max(8, Math.round((durationMinutes / 60) * 10 + 10)));
   return `Lecture course context: ${courseContext}
 ${reduceNote}
-From the lecture material below, produce a study set as a single JSON object:
+From the lecture material below, produce a complete university study pack conforming to this JSON specification:
 {
-  "summary": {
-    "overview": "2-4 sentence overview",
-    "keyPoints": ["...", "..."],
-    "keyTerms": [{"term": "...", "definition": "..."}],
-    "formulasExamples": ["... (omit the key entirely if none exist)"],
-    "examQuestions": ["...", "..."]
-  },
-  "flashcards": [{"front": "...", "back": "..."}],
+  "shortSummary": "A 4-6 sentence clear, high-yield overview of the material.",
+  "keyTerms": [
+    {"term": "key term name", "definition": "concise, accurate definition"}
+  ],
+  "formulas": ["relevant mathematical, scientific, or logical equations, or empty array [] if none exist"],
+  "examQuestions": ["3-6 likely exam or tutorial questions based strictly on the content"],
+  "flashcards": [
+    {"front": "Active recall question or concept prompt", "back": "Concise, complete answer"}
+  ],
   "quiz": [
-    {"type": "mcq", "prompt": "...", "options": ["A", "B", "C", "D"], "answer": "A", "explanation": "..."},
-    {"type": "true_false", "prompt": "statement...", "answer": "True", "explanation": "..."},
-    {"type": "short_answer", "prompt": "...", "answer": "...", "explanation": "..."}
+    {
+      "type": "mcq",
+      "prompt": "Question prompt testing understanding",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "answer": "Exact text of the correct option",
+      "explanation": "One sentence explaining why this option is correct."
+    }
   ]
 }
 Rules:
-- The summary must contain Overview, Key Points, Key Terms and Likely Exam Questions.
-- Flashcards: target ${cardTarget} cards (about 10-25 per lecture hour); the front asks, the back answers concisely.
-- Quiz: 5-10 questions mixing mcq, true_false and short_answer. Every question has an explanation. For mcq the answer is the exact option text.
-- Use only what the lecture teaches. Keep technical terms exact.
+- shortSummary: 4-6 sentences clear, high-yield overview.
+- keyTerms: 5-10 key terms with definitions.
+- formulas: relevant formulas/equations, or empty array [] if none exist.
+- examQuestions: 3-6 likely exam questions.
+- flashcards: ${cardTarget} active recall cards (target 8-20 cards); front asks, back answers concisely.
+- quiz: 5-8 multiple-choice questions with 4 options each, an exact matching answer, and a one-sentence explanation.
+- Use only what the lecture material teaches. Do not fabricate facts not present in the notes.
 Return ONLY the JSON object.`;
 }
 
@@ -562,26 +575,8 @@ function parseStudySetJson(text) {
 }
 
 export function validateStudySet(set) {
-  if (!set || !set.summary || !Array.isArray(set.flashcards) || !Array.isArray(set.quiz)) {
-    return "missing summary/flashcards/quiz";
-  }
-  for (const [heading, key] of Object.entries(REQUIRED_SECTIONS)) {
-    if (!set.summary[key]) return `summary missing ${heading}`;
-  }
-  if (set.flashcards.length < 5) return "too few flashcards";
-  if (set.quiz.length < 3) return "too few quiz questions";
-  const validTypes = new Set(["mcq", "true_false", "short_answer"]);
-  for (const question of set.quiz) {
-    if (!validTypes.has(question.type) || !question.prompt || !question.answer) {
-      return "malformed quiz question";
-    }
-    if (
-      question.type === "mcq" &&
-      (!Array.isArray(question.options) || question.options.length < 2)
-    ) {
-      return "mcq question missing options";
-    }
-  }
+  const check = validateStudyPack(set);
+  if (!check.success) return check.error;
   return null;
 }
 
@@ -594,13 +589,11 @@ export async function generateStudySet({
   record = (step, result) => recordAiCall(jobId, step, result),
 }) {
   const prompt = studySetPrompt({ courseContext, durationMinutes, reduceNote });
-  const attempt = async (stricter) => {
+  const attempt = async (stricter, priorProblem = null) => {
     const result = await chatCompletion({
       system: stricter
-        ? "You are Sua, a study assistant for African university students. Output ONLY valid JSON matching the requested schema exactly — no prose, no code fences."
-        : "You are Sua, a study assistant for African university students. You are an AI " +
-          "study tool, not the student's lecturer; students verify important facts against " +
-          "their textbook. Output only valid JSON.",
+        ? "You are Sua, an exam-focused study assistant for African university students. Output ONLY valid JSON matching the requested study pack schema exactly — no prose, no code fences."
+        : "You are Sua, an exam-focused study assistant for African university students. Use only the student's notes provided. Write clearly in simple English. Output only valid JSON.",
       user: `${prompt}\n\n=== LECTURE MATERIAL ===\n${cleaned}`,
       model: bulkModel(),
       json: true,
@@ -608,14 +601,18 @@ export async function generateStudySet({
       temperature: stricter ? 0 : 0.2,
     });
     await record(stricter ? "generate_study_set_retry" : "generate_study_set", result);
-    const set = parseStudySetJson(result.text);
-    const problem = validateStudySet(set);
-    return { result, set, problem };
+    const parsed = parseStudySetJson(result.text);
+    const validation = validateStudyPack(parsed);
+    return {
+      result,
+      set: validation.success ? validation.data : null,
+      problem: validation.success ? null : (validation.error || "Invalid study pack structure"),
+    };
   };
 
   let outcome = await attempt(false);
   if (outcome.problem) {
-    // One stricter retry before giving up (PRD quality rule).
+    // One stricter retry with temperature 0 before failing.
     outcome = await attempt(true, outcome.problem);
     if (outcome.problem) {
       throw new Error(
@@ -627,20 +624,25 @@ export async function generateStudySet({
   return outcome.set;
 }
 
-function summaryToMarkdown(summary) {
-  const lines = ["## Overview", char(summary.overview), "", "## Key Points"];
-  for (const point of summary.keyPoints ?? []) lines.push(`- ${point}`);
-  lines.push("", "## Key Terms");
-  for (const term of summary.keyTerms ?? []) lines.push(`- **${term.term}** — ${term.definition}`);
-  if ((summary.formulasExamples ?? []).length) {
-    lines.push("", "## Formulas & Examples");
-    for (const item of summary.formulasExamples) lines.push(`- ${item}`);
+function summaryToMarkdown(pack) {
+  const lines = ["## Overview", char(pack.shortSummary), ""];
+  if ((pack.keyTerms ?? []).length) {
+    lines.push("## Key Terms");
+    for (const term of pack.keyTerms) lines.push(`- **${term.term}** — ${term.definition}`);
+    lines.push("");
   }
-  lines.push("", "## Likely Exam Questions");
-  for (const [index, question] of (summary.examQuestions ?? []).entries()) {
-    lines.push(`${index + 1}. ${question}`);
+  if ((pack.formulas ?? []).length) {
+    lines.push("## Formulas & Examples");
+    for (const item of pack.formulas) lines.push(`- ${item}`);
+    lines.push("");
   }
-  return lines.join("\n");
+  if ((pack.examQuestions ?? []).length) {
+    lines.push("## Likely Exam Questions");
+    for (const [index, question] of pack.examQuestions.entries()) {
+      lines.push(`${index + 1}. ${question}`);
+    }
+  }
+  return lines.join("\n").trim();
 }
 
 async function persistStudySet(job, note, set) {

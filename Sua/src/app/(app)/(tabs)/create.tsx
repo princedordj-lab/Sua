@@ -240,6 +240,7 @@ const DOCUMENT_TYPES = [
   "application/vnd.ms-powerpoint",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "text/plain",
+  "text/markdown",
   "audio/x-m4a",
   "audio/mp4",
   "audio/mpeg",
