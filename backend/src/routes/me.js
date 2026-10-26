@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { clerkClient } from "@clerk/express";
 import { withUser } from "../lib/db.js";
-import { ensureUser, toProfile } from "../lib/user.js";
+import { ensureUser, requireUser, toProfile } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { deleteAccountData } from "../lib/account.js";
 import { FREE_MONTHLY_LIMITS } from "../lib/pipeline.js";
@@ -35,10 +35,10 @@ async function shapeWithUsage(tx, profile) {
 }
 
 meRouter.get("/", async (req, res) => {
+  const provisioned = await ensureUser(req.suaUser);
   const identity = await identityFromRequest(req);
   const profile = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
-    return shapeWithUsage(tx, user);
+    return shapeWithUsage(tx, provisioned);
   });
   res.json(profile);
 });
@@ -51,7 +51,7 @@ meRouter.post("/push-token", async (req, res) => {
     return res.status(400).json({ error: "A valid Expo push token is required" });
   }
   await withUser(identity.clerkId, async (tx) => {
-    await ensureUser(tx, identity);
+    await requireUser(tx, identity);
     const profile = await tx.user.findUnique({ where: { clerkId: identity.clerkId } });
     const existing = await tx.pushToken.findUnique({ where: { token } });
     if (existing) {
@@ -75,7 +75,7 @@ meRouter.delete("/push-token", async (req, res) => {
     return res.status(400).json({ error: "A push token is required" });
   }
   await withUser(identity.clerkId, async (tx) => {
-    await ensureUser(tx, identity);
+    await requireUser(tx, identity);
     await tx.pushToken.deleteMany({ where: { token, user: { clerkId: identity.clerkId } } });
   });
   res.status(200).json({ ok: true });
@@ -93,7 +93,7 @@ meRouter.patch("/", async (req, res) => {
     changes.onboardingCompletedAt = new Date();
   }
   const profile = await withUser(identity.clerkId, async (tx) => {
-    await ensureUser(tx, identity);
+    await requireUser(tx, identity);
     const updated = await tx.user.update({
       where: { clerkId: identity.clerkId },
       data: changes,
@@ -115,7 +115,7 @@ meRouter.post("/delete", async (req, res) => {
     await clerkClient.users.deleteUser(identity.clerkId);
     res.status(204).end();
   } catch (err) {
-    console.error("Clerk user deletion failed", err);
+    console.error(`[clerk-user-delete-error] name=${String(err?.name ?? "Error")}`);
     res.status(204).end();
   }
 });

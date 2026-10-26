@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { withUser } from "../lib/db.js";
-import { ensureUser } from "../lib/user.js";
+import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { aiConfigured, geminiTranscribe } from "../lib/ai.js";
 import { chatCompletion, strongModel } from "../lib/ai.js";
@@ -160,7 +160,7 @@ chatRouter.post("/ask", async (req, res) => {
   // them to the model outside the transaction. `withUser` caps a transaction at
   // 15 s, while a grounded answer can legitimately take two minutes.
   const prepared = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const course = await tx.course.findFirst({ where: { id: courseId, userId: user.id } });
     if (!course) return { status: 404, error: "Course not found" };
 
@@ -202,7 +202,7 @@ chatRouter.post("/ask", async (req, res) => {
   // Short write transaction: the student's turn is only persisted once there is
   // an answer to show, which is why the client keeps the optimistic bubble.
   const outcome = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const course = await tx.course.findFirst({
       where: { id: prepared.course.id, userId: user.id },
       select: { id: true },
@@ -241,7 +241,7 @@ chatRouter.get("/messages", async (req, res) => {
   const courseId = String(req.query.courseId ?? "");
   if (!courseId) return res.status(400).json({ error: "courseId is required" });
   const messages = await withUser(identity.clerkId, async (tx) => {
-    await ensureUser(tx, identity);
+    await requireUser(tx, identity);
     const course = await tx.course.findFirst({ where: { id: courseId } });
     if (!course) return null;
     return tx.chatMessage.findMany({ where: { courseId }, orderBy: { createdAt: "asc" } });

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { withUser } from "../lib/db.js";
-import { ensureUser } from "../lib/user.js";
+import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { studyQueueConfigured, enqueueStudyJob } from "../lib/queue.js";
 import { aiConfigured } from "../lib/ai.js";
@@ -46,7 +46,7 @@ studyRouter.post("/sync/reviews", async (req, res) => {
   }
 
   const cards = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     // Only cards the student actually owns are processed.
     const cardIds = [...new Set(logs.map((log) => String(log.cardId)))];
     const owned = new Set(
@@ -140,7 +140,7 @@ studyRouter.post("/sync/quiz-attempts", async (req, res) => {
   }
 
   await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const quizIds = [...new Set(attempts.map((attempt) => String(attempt.quizId)))];
     const owned = new Set(
       (
@@ -186,7 +186,7 @@ function dayKey(date) {
 studyRouter.get("/home-summary", async (req, res) => {
   const identity = await identityFromRequest(req);
   const summary = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const now = new Date();
     const startOfToday = new Date(now);
     startOfToday.setUTCHours(0, 0, 0, 0);
@@ -248,7 +248,7 @@ studyRouter.get("/home-summary", async (req, res) => {
 studyRouter.get("/sets", async (req, res) => {
   const identity = await identityFromRequest(req);
   const sets = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const notes = await tx.note.findMany({
       where: { userId: user.id },
       select: {
@@ -287,7 +287,7 @@ studyRouter.get("/due", async (req, res) => {
   );
   const aheadDays = Math.min(30, Math.max(1, Number(req.query.ahead) || 0));
   const outcome = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const now = new Date();
     const aheadUntil = new Date(now.getTime() + aheadDays * 86_400_000);
     const [due, cards, aheadCards] = await Promise.all([
@@ -332,7 +332,7 @@ studyRouter.get("/due", async (req, res) => {
 studyRouter.get("/quizzes/:quizId", async (req, res) => {
   const identity = await identityFromRequest(req);
   const quiz = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const row = await tx.quiz.findFirst({
       where: { id: req.params.quizId, userId: user.id },
       include: {
@@ -378,7 +378,7 @@ studyRouter.post("/attempts", async (req, res) => {
   }
 
   const created = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const quiz = await tx.quiz.findFirst({
       where: { id: String(attempt.quizId), userId: user.id },
       include: { questions: { orderBy: { ordinal: "asc" } } },
@@ -430,7 +430,7 @@ studyRouter.post("/attempts", async (req, res) => {
   if (created.needsMarking) {
     // One live marking job per attempt; a stale failed job can be resubmitted.
     job = await withUser(identity.clerkId, async (tx) => {
-      const user = await ensureUser(tx, identity);
+      const user = await requireUser(tx, identity);
       const activeStates = ["queued", "running"];
       const existing = await tx.job.findFirst({
         where: {
@@ -465,7 +465,7 @@ studyRouter.post("/attempts", async (req, res) => {
 studyRouter.get("/attempts/:id", async (req, res) => {
   const identity = await identityFromRequest(req);
   const attempt = await withUser(identity.clerkId, async (tx) => {
-    await ensureUser(tx, identity);
+    await requireUser(tx, identity);
     return tx.quizAttempt.findUnique({ where: { id: req.params.id } });
   });
   if (!attempt) return res.status(404).json({ error: "Attempt not found" });
@@ -498,7 +498,7 @@ studyRouter.post("/notes/:noteId/cards", async (req, res) => {
   if (!fields) return res.status(400).json({ error: "front and back are required" });
 
   const card = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const note = await tx.note.findFirst({
       where: { id: req.params.noteId, userId: user.id },
     });
@@ -528,7 +528,7 @@ studyRouter.patch("/cards/:cardId", async (req, res) => {
   if (!fields) return res.status(400).json({ error: "front and back are required" });
 
   const outcome = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const card = await tx.flashcard.findFirst({
       where: { id: req.params.cardId, userId: user.id },
     });
@@ -544,7 +544,7 @@ studyRouter.patch("/cards/:cardId", async (req, res) => {
 studyRouter.delete("/cards/:cardId", async (req, res) => {
   const identity = await identityFromRequest(req);
   const outcome = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const card = await tx.flashcard.findFirst({
       where: { id: req.params.cardId, userId: user.id },
     });

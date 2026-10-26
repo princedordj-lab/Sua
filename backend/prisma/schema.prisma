@@ -19,6 +19,7 @@ model User {
   clerkId              String    @unique
   email                String    @unique
   name                 String?
+  imageUrl             String?
   university           String?
   programme            String?
   level                String?

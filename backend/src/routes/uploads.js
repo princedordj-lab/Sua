@@ -5,7 +5,7 @@ import { assetDownloadUrl, deleteAssetObject, readAssetBytes, storageProviderOf,
 import { withUser } from "../lib/db.js";
 import { extractDocumentText } from "../lib/extract.js";
 import { maybeEnqueueGeneration } from "../lib/pipeline.js";
-import { ensureUser } from "../lib/user.js";
+import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 
 export const uploadsRouter = Router();
@@ -128,7 +128,7 @@ uploadsRouter.post("/sign", async (req, res) => {
       : "none";
 
   const outcome = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     if (noteId) {
       const note = await tx.note.findFirst({
         where: { id: noteId },
@@ -218,7 +218,7 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
   const claimedPublicId = String(req.body?.publicId ?? "");
 
   const existingAsset = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     return tx.asset.findFirst({ where: { id, userId: user.id } });
   });
 
@@ -248,7 +248,7 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     }
 
     outcome = await withUser(identity.clerkId, async (tx) => {
-      const user = await ensureUser(tx, identity);
+      const user = await requireUser(tx, identity);
       const current = await tx.asset.findFirst({ where: { id, userId: user.id } });
       if (!current) return { status: 404, error: "Asset not found" };
       // A concurrent completion may already have activated this same asset.
@@ -276,7 +276,7 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
   // extract text for, or enqueue work against, a note the student deleted.
   if (asset.noteId) {
     const noteAlive = await withUser(identity.clerkId, async (tx) => {
-      const user = await ensureUser(tx, identity);
+      const user = await requireUser(tx, identity);
       const note = await tx.note.findFirst({
         where: { id: asset.noteId, userId: user.id },
         select: { id: true },
@@ -286,7 +286,7 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     if (!noteAlive) {
       const orphan = asset;
       await withUser(identity.clerkId, async (tx) => {
-        const user = await ensureUser(tx, identity);
+        const user = await requireUser(tx, identity);
         await tx.asset.deleteMany({ where: { id: orphan.id, userId: user.id } });
       }).catch(() => {});
       try {
@@ -344,7 +344,7 @@ assetsRouter.get("/:id/url", async (req, res) => {
   const identity = await identityFromRequest(req);
   const { id } = req.params;
   const asset = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     return tx.asset.findFirst({ where: { id, userId: user.id, status: "active" } });
   });
   if (!asset) return res.status(404).json({ error: "Asset not found" });
@@ -363,7 +363,7 @@ assetsRouter.delete("/:id", async (req, res) => {
   const { id } = req.params;
 
   const asset = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     return tx.asset.findFirst({ where: { id, userId: user.id } });
   });
   if (!asset) return res.status(404).json({ error: "Asset not found" });

@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { deleteAssetObject } from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
-import { ensureUser } from "../lib/user.js";
+import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { maybeEnqueueGeneration } from "../lib/pipeline.js";
 
@@ -28,7 +28,7 @@ function shapeNote(note) {
 notesRouter.get("/course/:courseId", async (req, res) => {
   const identity = await identityFromRequest(req);
   const notes = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     return tx.note.findMany({
       where: { userId: user.id, courseId: req.params.courseId },
       orderBy: { updatedAt: "desc" },
@@ -42,7 +42,7 @@ notesRouter.get("/course/:courseId", async (req, res) => {
 notesRouter.get("/:noteId", async (req, res) => {
   const identity = await identityFromRequest(req);
   const note = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     return tx.note.findFirst({ where: { id: req.params.noteId, userId: user.id } });
   });
   if (!note) return res.status(404).json({ error: "Note not found" });
@@ -59,7 +59,7 @@ notesRouter.post("/sync", async (req, res) => {
   const storageDeletes = [];
 
   const { notes, results } = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const notes = [];
     const results = [];
     for (const change of changes) {
@@ -193,7 +193,7 @@ notesRouter.post("/sync", async (req, res) => {
 notesRouter.get("/:noteId/study", async (req, res) => {
   const identity = await identityFromRequest(req);
   const study = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const note = await tx.note.findFirst({
       where: { id: req.params.noteId, userId: user.id },
     });

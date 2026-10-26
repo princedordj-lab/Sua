@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { withUser } from "../lib/db.js";
-import { ensureUser } from "../lib/user.js";
+import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { aiConfigured } from "../lib/ai.js";
 import {
@@ -138,7 +138,7 @@ jobsRouter.post("/", async (req, res) => {
   }
 
   const outcome = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const note = await tx.note.findFirst({
       where: { id: noteId, userId: user.id },
       include: { course: { select: { id: true } } },
@@ -182,7 +182,7 @@ jobsRouter.post("/", async (req, res) => {
 
   // Cap awareness is warn-only until billing (Milestone 5).
   const warning = await warnIfOverCaps(
-    (await withUser(identity.clerkId, (tx) => ensureUser(tx, identity))).id,
+    (await withUser(identity.clerkId, (tx) => requireUser(tx, identity))).id,
   );
   if (warning) console.warn(`[CAP WARNING] ${identity.email}: ${warning}`);
 
@@ -200,7 +200,7 @@ jobsRouter.post("/", async (req, res) => {
 jobsRouter.get("/:id", async (req, res) => {
   const identity = await identityFromRequest(req);
   const job = await withUser(identity.clerkId, async (tx) => {
-    await ensureUser(tx, identity);
+    await requireUser(tx, identity);
     const found = await tx.job.findFirst({ where: { id: req.params.id } });
     return reapIfStale(tx, found);
   });
@@ -212,7 +212,7 @@ jobsRouter.get("/:id", async (req, res) => {
 jobsRouter.get("/note/:noteId", async (req, res) => {
   const identity = await identityFromRequest(req);
   const job = await withUser(identity.clerkId, async (tx) => {
-    await ensureUser(tx, identity);
+    await requireUser(tx, identity);
     const found = await tx.job.findFirst({
       where: { noteId: req.params.noteId },
       orderBy: { createdAt: "desc" },
@@ -238,7 +238,7 @@ jobsRouter.post("/feedback", async (req, res) => {
     return res.status(400).json({ error: "comment is required" });
   }
   const feedback = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     return tx.feedback.create({
       data: {
         userId: user.id,

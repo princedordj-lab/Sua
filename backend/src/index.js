@@ -75,36 +75,26 @@ app.use("/api", (_req, res) => {
 
 app.use((err, req, res, _next) => {
   const prismaCode = typeof err?.code === "string" ? err.code : "-";
-  const rawMessage = typeof err?.message === "string" ? err.message : "Unknown error";
-  const safeMessage = rawMessage
-    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_-]+\b/gi, "[redacted-key]")
-    .replace(/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-token]")
-    .replace(/https?:\/\/[^\s"']+/gi, (url) => {
-      try {
-        const parsed = new URL(url);
-        if (parsed.search || /signed|signature|token|credential|key/i.test(parsed.pathname)) {
-          return `${parsed.origin}${parsed.pathname}?[redacted]`;
-        }
-        return url;
-      } catch {
-        return "[redacted-url]";
-      }
-    })
-    .replace(/\b(NEON_API_KEY|CLERK_SECRET_KEY|GEMINI_API_KEY|XKIRO_API_KEY)\b\s*[:=]\s*\S+/gi, "$1=[redacted]")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 240);
-  // In production, arbitrary exception messages can contain user supplied note
-  // text. Keep the diagnostic fields and message slot, but do not emit it.
-  const loggedMessage = process.env.NODE_ENV === "production" ? "[redacted]" : safeMessage;
-  const safePath = String(req.path)
-    .replace(/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-token]")
-    .replace(/(?:signed|signature|token|credential|key)[^/]*$/i, "[redacted]")
-    .slice(0, 160);
-  console.error(
-    `[api-error] method=${req.method} path=${safePath} name=${String(err?.name ?? "Error").slice(0, 80)} prismaCode=${prismaCode} message=${loggedMessage}`,
-  );
+  const name = String(err?.name ?? "Error").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80) || "Error";
+  const safePath = String(req.path).replace(/[\r\n\s]/g, "_").slice(0, 160);
+  const target = err?.meta?.target;
+  const adapter = err?.meta?.driverAdapterError;
+  const constraintFields = [];
+  if (Array.isArray(target)) constraintFields.push(...target.filter((v) => typeof v === "string"));
+  else if (typeof target === "string") constraintFields.push(target);
+  for (const value of [adapter?.cause?.constraint, adapter?.constraint]) {
+    if (typeof value === "string") constraintFields.push(value);
+  }
+  for (const values of [adapter?.cause?.fields, adapter?.fields]) {
+    if (Array.isArray(values)) constraintFields.push(...values.filter((v) => typeof v === "string"));
+  }
+  const constraint = prismaCode === "P2002" && constraintFields.length
+    ? ` constraint=${[...new Set(constraintFields)].map((v) => v.replace(/[^A-Za-z0-9_.,-]/g, "").slice(0, 100)).join(",")}`
+    : "";
+  console.error(`[api-error] method=${req.method} path=${safePath} name=${name} prismaCode=${prismaCode}${constraint}`);
+  if (err?.status === 409 && err?.code === "ACCOUNT_CONFLICT") {
+    return res.status(409).json({ error: "ACCOUNT_CONFLICT", message: err.message });
+  }
   res.status(500).json({ error: "INTERNAL", message: "Something went wrong" });
 });
 

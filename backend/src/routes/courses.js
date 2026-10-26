@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { deleteAssetObject } from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
-import { ensureUser } from "../lib/user.js";
+import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 
 export const coursesRouter = Router();
@@ -28,7 +28,7 @@ function parseDate(value) {
 coursesRouter.get("/", async (req, res) => {
   const identity = await identityFromRequest(req);
   const courses = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     // Archived courses are included so the client's Archived filter survives
     // a restart; screens pick active courses explicitly where needed.
     return tx.course.findMany({
@@ -51,7 +51,7 @@ coursesRouter.post("/", async (req, res) => {
     return res.status(400).json({ error: "examDate must be a valid date" });
   }
   const course = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     return tx.course.create({
       data: {
         userId: user.id,
@@ -86,7 +86,7 @@ coursesRouter.patch("/:id", async (req, res) => {
     changes.examDate = parsedExamDate;
   }
   const course = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     const result = await tx.course.updateMany({
       where: { id, userId: user.id },
       data: changes,
@@ -108,7 +108,7 @@ coursesRouter.delete("/:id", async (req, res) => {
   const { id } = req.params;
   const moveToCourseId = req.body?.moveToCourseId;
   const result = await withUser(identity.clerkId, async (tx) => {
-    const user = await ensureUser(tx, identity);
+    const user = await requireUser(tx, identity);
     if (moveToCourseId) {
       if (moveToCourseId === id) return { count: 0, error: "invalid_move_target" };
       const target = await tx.course.findFirst({
