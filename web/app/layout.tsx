@@ -6,6 +6,7 @@ import { AppearanceProvider } from "@/config/appearance";
 import { colors } from "@/config/theme";
 import "./globals.css";
 import "./app.css";
+import "./legal.css";
 
 const plusJakartaSans = Plus_Jakarta_Sans({
   variable: "--font-plus-jakarta-sans",

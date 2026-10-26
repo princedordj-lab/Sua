@@ -350,6 +350,8 @@ export default function Home() {
         <div className="footer-links">
           <Link href="/sign-in">Sign in</Link>
           <Link href="/sign-up">Create an account</Link>
+          <Link href="/policy">Privacy policy</Link>
+          <Link href="/terms">Terms</Link>
           <a href="#top">Back to top ↑</a>
         </div>
       </footer>
