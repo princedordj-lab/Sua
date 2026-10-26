@@ -24,7 +24,7 @@ export const STALE_RUNNING_MS = 90 * 60_000;
 let cached = null;
 
 export function studyQueueConfigured() {
-  return Boolean(process.env.REDIS_URL);
+  return Boolean(process.env.CLOUDFLARE_WORKER_URL || process.env.REDIS_URL);
 }
 
 /**
@@ -77,7 +77,7 @@ function connection() {
 let queue = null;
 
 export function getStudyQueue() {
-  if (!studyQueueConfigured()) throw new Error("Redis is not configured");
+  if (!process.env.REDIS_URL) throw new Error("Redis is not configured");
   if (!queue) {
     queue = new Queue(STUDY_QUEUE, {
       connection: connection(),
@@ -94,10 +94,10 @@ export function getStudyQueue() {
 
 /**
  * Idempotent enqueue with lightweight payload: { jobId, noteId, userId, kind }.
- * Never passes file buffers, base64 strings, or document text in BullMQ job data.
+ * Supports Cloudflare Queues via CLOUDFLARE_WORKER_URL, or BullMQ on Redis.
+ * Never passes file buffers, base64 strings, or document text in job data.
  */
 export async function enqueueStudyJob(payload) {
-  const queue = getStudyQueue();
   const data =
     typeof payload === "object" && payload !== null
       ? {
@@ -108,8 +108,27 @@ export async function enqueueStudyJob(payload) {
         }
       : { jobId: String(payload) };
 
+  // 1. Cloudflare Workers + Queues bridge
+  if (process.env.CLOUDFLARE_WORKER_URL) {
+    const url = `${process.env.CLOUDFLARE_WORKER_URL.replace(/\/+$/, "")}/enqueue`;
+    const headers = { "Content-Type": "application/json" };
+    if (process.env.CLOUDFLARE_WORKER_SECRET) {
+      headers["Authorization"] = `Bearer ${process.env.CLOUDFLARE_WORKER_SECRET}`;
+    }
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(data),
+    });
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(`Cloudflare enqueue failed (${response.status}): ${errorText.slice(0, 160)}`);
+    }
+    return;
+  }
+
+  // 2. BullMQ / Redis fallback
+  const queue = getStudyQueue();
   const jobKind = data.kind || "study_set";
-  // BullMQ 6 rejects ":" in a custom job id ("Custom Id cannot contain :"),
-  // which broke every enqueue even after the queue name was fixed.
   await queue.add(jobKind, data, { jobId: `study-${data.jobId}` });
 }

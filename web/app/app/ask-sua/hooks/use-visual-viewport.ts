@@ -6,7 +6,9 @@ import { useEffect, useRef, useState } from "react";
  * Manages iOS Safari and mobile browser visual viewport adjustments.
  * Subscribes to window.visualViewport resize and scroll events in requestAnimationFrame,
  * sets `--app-vh` on the target container ref or root, detects if the virtual
- * keyboard is open (>150px delta), and prevents background body scrolling.
+ * keyboard is open (>150px delta). All viewport state stays scoped to the
+ * chat container so an App Router-cached Ask Sua route cannot affect other
+ * pages after navigation.
  */
 export function useVisualViewportHeight<T extends HTMLElement = HTMLDivElement>() {
   const containerRef = useRef<T | null>(null);
@@ -15,9 +17,6 @@ export function useVisualViewportHeight<T extends HTMLElement = HTMLDivElement>(
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
 
     const updateViewport = () => {
       if (rafId.current) cancelAnimationFrame(rafId.current);
@@ -29,12 +28,6 @@ export function useVisualViewportHeight<T extends HTMLElement = HTMLDivElement>(
 
         const open = window.innerHeight - (vv ? vv.height : window.innerHeight) > 150;
         setIsKeyboardOpen(open);
-
-        if (open) {
-          document.documentElement.dataset.keyboardOpen = "true";
-        } else {
-          delete document.documentElement.dataset.keyboardOpen;
-        }
 
         const target = containerRef.current ?? document.documentElement;
         target.style.setProperty("--app-vh", `${effectiveHeight}px`);
@@ -52,8 +45,6 @@ export function useVisualViewportHeight<T extends HTMLElement = HTMLDivElement>(
     window.addEventListener("orientationchange", updateViewport);
 
     return () => {
-      document.body.style.overflow = previousOverflow;
-      delete document.documentElement.dataset.keyboardOpen;
       if (rafId.current) cancelAnimationFrame(rafId.current);
       if (vv) {
         vv.removeEventListener("resize", updateViewport);

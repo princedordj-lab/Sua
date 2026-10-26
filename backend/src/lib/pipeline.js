@@ -78,7 +78,7 @@ async function recordAiCall(jobId, step, result) {
  * (3 attempts with exponential backoff); the Job row carries the stage/error
  * the app displays. Every persist is idempotent (replace) so reruns are clean.
  */
-export async function processJob(jobId) {
+export async function processJob(jobId, documentExtraction) {
   const job = await prisma.job.findUnique({
     where: { id: jobId },
     include: {
@@ -93,14 +93,14 @@ export async function processJob(jobId) {
   }
   if (job.state === "done") return;
   if (job.kind === "course_reference") {
-    await processReference(job);
+    await processReference(job, documentExtraction);
     return;
   }
   if (job.kind === "quiz_marking") {
     await processQuizMarking(job);
     return;
   }
-  await processStudySet(job);
+  await processStudySet(job, documentExtraction);
 }
 
 // A note deleted mid-run surfaces as a missing row (P2025) from any later
@@ -182,7 +182,7 @@ function courseContextOf(note) {
  * outside withUser — the pipeline only calls back into the database for short,
  * idempotent writes.
  */
-function noteDeps(job) {
+function noteDeps(job, documentExtraction) {
   return {
     record: (step, result) => recordAiCall(job.id, step, result),
     readBytes: (asset) => fetchAssetBytes(asset),
@@ -195,6 +195,7 @@ function noteDeps(job) {
       ),
     setStage: (stage) => setStage(job, stage),
     assertAlive: () => assertNoteAlive(job),
+    ...documentExtraction,
   };
 }
 
@@ -225,7 +226,7 @@ async function guardRerun(job, hash) {
   return false;
 }
 
-export async function processStudySet(job) {
+export async function processStudySet(job, documentExtraction) {
   const { note, user } = job;
   await startAttempt(job);
 
@@ -236,7 +237,7 @@ export async function processStudySet(job) {
       note,
       kind: job.kind,
       courseContext,
-      deps: noteDeps(job),
+      deps: noteDeps(job, documentExtraction),
     });
 
     // The source hash is known before the expensive write, so a repeat run
@@ -446,7 +447,7 @@ async function finishMarkingJob(job) {
   });
 }
 
-export async function processReference(job) {
+export async function processReference(job, documentExtraction) {
   const { note, user } = job;
   await startAttempt(job);
 
@@ -456,7 +457,7 @@ export async function processReference(job) {
       note,
       kind: job.kind,
       courseContext,
-      deps: noteDeps(job),
+      deps: noteDeps(job, documentExtraction),
     });
     const hash = sourceHashOf(prepared.sourceHashInput);
     if (await guardRerun(job, hash)) return;

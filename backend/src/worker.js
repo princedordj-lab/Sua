@@ -3,6 +3,7 @@ import { Worker } from "bullmq";
 import Ioredis from "ioredis";
 import { prisma } from "./config/prisma.js";
 import { processJob } from "./lib/pipeline.js";
+import { extractDocument, renderPdfPage } from "./lib/extract.js";
 import { redisConnectionUrl, STUDY_QUEUE } from "./lib/queue.js";
 
 if (!process.env.REDIS_URL) {
@@ -122,7 +123,7 @@ const worker = new Worker(
 
     const started = Date.now();
     try {
-      await processJob(jobId);
+      await processJob(jobId, { extractDocument, renderPdfPage });
       console.log(`job ${jobId} completed in ${Date.now() - started}ms`);
     } catch (error) {
       console.warn(

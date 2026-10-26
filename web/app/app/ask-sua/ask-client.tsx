@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { MessageCircle, PlusCircle, Trash2 } from "lucide-react";
+import { ArrowLeft, MessageCircle, PlusCircle, Trash2 } from "lucide-react";
 import { useAppData } from "@/components/app-data";
 import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
@@ -248,6 +248,26 @@ export function AskSuaClient() {
     setDividerNotice(null);
   };
 
+  const handleBack = () => {
+    const referrer = document.referrer;
+    const cameFromSua = (() => {
+      if (!referrer) return false;
+
+      try {
+        return new URL(referrer).origin === window.location.origin;
+      } catch {
+        return false;
+      }
+    })();
+
+    if (cameFromSua && window.history.length > 1) {
+      router.back();
+      return;
+    }
+
+    router.replace("/app/home");
+  };
+
   if (!appLoading && courses.length === 0) {
     return (
       <div className="ask-chat-layout is-no-courses">
@@ -273,6 +293,15 @@ export function AskSuaClient() {
       {/* Top Header */}
       <header className="ask-header">
         <div className="ask-header-left">
+          <button
+            type="button"
+            onClick={handleBack}
+            className="ask-back-btn"
+            aria-label="Back to previous page"
+          >
+            <ArrowLeft size={18} aria-hidden="true" />
+            <span>Back</span>
+          </button>
           <h1 className="ask-header-title">Ask Sua</h1>
           {activeCourse ? (
             <span className="ask-header-subtitle">

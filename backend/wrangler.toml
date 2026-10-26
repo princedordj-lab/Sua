@@ -1,0 +1,20 @@
+name = "sua-ai-worker"
+main = "src/cloudflare-worker.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Produce to the study-set queue from the HTTP /enqueue route
+[[queues.producers]]
+queue = "sua-study-set"
+binding = "STUDY_QUEUE"
+
+# Consume jobs from the queue with Cloudflare's 15-minute invocation window
+[[queues.consumers]]
+queue = "sua-study-set"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "sua-study-set-dlq"
+
+[vars]
+NODE_ENV = "production"

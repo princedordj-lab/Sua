@@ -73,6 +73,25 @@ function BottomNav() {
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense fallback={<AppShellContent pathname={null}>{children}</AppShellContent>}>
+      <AppShellWithPathname>{children}</AppShellWithPathname>
+    </Suspense>
+  );
+}
+
+function AppShellWithPathname({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  return <AppShellContent pathname={pathname}>{children}</AppShellContent>;
+}
+
+function AppShellContent({
+  children,
+  pathname,
+}: {
+  children: React.ReactNode;
+  pathname: string | null;
+}) {
   const router = useRouter();
   const { signOut } = useClerk();
   const { user } = useUser();
@@ -90,9 +109,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const name = profile?.name || user?.fullName || user?.firstName || "Sua student";
   const usage = profile?.usage;
   const summaryPercent = usage ? (usage.summaries / Math.max(1, usage.limits.summaries)) * 100 : 0;
+  const isAskSua = pathname === "/app/ask-sua";
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${isAskSua ? " is-ask-sua" : ""}`}>
       <aside className="app-sidebar" aria-label="Main navigation">
         <div className="sidebar-top">
           <Logo href="/app/home" />

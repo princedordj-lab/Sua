@@ -19,7 +19,11 @@ import {
   chatCompletion,
   strongModel,
 } from "./ai.js";
-import { extractDocument, renderPdfPage } from "./extract.js";
+// extract.js pulls in @napi-rs/canvas (a native .node binary) and pdf-parse,
+// neither of which can be bundled into a Cloudflare Worker. Both functions are
+// imported lazily inside documentSegments() so this module can be required in
+// CF Workers environments where the extract path is never reached.
+// import { extractDocument, renderPdfPage } from "./extract.js"; // lazy — see below
 import { checkSourceFidelity } from "./numbers.js";
 import {
   PROMPT_VERSION,
@@ -193,14 +197,21 @@ async function documentSegments(asset, deps, onScan) {
   if (!asset.bytes || asset.bytes <= 0) {
     return { segments: [], truncated: false, pageCount: 0 };
   }
-  // For non-PDF documents where text was already extracted inline on upload completion,
-  // reuse the persisted text directly rather than re-downloading from storage.
-  if (asset.format !== "pdf" && text(asset.extractedText)) {
+  // Upload completion has already extracted document text in the Node API. Reuse
+  // it for every format (including PDFs) so a Cloudflare Worker never needs to
+  // load the native canvas/PDF stack merely to process an ordinary upload.
+  if (text(asset.extractedText)) {
     return {
       segments: [{ index: 1, label: null, text: text(asset.extractedText) }],
       truncated: false,
       pageCount: 1,
     };
+  }
+  // The Node/BullMQ worker supplies these native-PDF helpers. They are omitted
+  // from the Cloudflare Worker dependency graph because Workers cannot load a
+  // platform-specific `.node` addon such as @napi-rs/canvas.
+  if (!deps.extractDocument) {
+    return { segments: [], truncated: false, pageCount: 0 };
   }
   let bytes;
   try {
@@ -217,7 +228,7 @@ async function documentSegments(asset, deps, onScan) {
       pageCount: 1,
     };
   }
-  const extracted = await extractDocument(bytes, asset.format, asset.kind);
+  const extracted = await deps.extractDocument(bytes, asset.format, asset.kind);
   if (!extracted) {
     return {
       segments: asset.extractedText
@@ -251,7 +262,11 @@ async function documentSegments(asset, deps, onScan) {
     }
     scans += 1;
     await onScan();
-    const image = await renderPdfPage(
+    if (!deps.renderPdfPage) {
+      if (existing) segments.push({ ...segment, text: existing });
+      continue;
+    }
+    const image = await deps.renderPdfPage(
       bytes,
       segment.index,
       notePipeline.ocrScale,

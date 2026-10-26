@@ -4548,13 +4548,13 @@
 /* --------------------------------------------------------------- ask sua (Claude-style chat) */
 
 /* Layout containment for full-height chat */
-.app-shell:has(.ask-chat-layout) {
+.app-shell.is-ask-sua {
   height: var(--app-vh, 100dvh);
   max-height: var(--app-vh, 100dvh);
   overflow: hidden;
 }
 
-.app-shell:has(.ask-chat-layout) .app-main {
+.app-shell.is-ask-sua .app-main {
   height: 100%;
   max-height: 100%;
   display: flex;
@@ -4562,7 +4562,7 @@
   overflow: hidden;
 }
 
-.app-content:has(.ask-chat-layout) {
+.app-shell.is-ask-sua .app-content {
   width: 100%;
   max-width: 100%;
   height: 100%;
@@ -4575,13 +4575,9 @@
   overflow: hidden;
 }
 
-/* Hide floating mobile bottom-nav when keyboard is open or on mobile ask chat */
-html[data-keyboard-open="true"] .bottom-nav {
-  display: none !important;
-}
-
+/* Ask Sua owns the mobile viewport, including its composer. */
 @media (max-width: 768px) {
-  body:has(.ask-chat-layout) .bottom-nav {
+  .app-shell.is-ask-sua .bottom-nav {
     display: none !important;
   }
 }
@@ -4589,7 +4585,7 @@ html[data-keyboard-open="true"] .bottom-nav {
 .ask-chat-layout {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: var(--app-vh, 100%);
   min-height: 0;
   background: var(--cream);
   position: relative;
@@ -4623,6 +4619,30 @@ html[data-keyboard-open="true"] .bottom-nav {
   display: flex;
   align-items: baseline;
   gap: 12px;
+}
+
+.ask-back-btn {
+  display: inline-flex;
+  min-width: 48px;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease;
+}
+
+.ask-back-btn:hover {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
 }
 
 .ask-header-title {
