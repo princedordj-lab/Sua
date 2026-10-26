@@ -73,15 +73,39 @@ app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
-app.use((err, _req, res, _next) => {
-  const status = Number(err.status ?? err.statusCode ?? 500);
-  if (status >= 500) {
-    console.error("Internal server error:", err);
-    return res
-      .status(status)
-      .json({ error: "Something went wrong. Please try again in a moment." });
-  }
-  res.status(status).json({ error: err.message ?? "Request failed" });
+app.use((err, req, res, _next) => {
+  const prismaCode = typeof err?.code === "string" ? err.code : "-";
+  const rawMessage = typeof err?.message === "string" ? err.message : "Unknown error";
+  const safeMessage = rawMessage
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_-]+\b/gi, "[redacted-key]")
+    .replace(/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-token]")
+    .replace(/https?:\/\/[^\s"']+/gi, (url) => {
+      try {
+        const parsed = new URL(url);
+        if (parsed.search || /signed|signature|token|credential|key/i.test(parsed.pathname)) {
+          return `${parsed.origin}${parsed.pathname}?[redacted]`;
+        }
+        return url;
+      } catch {
+        return "[redacted-url]";
+      }
+    })
+    .replace(/\b(NEON_API_KEY|CLERK_SECRET_KEY|GEMINI_API_KEY|XKIRO_API_KEY)\b\s*[:=]\s*\S+/gi, "$1=[redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+  // In production, arbitrary exception messages can contain user supplied note
+  // text. Keep the diagnostic fields and message slot, but do not emit it.
+  const loggedMessage = process.env.NODE_ENV === "production" ? "[redacted]" : safeMessage;
+  const safePath = String(req.path)
+    .replace(/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted-token]")
+    .replace(/(?:signed|signature|token|credential|key)[^/]*$/i, "[redacted]")
+    .slice(0, 160);
+  console.error(
+    `[api-error] method=${req.method} path=${safePath} name=${String(err?.name ?? "Error").slice(0, 80)} prismaCode=${prismaCode} message=${loggedMessage}`,
+  );
+  res.status(500).json({ error: "INTERNAL", message: "Something went wrong" });
 });
 
 // Export for Vercel serverless function
