@@ -80,7 +80,8 @@ export function FormSheet({
           className="flex-1"
         />
         <ScrollView
-          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="none"
+          keyboardShouldPersistTaps="always"
           contentContainerClassName="rounded-t-sheet bg-cream p-6 pb-10"
         >
           <View className="mb-6 flex-row items-center justify-between">

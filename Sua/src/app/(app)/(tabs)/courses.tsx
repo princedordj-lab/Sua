@@ -399,6 +399,7 @@ export default function Courses() {
           <Plus size={18} color={colors.gold.DEFAULT} />
           <Text className="font-bold text-gold">Add another course</Text>
         </Pressable>
+      </ScrollView>
         <Modal
           visible={!!actionsFor}
           transparent
@@ -539,7 +540,6 @@ export default function Courses() {
             {editing ? "Save changes" : "Create course"}
           </PrimaryButton>
         </FormSheet>
-      </ScrollView>
     </SafeAreaView>
   );
 }
