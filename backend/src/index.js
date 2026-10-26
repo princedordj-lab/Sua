@@ -25,10 +25,16 @@ app.use(
 );
 
 app.use(express.json());
+
+const origins = (process.env.CORS_ORIGIN ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 app.use(
   cors({
-    origin: process.env.CORS_ORIGIN === "*" ? true : process.env.CORS_ORIGIN,
-  }),
+    origin: origins.length === 0 || origins.includes("*") ? true : origins,
+  })
 );
 
 app.get("/api/health", (_req, res) => {
