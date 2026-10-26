@@ -3,7 +3,8 @@
   "buildCommand": "npm run build",
   "functions": {
     "src/index.js": {
-      "maxDuration": 300
+      "maxDuration": 300,
+      "includeFiles": "node_modules/**/pdfjs-dist/**"
     }
   }
 }

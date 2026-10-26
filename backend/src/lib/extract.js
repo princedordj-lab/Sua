@@ -202,12 +202,16 @@ let canvasGlobals;
 
 async function installCanvasGlobals() {
   if (!canvasGlobals) {
-    canvasGlobals = import("@napi-rs/canvas").catch((error) => {
-      console.warn(
-        `Canvas globals unavailable (@napi-rs/canvas): ${error?.message ?? error}`,
-      );
-      return null;
-    });
+    canvasGlobals = Promise.all([
+      import("@napi-rs/canvas").catch((error) => {
+        console.warn(
+          `Canvas globals unavailable (@napi-rs/canvas): ${error?.message ?? error}`,
+        );
+        return null;
+      }),
+      // Literal specifier so Vercel's Node File Trace (NFT) traces pdf.worker.mjs into the deployment bundle
+      import("pdfjs-dist/legacy/build/pdf.worker.mjs").catch(() => null),
+    ]).then(([canvas]) => canvas);
   }
   const canvas = await canvasGlobals;
   if (!canvas) return;
