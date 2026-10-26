@@ -26,14 +26,22 @@ const API_URL =
   (Platform.OS === "android" ? "http://10.0.2.2:4000/api" : "http://localhost:4000/api");
 type RequestOptions = RequestInit & { token?: string };
 
+// Every request gets a ceiling. Without one, a half-open connection leaves the
+// fetch pending forever; the note-sync pass is serialised per database, so one
+// stuck request would block every later sync and leave notes "Waiting to sync".
+const REQUEST_TIMEOUT_MS = 30_000;
+
 export async function apiRequest<T>(
   path: string,
   options: RequestOptions = {},
 ) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
     response = await fetch(`${API_URL}${path}`, {
       ...options,
+      signal: options.signal ?? controller.signal,
       headers: {
         "Content-Type": "application/json",
         ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
@@ -42,6 +50,8 @@ export async function apiRequest<T>(
     });
   } catch {
     throw new Error("Could not connect to Sua. Check your internet connection.");
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!response.ok) {

@@ -15,6 +15,7 @@ function shapeCourse(course) {
     colour: course.colour,
     lecturer: course.lecturer ?? null,
     archived: course.archived,
+    noteCount: course._count?.notes ?? 0,
   };
 }
 
@@ -33,6 +34,7 @@ coursesRouter.get("/", async (req, res) => {
     return tx.course.findMany({
       where: { userId: user.id },
       orderBy: [{ archived: "asc" }, { createdAt: "asc" }],
+      include: { _count: { select: { notes: true } } },
     });
   });
   res.json(courses.map(shapeCourse));
@@ -59,6 +61,7 @@ coursesRouter.post("/", async (req, res) => {
         colour: colour || undefined,
         lecturer: lecturer ? String(lecturer).trim() : null,
       },
+      include: { _count: { select: { notes: true } } },
     });
   });
   res.status(201).json(shapeCourse(course));
@@ -89,7 +92,10 @@ coursesRouter.patch("/:id", async (req, res) => {
       data: changes,
     });
     if (result.count === 0) return null;
-    return tx.course.findFirst({ where: { id, userId: user.id } });
+    return tx.course.findFirst({
+      where: { id, userId: user.id },
+      include: { _count: { select: { notes: true } } },
+    });
   });
   if (!course) {
     return res.status(404).json({ error: "Course not found" });

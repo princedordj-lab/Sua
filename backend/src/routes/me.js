@@ -4,15 +4,43 @@ import { withUser } from "../lib/db.js";
 import { ensureUser, toProfile } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { deleteAccountData } from "../lib/account.js";
+import { FREE_MONTHLY_LIMITS } from "../lib/pipeline.js";
 
 export const meRouter = Router();
 
+// Free-plan counters are read-only in the web MVP (billing ships with mobile).
+// The current month row is created lazily by the pipeline — a missing row means
+// zero usage, not an error.
+async function shapeWithUsage(tx, profile) {
+  const month = new Date().toISOString().slice(0, 7);
+  const usage = await tx.usage.findUnique({
+    where: { userId_month: { userId: profile.id, month } },
+  });
+  return {
+    ...toProfile(profile),
+    usage: {
+      month,
+      summaries: usage?.summaries ?? 0,
+      studySets: usage?.studySets ?? 0,
+      references: usage?.references ?? 0,
+      assistantQueries: usage?.assistantQueries ?? 0,
+      limits: {
+        summaries: FREE_MONTHLY_LIMITS.summaries,
+        studySets: FREE_MONTHLY_LIMITS.studySets,
+        references: FREE_MONTHLY_LIMITS.references,
+        assistantQueries: Number(process.env.FREE_ASSISTANT_QUERIES ?? 15),
+      },
+    },
+  };
+}
+
 meRouter.get("/", async (req, res) => {
   const identity = await identityFromRequest(req);
-  const profile = await withUser(identity.clerkId, (tx) =>
-    ensureUser(tx, identity),
-  );
-  res.json(toProfile(profile));
+  const profile = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    return shapeWithUsage(tx, user);
+  });
+  res.json(profile);
 });
 
 // Expo push tokens from the app; last write wins per token.
@@ -66,10 +94,11 @@ meRouter.patch("/", async (req, res) => {
   }
   const profile = await withUser(identity.clerkId, async (tx) => {
     await ensureUser(tx, identity);
-    return tx.user.update({
+    const updated = await tx.user.update({
       where: { clerkId: identity.clerkId },
       data: changes,
     });
+    return shapeWithUsage(tx, updated);
   });
   res.json(toProfile(profile));
 });

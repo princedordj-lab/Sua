@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readAssetBytes } from "./storage.js";
 import { withUser } from "./db.js";
 import { bulkModel, chatCompletion, aiConfigured } from "./ai.js";
-import { enqueueStudyJob, studyQueueConfigured } from "./queue.js";
+import { enqueueStudyJob, studyQueueConfigured, STALE_QUEUED_MS } from "./queue.js";
 import { prepareMaterial, writeNote } from "./note-pipeline.js";
 import {
   USER_MESSAGES,
@@ -715,9 +715,14 @@ export async function maybeEnqueueGeneration(clerkId, noteId) {
     // One conversion per requested destination: dedupe on active work and on
     // a job that already produced this kind for the note. A completed
     // study_set must not block a later lecture_note or reference conversion.
-    const active = note.jobs.some(
-      (row) => row.state === "queued" || row.state === "running",
-    );
+    // A job that was queued but never picked up (worker or Redis down) is dead:
+    // it must not block the conversion forever.
+    const active = note.jobs.some((row) => {
+      if (row.state === "running") return true;
+      if (row.state !== "queued") return false;
+      if (row.startedAt) return true;
+      return Date.now() - row.createdAt.getTime() < STALE_QUEUED_MS;
+    });
     if (active) return null;
     // Audio is deliberately absent: a recording is many 2-minute assets, so the
     // server would fire on the first segment. The app enqueues after the last

@@ -37,6 +37,18 @@ notesRouter.get("/course/:courseId", async (req, res) => {
   res.json(notes.map(shapeNote));
 });
 
+// Single note by id — the web viewer is link-addressed (/app/note/:id) and has
+// no local SQLite row to read from, so deep links need this lookup.
+notesRouter.get("/:noteId", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const note = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    return tx.note.findFirst({ where: { id: req.params.noteId, userId: user.id } });
+  });
+  if (!note) return res.status(404).json({ error: "Note not found" });
+  res.json(shapeNote(note));
+});
+
 notesRouter.post("/sync", async (req, res) => {
   const identity = await identityFromRequest(req);
   const changes = Array.isArray(req.body?.changes) ? req.body.changes : [];

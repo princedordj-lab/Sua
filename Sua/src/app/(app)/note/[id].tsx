@@ -63,6 +63,7 @@ import {
   reconcileAiOutputs,
   refreshNoteFromServer,
   sourceMetaFor,
+  userFacingMessage,
 } from "../../../lib/generate";
 import { splitNotices } from "../../../lib/markdown";
 import { colors } from "../../../config/theme";
@@ -72,10 +73,8 @@ import type { JobMeta } from "../../../lib/types";
 
 type ReaderTab = "notes" | "summary" | "cards" | "quiz";
 
-// The pipeline's wording for any failure it did not classify. Kept identical to
-// USER_MESSAGES.generic on the server so the student sees one message, not two.
-const GENERIC_FAILURE =
-  "Something went wrong. Tap to try again. This didn't use your monthly allowance.";
+// The pipeline's wording for failures it did not classify lives in lib/generate
+// as GENERIC_FAILURE; every terminal failure renders through userFacingMessage.
 
 export default function NoteView() {
   const pv = usePalette();
@@ -459,7 +458,7 @@ export default function NoteView() {
                     ? "Couldn’t finish the reference"
                     : "Couldn’t finish these notes"
                 }
-                message={jobError ?? lastGeneration?.error ?? GENERIC_FAILURE}
+                message={userFacingMessage(jobError ?? lastGeneration?.error)}
                 onRetry={() => void queueGeneration()}
                 retrying={retrying}
                 pendingUploads={pendingUploads}

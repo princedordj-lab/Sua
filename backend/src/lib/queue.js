@@ -7,7 +7,19 @@ import Ioredis from "ioredis";
  * (the PRD's "retry automatically up to 3 times, then show Try again").
  */
 
-export const STUDY_QUEUE = "sua:study-set";
+// BullMQ 6 reserves ":" for its Redis key namespacing and throws on
+// construction ("Queue name cannot contain :"). This name was "sua:study-set",
+// which made both the Worker and every enqueue crash, so no job was ever
+// consumed. Keep this colon-free.
+export const STUDY_QUEUE = "sua-study-set";
+
+// A job that was queued and never picked up for this long is dead (worker or
+// Redis down). Shared by the read-time reaper, the submit path and the
+// upload-conversion dedupe so all three agree on what "active" means.
+export const STALE_QUEUED_MS = 10 * 60_000;
+// A run that started and never settled: longer than any real pipeline pass
+// (transcription + digest + write + cards), so it is safe to call it dead.
+export const STALE_RUNNING_MS = 90 * 60_000;
 
 let cached = null;
 
@@ -83,5 +95,7 @@ export function getStudyQueue() {
 /** Idempotent enqueue; the jobId ties the BullMQ job to the database row. */
 export async function enqueueStudyJob(jobId) {
   const queue = getStudyQueue();
-  await queue.add("study_set", { jobId }, { jobId: `study:${jobId}` });
+  // BullMQ 6 also rejects ":" in a custom job id ("Custom Id cannot contain :"),
+  // which broke every enqueue even after the queue name was fixed.
+  await queue.add("study_set", { jobId }, { jobId: `study-${jobId}` });
 }

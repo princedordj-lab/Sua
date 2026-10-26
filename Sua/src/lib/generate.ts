@@ -2,6 +2,7 @@ import NetInfo from "@react-native-community/netinfo";
 import {
   countPendingUploads,
   getNote,
+  isNotePendingSync,
   listGenerationQueue,
   listNotesMissingStudySet,
   pullCourseNotes,
@@ -42,9 +43,41 @@ type DrainDeps = {
   onNoteChange?: (noteId: string) => void;
 };
 
+/**
+ * The one line every failure path ends on. Mirrors USER_MESSAGES.generic in
+ * backend/src/config/ai-pipeline.js: a failed run never costs an allowance, so
+ * the copy invites a retry and says so.
+ */
+export const GENERIC_FAILURE =
+  "Something went wrong. Tap to try again. This didn't use your monthly allowance.";
+
+// Messages the app may show verbatim. Anything else (a raw provider error, a
+// stack line, "Note not found") is replaced by GENERIC_FAILURE before it is
+// stored or rendered.
+const USER_FACING_MESSAGES = [
+  GENERIC_FAILURE,
+  "Couldn't read this file. Try a clearer photo or a text PDF.",
+  "This file is too long for one reference sheet. Upload it by chapter.",
+  "There isn't enough text here to study yet. Add a bit more and try again.",
+  "Could not connect to Sua. Check your internet connection.",
+  "Something went wrong on the server. Please try again.",
+  "Note is syncing with the server. Please wait a moment.",
+  "This note is a course reference; only the reference can be regenerated.",
+];
+
+export function userFacingMessage(raw: string | null | undefined): string {
+  const value = (raw ?? "").trim();
+  if (!value) return GENERIC_FAILURE;
+  return USER_FACING_MESSAGES.includes(value) ? value : GENERIC_FAILURE;
+}
+
 const MAX_ATTEMPTS = 3;
 const POLL_INTERVAL_MS = 4_000;
 const MAX_POLLS = 50;
+// A note whose upload never lands keeps the generation gated (the server must
+// have the file). Give that wait a ceiling so the card cannot say "waiting"
+// for a whole day; the failed card then offers "View uploads".
+const UPLOAD_WAIT_MS = 15 * 60_000;
 const activeDrains = new WeakMap<SQLiteDatabase, Promise<number>>();
 
 async function pullStudySet(
@@ -217,6 +250,23 @@ export function sourceMetaFor(
   };
 }
 
+/**
+ * Push this note before asking the server to work on it. POST /jobs answers
+ * 404 for a note the server has never seen, and that 404 used to be swallowed
+ * into a silent retry loop, so check the acknowledgement instead of assuming
+ * the push worked.
+ */
+async function pushNoteOrThrow(deps: DrainDeps, token: string, noteId: string) {
+  try {
+    await syncPendingNotes(deps.db, token);
+  } catch {
+    // A previous pass may still have delivered it; the check below decides.
+  }
+  if (await isNotePendingSync(deps.db, noteId)) {
+    throw new Error(GENERIC_FAILURE);
+  }
+}
+
 async function runOne(
   deps: DrainDeps,
   itemName: {
@@ -238,11 +288,14 @@ async function runOne(
   // Submit unless the job row already exists (a resumed poll).
   let jobId = itemName.jobId;
   if (!jobId) {
-    // The server cannot accept a job for a note it has never seen. Push the
-    // sync queue first, exactly like the upload queue does (AGENTS.md ordering).
-    await syncPendingNotes(deps.db, token).catch(() => {});
+    // The server cannot accept a job for a note it has never seen, so the note
+    // is pushed (and acknowledged) before the request goes out.
+    await pushNoteOrThrow(deps, token, itemName.noteId);
     const job = await jobsApi.create(token, itemName.noteId, itemName.kind);
-    if (!job) throw new Error("generation request was not accepted");
+    if (!job) throw new Error(GENERIC_FAILURE);
+    // The server closes a job when it cannot queue it (worker/Redis down). That
+    // is a real failure, not something to poll for three minutes.
+    if (job.state === "failed") throw new Error(userFacingMessage(job.error));
     jobId = job.id;
     await updateGeneration(deps.db, itemName.id, {
       state: "active",
@@ -265,7 +318,7 @@ async function runOne(
       return;
     }
     if (job.state === "failed") {
-      throw new Error(job.error ?? "generation failed");
+      throw new Error(userFacingMessage(job.error));
     }
     // Mirror the pipeline stage into the note so the UI updates live.
     await setNoteAiState(deps.db, itemName.noteId, job.stage);
@@ -282,24 +335,40 @@ async function drainGenerationQueueNow({ db, getAuthToken, onNoteChange }: Drain
   let drained = 0;
   for (const item of queue) {
     if (item.attempts >= MAX_ATTEMPTS) {
-      await updateGeneration(db, item.id, { state: "failed", error: "Too many attempts" });
+      await updateGeneration(db, item.id, { state: "failed", error: GENERIC_FAILURE });
       await setNoteAiState(db, item.noteId, "failed");
+      onNoteChange?.(item.noteId);
       continue;
     }
     // Conversion jobs read the uploaded asset, so they must wait until every
     // queued upload for the note is on the server — for files and photos too,
     // not just audio. Leave the row queued; the upload flush (or the next
-    // reconnect/foreground tick) re-triggers the drain.
+    // reconnect/foreground tick) re-triggers the drain. The wait is capped so a
+    // stuck upload cannot keep the card "waiting" indefinitely.
     const note = await getNote(db, item.noteId).catch(() => null);
     if (!note) continue;
     if ((await countPendingUploads(db, item.noteId)) > 0) {
+      const waitedMs = Date.now() - Date.parse(item.updatedAt);
+      if (Number.isFinite(waitedMs) && waitedMs > UPLOAD_WAIT_MS) {
+        await updateGeneration(db, item.id, {
+          state: "failed",
+          error: GENERIC_FAILURE,
+        });
+        await setNoteAiState(db, item.noteId, "failed");
+        onNoteChange?.(item.noteId);
+      }
       continue;
     }
     try {
       if (await runOne({ db, getAuthToken, onNoteChange }, item)) drained += 1;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const fatal = /unauthor|forbidden|not signed/i.test(message); // server-side permanent rejects
+      const raw = error instanceof Error ? error.message : String(error);
+      // Classify before normalising: the shown copy is allowlisted, but a
+      // permanent reject (auth, a reference that only accepts references, a
+      // note the server does not have) must not burn three retry passes.
+      const fatal =
+        /unauthor|forbidden|not signed|course reference|not found/i.test(raw);
+      const message = userFacingMessage(raw);
       const nextAttempts = item.attempts + 1;
       await updateGeneration(db, item.id, {
         state: fatal || nextAttempts >= MAX_ATTEMPTS ? "failed" : "queued",

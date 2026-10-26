@@ -3,8 +3,14 @@ import { withUser } from "../lib/db.js";
 import { ensureUser } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { aiConfigured } from "../lib/ai.js";
-import { studyQueueConfigured, enqueueStudyJob } from "../lib/queue.js";
+import {
+  studyQueueConfigured,
+  enqueueStudyJob,
+  STALE_QUEUED_MS,
+  STALE_RUNNING_MS,
+} from "../lib/queue.js";
 import { warnIfOverCaps } from "../lib/pipeline.js";
+import { USER_MESSAGES } from "../config/ai-pipeline.js";
 
 export const jobsRouter = Router();
 
@@ -50,6 +56,73 @@ function requirePipeline(res) {
   return true;
 }
 
+function isStale(job) {
+  const now = Date.now();
+  if (job.state === "queued" && !job.startedAt) {
+    return now - job.createdAt.getTime() > STALE_QUEUED_MS;
+  }
+  if (job.state === "running" && job.startedAt) {
+    return now - job.startedAt.getTime() > STALE_RUNNING_MS;
+  }
+  return false;
+}
+
+/**
+ * Reads are the client's only heartbeat on a job, so a job whose worker never
+ * picked it up (or died mid-run) is closed here as a normal failure: the app
+ * then shows the standard retry card instead of waiting forever.
+ */
+async function reapIfStale(tx, job) {
+  if (!job || !isStale(job)) return job;
+  try {
+    const updated = await tx.job.update({
+      where: { id: job.id },
+      data: {
+        state: "failed",
+        stage: "failed",
+        error: USER_MESSAGES.generic,
+        finishedAt: new Date(),
+      },
+    });
+    await tx.note.updateMany({
+      where: { id: job.noteId },
+      data: { aiState: "failed" },
+    });
+    console.warn(
+      `[STALE JOB] ${job.id} reaped after ${Math.round(
+        (Date.now() - (job.startedAt ?? job.createdAt).getTime()) / 60_000,
+      )} min in ${job.state}`,
+    );
+    return updated;
+  } catch (error) {
+    // Missing row (note deleted mid-read) is not an error worth failing on.
+    console.warn(`[STALE JOB] ${job.id} could not be reaped: ${error?.message ?? error}`);
+    return job;
+  }
+}
+
+/** A failed enqueue must not leave a phantom "queued" job the app will poll. */
+async function failUnqueuedJob(clerkId, job) {
+  const data = {
+    state: "failed",
+    stage: "failed",
+    error: USER_MESSAGES.generic,
+    finishedAt: new Date(),
+  };
+  try {
+    await withUser(clerkId, async (tx) => {
+      await tx.job.update({ where: { id: job.id }, data });
+      await tx.note.updateMany({
+        where: { id: job.noteId },
+        data: { aiState: "failed" },
+      });
+    });
+    Object.assign(job, data);
+  } catch (error) {
+    console.warn(`could not mark job ${job.id} failed: ${error?.message ?? error}`);
+  }
+}
+
 // Enqueue a generation for a note (study set or course reference). Local-first
 // clients call this when connectivity returns or when the student picks a
 // destination after saving. Active (queued/running) jobs dedupe; failed jobs
@@ -81,10 +154,14 @@ jobsRouter.post("/", async (req, res) => {
     }
     const active = await tx.job.findFirst({
       where: { noteId: note.id, state: { in: ACTIVE_STATES } },
+      orderBy: { createdAt: "desc" },
     });
-    // A differently-destinationed request while one is running wins nothing:
-    // the active job still owns the note until it settles.
-    if (active) return { existing: active };
+    // A dead job (never picked up, or a run that never settled) must not block
+    // the retry the student is asking for: close it and create a fresh one.
+    if (active) {
+      const settled = await reapIfStale(tx, active);
+      if (settled.state !== "failed") return { existing: settled };
+    }
     const created = await tx.job.create({
       data: { userId: user.id, noteId: note.id, kind },
     });
@@ -112,8 +189,10 @@ jobsRouter.post("/", async (req, res) => {
   try {
     await enqueueStudyJob(job.id);
   } catch (error) {
-    // The row exists; the drain can retry the enqueue, so keep 201 semantics.
+    // The row exists but nothing will ever consume it. Close it now so the
+    // student gets the standard retry card instead of a job that never runs.
     console.warn(`enqueue failed for job ${job.id}: ${error?.message ?? error}`);
+    await failUnqueuedJob(identity.clerkId, job);
   }
   res.status(outcome.existing ? 200 : 201).json(shapeJob(job));
 });
@@ -122,7 +201,8 @@ jobsRouter.get("/:id", async (req, res) => {
   const identity = await identityFromRequest(req);
   const job = await withUser(identity.clerkId, async (tx) => {
     await ensureUser(tx, identity);
-    return tx.job.findFirst({ where: { id: req.params.id } });
+    const found = await tx.job.findFirst({ where: { id: req.params.id } });
+    return reapIfStale(tx, found);
   });
   if (!job) return res.status(404).json({ error: "Job not found" });
   res.json(shapeJob(job));
@@ -133,10 +213,11 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
   const identity = await identityFromRequest(req);
   const job = await withUser(identity.clerkId, async (tx) => {
     await ensureUser(tx, identity);
-    return tx.job.findFirst({
+    const found = await tx.job.findFirst({
       where: { noteId: req.params.noteId },
       orderBy: { createdAt: "desc" },
     });
+    return reapIfStale(tx, found);
   });
   if (!job) return res.json(null);
   res.json(shapeJob(job));

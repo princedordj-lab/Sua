@@ -1,5 +1,19 @@
 import type { Metadata } from "next";
 import Image from "next/image";
+import Link from "next/link";
+import {
+  BookOpen,
+  Brain,
+  CalendarClock,
+  CloudUpload,
+  ListChecks,
+  MessageCircle,
+} from "lucide-react";
+import {
+  LandingClosingActions,
+  LandingHeaderCta,
+  LandingHeroActions,
+} from "@/components/landing-ctas";
 
 export const metadata: Metadata = {
   title: "Study smarter with Sua",
@@ -24,20 +38,6 @@ function SuaMark() {
         className="brand-mark-image"
       />
     </span>
-  );
-}
-
-function ArrowIcon() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <path
-        d="M4.2 10h11.6m-4.8-4.8 4.8 4.8-4.8 4.8"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.7"
-      />
-    </svg>
   );
 }
 
@@ -103,6 +103,45 @@ const features = [
   },
 ];
 
+const productFeatures = [
+  {
+    Icon: CalendarClock,
+    title: "Courses with the exam in view",
+    copy: "Group notes by paper, add your lecturer and exam date, and keep the countdown in front of you.",
+    tag: "Courses",
+  },
+  {
+    Icon: CloudUpload,
+    title: "Record, upload or type",
+    copy: "Capture a lecture, drop in slides and PDFs, or type your own notes. Sua works with what you already have.",
+    tag: "Capture",
+  },
+  {
+    Icon: BookOpen,
+    title: "A study set from every note",
+    copy: "One generation writes structured notes, a summary, flashcards and a quiz from the same source.",
+    tag: "AI study sets",
+  },
+  {
+    Icon: MessageCircle,
+    title: "Ask Sua about your notes",
+    copy: "Ask a question for one course and get an answer grounded in those notes, with the sources it used.",
+    tag: "Ask Sua",
+  },
+  {
+    Icon: Brain,
+    title: "Review that adapts to you",
+    copy: "Spaced repetition schedules each card for the moment you’re about to forget it — short sessions add up.",
+    tag: "Review",
+  },
+  {
+    Icon: ListChecks,
+    title: "Quizzes with real marking",
+    copy: "Multiple choice and true/false grade instantly. Short answers are marked by AI, and mistakes become cards.",
+    tag: "Quizzes",
+  },
+] as const;
+
 export default function Home() {
   return (
     <main>
@@ -115,13 +154,12 @@ export default function Home() {
 
           <nav className="main-nav" aria-label="Main navigation">
             <a href="#how-it-works">How it works</a>
+            <a href="#product">Inside the app</a>
             <a href="#features">Why Sua</a>
             <a href="#about">Our promise</a>
           </nav>
 
-          <a className="header-cta" href="#features">
-            Explore Sua <ArrowIcon />
-          </a>
+          <LandingHeaderCta />
         </div>
       </header>
 
@@ -139,17 +177,10 @@ export default function Home() {
             Record a class, add your slides, or type your notes. Sua turns them
             into the study tools you need to walk into exams ready.
           </p>
-          <div className="hero-actions">
-            <a className="button button-primary" href="#how-it-works">
-              See how it works <ArrowIcon />
-            </a>
-            <a className="text-link" href="#features">
-              Get to know Sua <span>↓</span>
-            </a>
-          </div>
+          <LandingHeroActions />
           <div className="hero-note">
             <span className="note-spark"><SparkIcon /></span>
-            <p>For students across Ghana and Africa.</p>
+            <p>Free to start · your courses and notes follow you between web and mobile.</p>
           </div>
         </div>
 
@@ -233,8 +264,37 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="product-section section-shell" id="product">
+        <div className="section-heading">
+          <div>
+            <div className="eyebrow eyebrow-dark">Inside the app</div>
+            <h2>
+              Everything you need
+              <br />
+              in <em>one study space.</em>
+            </h2>
+          </div>
+          <p>
+            Sign in once and your courses, notes, review progress and study sets
+            follow you between the web and the mobile app.
+          </p>
+        </div>
+        <div className="product-grid">
+          {productFeatures.map(({ Icon, title, copy, tag }) => (
+            <article className="product-card" key={title}>
+              <span className="product-icon" aria-hidden="true">
+                <Icon size={22} strokeWidth={2} />
+              </span>
+              <h3>{title}</h3>
+              <p>{copy}</p>
+              <span className="product-tag">{tag}</span>
+            </article>
+          ))}
+        </div>
+      </section>
+
       <section className="features-section" id="features">
-        <div className="section-shell features-inner">
+        <div className="section-shell">
           <div className="section-heading features-heading">
             <div>
               <div className="eyebrow">Made for real student life</div>
@@ -280,14 +340,18 @@ export default function Home() {
           <div className="eyebrow">Your next exam starts today</div>
           <h2>Hear it once.<br /><em>Know it for the exam.</em></h2>
           <p>Make the most of every lecture, one study session at a time.</p>
-          <a className="button button-light" href="#how-it-works">Explore how Sua works <ArrowIcon /></a>
+          <LandingClosingActions />
         </div>
       </section>
 
       <footer className="site-footer">
         <a className="wordmark footer-wordmark" href="#top"><SuaMark /><span>Sua</span></a>
         <p>Made for learning. Made for here.</p>
-        <a href="#top">Back to top ↑</a>
+        <div className="footer-links">
+          <Link href="/sign-in">Sign in</Link>
+          <Link href="/sign-up">Create an account</Link>
+          <a href="#top">Back to top ↑</a>
+        </div>
       </footer>
     </main>
   );

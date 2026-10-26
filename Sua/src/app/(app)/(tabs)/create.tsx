@@ -102,7 +102,13 @@ import type {
   UploadQueueItem,
   UploadTarget,
 } from "../../../lib/notes";
-import { drainGenerationQueue, aiStageLabel, generationKindFor, isAiActive } from "../../../lib/generate";
+import {
+  drainGenerationQueue,
+  aiStageLabel,
+  generationKindFor,
+  isAiActive,
+  userFacingMessage,
+} from "../../../lib/generate";
 import { jobsApi } from "../../../lib/api";
 import { flushUploads } from "../../../lib/uploads";
 import {
@@ -124,11 +130,9 @@ const SEGMENT_MS = 2 * 60 * 1000;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const AUTOSAVE_DELAY_MS = 1500;
 
-// The pipeline's wording for failures it did not classify. Identical to
-// USER_MESSAGES.generic on the server; used when the local queue row has no
-// message yet (an upload conversion before the job is polled).
-const GENERIC_FAILURE =
-  "Something went wrong. Tap to try again. This didn't use your monthly allowance.";
+// The pipeline's wording for failures it did not classify (imported above as
+// GENERIC_FAILURE) is the single copy for every terminal failure, so the
+// student never sees a provider error or a raw server string.
 
 // The two destinations the student picks map to three server job kinds.
 // "Lecture note" always requests a real AI-written note (not just a summary).
@@ -2071,7 +2075,7 @@ export default function Create() {
                           ? "Couldn’t finish the reference"
                           : "Couldn’t finish the study set"
                     }
-                    message={summaryGenerationError || GENERIC_FAILURE}
+                    message={userFacingMessage(summaryGenerationError)}
                     onRetry={retryGeneration}
                   />
                 ) : null}

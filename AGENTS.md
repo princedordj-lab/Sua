@@ -6,7 +6,7 @@ Sua ("soo-ah") is an offline-first exam-prep app for African university students
 | :--- | :--- |
 | `Sua/` | Expo SDK 57 / React Native 0.86 / React 19 app (the product) |
 | `backend/` | Express 5 API (JS ESM) + BullMQ worker, Prisma 7 + Neon Postgres, Clerk auth |
-| `web/` | Next.js 16 marketing site + `/health` page |
+| `web/` | Next.js 16.4 web app — marketing landing, `/health`, and the signed-in product under `/app/*` |
 
 Nested instruction files are authoritative for their directory: `Sua/AGENTS.md` (Expo rules — fetch the SDK 57 docs, do not trust memory) and `web/AGENTS.md` (Next.js 16 block, rewritten by `next dev`; commit it rather than reverting). `README.md` is a stale copy of an older AGENTS file — trust this file and the code over it.
 
@@ -68,6 +68,18 @@ There is **no test suite**. Verification is `npx tsc --noEmit` + `npx expo lint`
 - Recording: 2-minute m4a segments with unique filenames; only `finalized` segments upload. On crash recovery drop the in-progress segment (truncated m4a is unplayable) and resume from the finalized ones.
 - Markdown: note bodies render through the in-house subset parser (`Sua/src/components/markdown.tsx` + `lib/markdown.ts`), not a third-party renderer (React 19 compatibility). The editor *input* uses `react-native-enriched-markdown` (math/code/video disabled in `package.json`).
 - Every screen must work offline except AI generation and Ask Sua.
+
+## Web conventions (`web/`)
+
+- Next.js **16.4** (App Router, React 19, Tailwind v4, Turbopack). Read `web/AGENTS.md` + `node_modules/next/dist/docs/` before using framework APIs — `middleware.ts` is now `proxy.ts`, and layouts use generated `LayoutProps<"/path">` types.
+- **Cache Components is enabled:** any client hook reading URL data (`usePathname`, `useParams`, `useSearchParams`) needs a `<Suspense>` boundary above it or dynamic-param prerendering fails (`blocking-prerender-client-hook`). See `components/app-shell.tsx`.
+- Clerk is v7 (Core 3): `<SignedIn>/<SignedOut>/<Protect>` throw in client components — use `useAuth()`. Protected routes are `/app/*`; public are `/`, `/health`, `/sign-in(.*)`, `/sign-up(.*)`.
+- Product routes live under `web/app/app/…` so URLs read `/app/home`, `/app/note/[id]`, etc. Shared components/libs stay in `web/components` and `web/lib`; `@/*` maps to `web/*`.
+- Styling mirrors mobile tokens: CSS variables in `app/globals.css`, `colors` from `web/config/theme.ts` for JS values, screen styles in `web/app/app.css`. No hex literals in components; gold is fill-only, one gold button per screen, 48px tap targets. Tailwind utilities are fine alongside `.class` names.
+- Data access goes through the same Express routes as mobile using `lib/api.ts` + `useApi()` (Clerk bearer token) and `useResource` for fetch-on-mount/retry. Never call Postgres directly. Web-only server reads must stay **additive** (`GET /api/study/home-summary`, `/study/sets`, `/study/due?ahead=`, `/study/quizzes/:quizId`, `/notes/:noteId`).
+- Online-first by design: no offline queue, IndexedDB cache or sync layer; preferences persist in `localStorage` (`web/lib/prefs.ts`), not SQLite.
+- Note ids are client-generated (`crypto.randomUUID()`) and must be synced before `POST /jobs`; the SRS constants in `web/lib/srs.ts` must stay identical to `Sua/src/lib/srs.ts` and `backend/src/lib/srs.js`.
+- Verify with `npx tsc --noEmit`, `npx eslint .`, `npm run build`.
 
 ## Environment & deploy
 

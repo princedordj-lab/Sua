@@ -174,6 +174,196 @@ studyRouter.post("/sync/quiz-attempts", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Home summary for online clients. The mobile app derives streak/weekly
+// progress locally from SQLite; the web has no local database, so this small
+// read-only aggregate supplies the same numbers without touching RLS.
+// ---------------------------------------------------------------------------
+
+function dayKey(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+studyRouter.get("/home-summary", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const summary = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    const now = new Date();
+    const startOfToday = new Date(now);
+    startOfToday.setUTCHours(0, 0, 0, 0);
+    const weekStart = new Date(startOfToday);
+    weekStart.setUTCDate(weekStart.getUTCDate() - 6);
+
+    const [due, totalCards, logs, attempts] = await Promise.all([
+      tx.flashcard.count({
+        where: { userId: user.id, dueAt: { lte: now } },
+      }),
+      tx.flashcard.count({ where: { userId: user.id } }),
+      tx.reviewLog.findMany({
+        where: { userId: user.id, reviewedAt: { gte: weekStart } },
+        select: { reviewedAt: true },
+      }),
+      tx.quizAttempt.count({
+        where: { userId: user.id, finishedAt: { gte: startOfToday } },
+      }),
+    ]);
+
+    const byDay = new Map();
+    for (let offset = 0; offset < 7; offset += 1) {
+      const day = new Date(weekStart);
+      day.setUTCDate(weekStart.getUTCDate() + offset);
+      byDay.set(dayKey(day), 0);
+    }
+    for (const log of logs) {
+      const key = dayKey(log.reviewedAt);
+      if (byDay.has(key)) byDay.set(key, byDay.get(key) + 1);
+    }
+
+    // Streak: consecutive days ending today, with yesterday allowed when the
+    // student has not reviewed yet today (so the flame survives the morning).
+    const reviewedDays = new Set(logs.map((log) => dayKey(log.reviewedAt)));
+    let cursor = new Date(startOfToday);
+    if (!reviewedDays.has(dayKey(cursor))) {
+      cursor.setUTCDate(cursor.getUTCDate() - 1);
+    }
+    let streakDays = 0;
+    while (reviewedDays.has(dayKey(cursor))) {
+      streakDays += 1;
+      cursor.setUTCDate(cursor.getUTCDate() - 1);
+    }
+
+    return {
+      due,
+      totalCards,
+      reviewedToday: byDay.get(dayKey(startOfToday)) ?? 0,
+      quizAttemptsToday: attempts,
+      streakDays,
+      weekly: [...byDay.entries()].map(([date, reviewed]) => ({ date, reviewed })),
+    };
+  });
+  res.json(summary);
+});
+
+// Study sets across every course (the web Study tab has no local SQLite to
+// derive them from). Only notes with generated cards or quizzes are returned.
+studyRouter.get("/sets", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const sets = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    const notes = await tx.note.findMany({
+      where: { userId: user.id },
+      select: {
+        id: true,
+        title: true,
+        courseId: true,
+        updatedAt: true,
+        _count: { select: { flashcards: true, quizzes: true } },
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+    return notes
+      .filter((note) => note._count.flashcards > 0 || note._count.quizzes > 0)
+      .map((note) => ({
+        noteId: note.id,
+        noteTitle: note.title,
+        courseId: note.courseId,
+        cards: note._count.flashcards,
+        quizzes: note._count.quizzes,
+        updatedAt: note.updatedAt,
+      }));
+  });
+  res.json({ sets });
+});
+
+// Due cards across all courses for an online review session. `limit` comes
+// from the student's session-length preference (clamped server-side).
+// `ahead=N` (days, 1-30) also returns `aheadCards`: cards coming up in that
+// window. Mobile offers the same short review-ahead when nothing is due yet;
+// the web asks for both in one round trip and picks client-side.
+studyRouter.get("/due", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const limit = Math.min(
+    50,
+    Math.max(5, Number(req.query.limit) || 30),
+  );
+  const aheadDays = Math.min(30, Math.max(1, Number(req.query.ahead) || 0));
+  const outcome = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    const now = new Date();
+    const aheadUntil = new Date(now.getTime() + aheadDays * 86_400_000);
+    const [due, cards, aheadCards] = await Promise.all([
+      tx.flashcard.count({
+        where: { userId: user.id, dueAt: { lte: now } },
+      }),
+      tx.flashcard.findMany({
+        where: { userId: user.id, dueAt: { lte: now } },
+        orderBy: { dueAt: "asc" },
+        take: limit,
+        include: { note: { select: { title: true } } },
+      }),
+      aheadDays > 0
+        ? tx.flashcard.findMany({
+            where: {
+              userId: user.id,
+              dueAt: { gt: now, lte: aheadUntil },
+            },
+            orderBy: { dueAt: "asc" },
+            take: limit,
+            include: { note: { select: { title: true } } },
+          })
+        : Promise.resolve([]),
+    ]);
+    const shape = (card) => ({
+      ...shapeCard(card),
+      courseId: card.courseId,
+      noteTitle: card.note?.title ?? "",
+    });
+    return {
+      due,
+      aheadDays,
+      cards: cards.map(shape),
+      aheadCards: aheadCards.map(shape),
+    };
+  });
+  res.json(outcome);
+});
+
+// A single quiz for deep links. The web quiz screen only knows the quiz id, so
+// it also gets the note/course context needed for back links.
+studyRouter.get("/quizzes/:quizId", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const quiz = await withUser(identity.clerkId, async (tx) => {
+    const user = await ensureUser(tx, identity);
+    const row = await tx.quiz.findFirst({
+      where: { id: req.params.quizId, userId: user.id },
+      include: {
+        questions: { orderBy: { ordinal: "asc" } },
+        note: { select: { id: true, title: true, courseId: true } },
+      },
+    });
+    if (!row) return null;
+    return {
+      id: row.id,
+      noteId: row.noteId,
+      title: row.title,
+      noteTitle: row.note?.title ?? "",
+      courseId: row.note?.courseId ?? null,
+      questions: row.questions.map((question) => ({
+        id: question.id,
+        quizId: question.quizId,
+        ordinal: question.ordinal,
+        type: question.type,
+        prompt: question.prompt,
+        options: question.options,
+        answer: question.answer,
+        explanation: question.explanation,
+      })),
+    };
+  });
+  if (!quiz) return res.status(404).json({ error: "Quiz not found" });
+  res.json(quiz);
+});
+
+// ---------------------------------------------------------------------------
 // Quiz attempt submission. Details carry client-graded MCQ verdicts; short
 // answers without verdicts trigger the quiz_marking job (BullMQ). Idempotent
 // by client-generated attempt id; the marking job dedupes while active.

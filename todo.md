@@ -312,6 +312,22 @@ Complete milestones in order where dependencies require it. Each milestone can b
 
 **Exit criteria:** V1.5 P0 exam preparation flows work end to end with privacy boundaries enforced; Study Circles are independently release-ready.
 
+### [x] Milestone ∙ Web MVP — Next.js app in `web/`
+
+Full plan, contracts and per-milestone logs live in [`buildstep.md`](buildstep.md). The web app shares the same Clerk users, Neon data and Express/BullMQ AI pipeline as the phone.
+
+- [x] **M0–M2** — Next.js 16.4 scaffold with ported design tokens, theme provider, landing page + `/health`, Clerk auth (`proxy.ts`), app shell (sidebar/bottom nav), onboarding, courses CRUD, note viewer, typed editor with 2s autosave, markdown renderer.
+- [x] **M3** — capture: typed / upload / record modes. Uploads create the note, sign with the backend (`storageProvider: "neon"`), `PUT` directly to the signed URL with progress, then `/complete`; recording uses `MediaRecorder` → mono 16 kHz WAV with a 12-minute cap.
+- [x] **M4** — pipeline visibility (`/app/jobs/[noteId]` stage list + retry), report-a-mistake, Ask Sua with citations and quick actions, free-plan usage meters (read-only).
+- [x] **M5** — daily review with server-side SRS and a 7-day review-ahead fallback matching mobile, decks with manual cards, quizzes with AI-marked short answers and make-cards-from-mistakes.
+- [x] **M6** — profile (account edit, plan chip, usage, deletion path), preferences (appearance, session length, text size, capture default, summary length stub), accessibility/reduced-motion pass.
+- [x] **M7 (docs)** — `web/README.md`, root `AGENTS.md` web conventions, this block.
+- [ ] **M7 (remaining)** — Vercel deploy (`vercel link`, env vars, `CORS_ORIGIN` + Clerk allowed origins), Lighthouse audit, and the manual cross-platform parity walkthrough with a real Clerk user on web + phone.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .` and `npm run build` are clean (21 routes, `/app/*` dynamic routes partial-prerendered); backend `study.js` passes an esbuild parse. Live AI stages need the worker + Redis.
+
+**Deferrals (unchanged from buildstep.md):** offline mode / IndexedDB queue, Wi-Fi-only upload semantics, push notifications, and billing UI are mobile-only or post-MVP; the web is online-first and surfaces backend 403s instead of selling.
+
 ## Risks to track during build
 
 - AI errors: expose transcript, mistake reporting, and fact-check guidance.

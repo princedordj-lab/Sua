@@ -584,6 +584,19 @@ export async function pendingSyncCount(db: SQLiteDatabase) {
   return row?.count ?? 0;
 }
 
+/**
+ * True while this note still has a change the server has not acknowledged.
+ * A generation request must not be sent for such a note: the server cannot
+ * accept a job for a note id it has never seen, and the 404 would burn a retry.
+ */
+export async function isNotePendingSync(db: SQLiteDatabase, noteId: string) {
+  const row = await db.getFirstAsync<{ id: number }>(
+    "SELECT id FROM sync_queue WHERE entity = 'note' AND entity_id = ? LIMIT 1",
+    noteId,
+  );
+  return Boolean(row);
+}
+
 export async function countNotesBySource(
   db: SQLiteDatabase,
   sourceType: Note["sourceType"],

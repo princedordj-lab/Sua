@@ -39,9 +39,16 @@ Sua/
 │   │   └── generated/  # Prisma client
 │   ├── prisma/         # Database schema and migrations
 │   └── package.json
+├── web/                # Next.js 16 web app (landing, /health, signed-in app under /app)
+│   ├── app/            # App Router routes + app.css
+│   ├── components/     # App shell, data provider, UI primitives
+│   ├── lib/            # API client, prefs, SRS, markdown, uploads
+│   └── package.json
 ├── design_tokens/      # Tailwind config and shared theme
 └── images/             # Marketing and screenshot assets
 ```
+
+> The web app is documented in [`buildstep.md`](buildstep.md) (plan + milestone log) and [`web/README.md`](web/README.md) (structure, run, deploy). It is online-first and shares the same Clerk users, Neon data and AI pipeline as mobile.
 
 ---
 
@@ -138,9 +145,18 @@ npx tsc --noEmit   # Type check
 ### Backend (`cd backend`)
 ```bash
 npm run dev        # Start dev server with watch mode
+npm run worker     # BullMQ worker — needed for AI jobs
 npm run prisma     # Run Prisma CLI commands
 npx prisma migrate dev  # Apply DB migrations
 npx prisma generate   # Regenerate Prisma client
+```
+
+### Web (`cd web`)
+```bash
+npm run dev        # Next.js dev server on http://localhost:3000
+npm run build      # Production build (includes typecheck)
+npm run lint       # eslint
+npx tsc --noEmit   # Type check
 ```
 
 ---
@@ -149,3 +165,4 @@ npx prisma generate   # Regenerate Prisma client
 -   [Project Overview](./Sua%20—%20Project%20Overview.md)
 -   [Product Requirements (PRD)](./Sua%20—%20Product%20Requirements%20Document%20(PRD).md)
 -   [Build Checklist](./todo.md)
+-   [Web build plan](./buildstep.md) · [Web app notes](./web/README.md)
