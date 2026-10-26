@@ -11,6 +11,20 @@ export const jobsRouter = Router();
 const ACTIVE_STATES = ["queued", "running"];
 // Mirrors the pipeline's dispatcher (processJob) — anything else is a 400.
 const KINDS = new Set(["study_set", "lecture_note", "course_reference"]);
+// Job kinds whose payload carries note-generation diagnostics (not user data).
+const NOTE_KINDS = new Set(["study_set", "lecture_note", "course_reference"]);
+
+/** Parsed generation metadata (pages read, truncation, check result), or null. */
+function jobMeta(job) {
+  if (!NOTE_KINDS.has(job.kind) || !job.payload) return null;
+  try {
+    const parsed = JSON.parse(job.payload);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 // What the client reads to drive status UI.
 function shapeJob(job) {
   return {
@@ -21,6 +35,7 @@ function shapeJob(job) {
     stage: job.stage,
     attempts: job.attempts,
     error: job.error,
+    meta: jobMeta(job),
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     createdAt: job.createdAt,

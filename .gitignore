@@ -10,3 +10,5 @@ Sua — Project Overview.md
 todo.md
 milestone.md
 debug.log
+# Local scratch (esbuild output, eval reports, generated fixtures)
+.tmp/

@@ -9,7 +9,8 @@ import { stripMarkdown } from "../lib/markdown";
 
 type Inline = { text: string; className?: string };
 
-const INLINE_PATTERN = /\*\*\*([^*]+)\*\*\*|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`/g;
+const INLINE_PATTERN =
+  /\*\*\*([^*]+)\*\*\*|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\[unclear\]/g;
 
 function parseInline(text: string): Inline[] {
   const parts: Inline[] = [];
@@ -22,6 +23,7 @@ function parseInline(text: string): Inline[] {
     else if (bold) parts.push({ text: bold, className: "font-sans-bold" });
     else if (italic) parts.push({ text: italic, className: "italic" });
     else if (code) parts.push({ text: code, className: "font-sans-medium text-brand" });
+    else if (full === "[unclear]") parts.push({ text: full, className: "italic text-ink-faint" });
     else parts.push({ text: full });
     last = index + full.length;
   }
@@ -30,7 +32,11 @@ function parseInline(text: string): Inline[] {
 }
 
 function inlineNodes(text: string): ReactNode[] {
-  return parseInline(text).map((part, index) =>
+  // Trailing source citations are reference material, not prose: render them
+  // smaller and muted so they never interrupt reading a sentence.
+  const citation = text.match(TRAILING_CITATION);
+  const body = citation ? text.slice(0, citation.index) : text;
+  const nodes: ReactNode[] = parseInline(body).map((part, index) =>
     part.className ? (
       <Text key={index} className={part.className}>
         {part.text}
@@ -39,13 +45,25 @@ function inlineNodes(text: string): ReactNode[] {
       part.text
     ),
   );
+  if (citation) {
+    nodes.push(
+      <Text key="citation" className="text-caption text-ink-faint">
+        {` ${citation[1]}`}
+      </Text>,
+    );
+  }
+  return nodes;
 }
 
 type Block =
   | { type: "heading"; level: number; text: string }
   | { type: "bullet"; text: string }
   | { type: "numbered"; marker: string; text: string }
+  | { type: "quote"; text: string }
   | { type: "paragraph"; line: string };
+
+// A source citation closing a paragraph: (Slide 4-6), (p. 12), (about 12:30).
+const TRAILING_CITATION = /\s*(\((?:slides?|pp?\.|pages?|about)\s*[^)]*\))\s*$/i;
 
 function parseBlocks(text: string): Block[] {
   const blocks: Block[] = [];
@@ -54,6 +72,11 @@ function parseBlocks(text: string): Block[] {
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       blocks.push({ type: "heading", level: heading[1].length, text: heading[2] });
+      continue;
+    }
+    const quote = line.match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      blocks.push({ type: "quote", text: quote[1] });
       continue;
     }
     const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
@@ -129,6 +152,13 @@ export function Markdown({
             <Text key={index} className={`${gap}${headingClass(block.level)}`}>
               {inlineNodes(block.text)}
             </Text>
+          );
+        }
+        if (block.type === "quote") {
+          return (
+            <View key={index} className={`${gap}border-l-2 border-line pl-3`}>
+              <Text className={`${body} text-ink-soft`}>{inlineNodes(block.text)}</Text>
+            </View>
           );
         }
         if (block.type === "bullet") {

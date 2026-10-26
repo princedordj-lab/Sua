@@ -10,12 +10,12 @@ import {
   storeStudySet,
   syncPendingNotes,
   updateGeneration,
-  type Note,
+  type Note as NoteRow,
 } from "./notes";
 import { jobsApi, studyApi } from "./api";
 import { showStudyReady } from "./notifications";
 import type { SQLiteDatabase } from "expo-sqlite";
-import type { GenerationKind } from "./types";
+import type { AiState, GenerationKind, JobMeta } from "./types";
 
 /**
  * Local-first generation requests.
@@ -103,16 +103,118 @@ async function finishLectureNote(deps: DrainDeps, noteId: string) {
 
 /**
  * Which server job a note should request next. Explicit last choice wins;
- * otherwise audio/file captures get a full note and typed notes keep their
- * own text and only get a study set.
+ * otherwise every capture gets a full note. Typed notes are no longer treated
+ * as "just a summary": the original wording is kept in transcript, so a
+ * lecture_note is safe and gives the student a cleaner, structured version.
  */
 export function generationKindFor(
-  note: Pick<Note, "noteKind" | "sourceType"> | null,
+  note: Pick<NoteRow, "noteKind" | "sourceType"> | null,
   lastKind?: GenerationKind | null,
 ): GenerationKind {
   if (note?.noteKind === "reference") return "course_reference";
   if (lastKind) return lastKind;
-  return note?.sourceType === "typed" ? "study_set" : "lecture_note";
+  return "lecture_note";
+}
+
+/** Stages during which the note is still being worked on. */
+export const AI_ACTIVE_STATES: ReadonlySet<AiState> = new Set<AiState>([
+  "queued",
+  "reading",
+  "reading_scans",
+  "digesting",
+  "writing",
+  "checking",
+  "summarising",
+  "making_cards",
+]);
+
+export function isAiActive(state: AiState | null | undefined): boolean {
+  return state ? AI_ACTIVE_STATES.has(state) : false;
+}
+
+/**
+ * One sentence for every pipeline stage. Shared by the note screen and the
+ * capture screen so the two never disagree about what Sua is doing.
+ */
+export function aiStageLabel(
+  state: AiState,
+  kind: GenerationKind,
+  {
+    pendingUploads = 0,
+    sourceType,
+  }: { pendingUploads?: number; sourceType?: NoteRow["sourceType"] } = {},
+): string {
+  switch (state) {
+    case "queued":
+      return pendingUploads > 0 && sourceType !== "typed"
+        ? "Waiting for your upload to finish…"
+        : "Waiting to start…";
+    case "reading":
+      return kind === "course_reference"
+        ? "Reading your material…"
+        : "Reading and taking in your material…";
+    case "reading_scans":
+      return "Reading pages from the scan…";
+    case "digesting":
+      return "Pulling out the important parts…";
+    case "writing":
+      return kind === "course_reference"
+        ? "Writing your reference sheet…"
+        : "Writing your study notes…";
+    case "checking":
+      return "Checking every number against your source…";
+    case "summarising":
+      return "Writing your summary…";
+    case "making_cards":
+      return "Making flashcards and a quiz…";
+    default:
+      return "";
+  }
+}
+
+export type SourceSummary = {
+  source: "Recording" | "Document" | "Typed note";
+  read: string | null;
+  truncated: boolean;
+  checkFailed: boolean;
+};
+
+/**
+ * What the AI actually read, for the line under a note's title. Falls back to
+ * the note's own source type when the job metadata isn't on the device yet.
+ */
+export function sourceMetaFor(
+  note: Pick<NoteRow, "sourceType"> | null,
+  meta: JobMeta | null,
+): SourceSummary | null {
+  if (!note) return null;
+  const sourceType =
+    meta?.sourceType ??
+    (note.sourceType === "audio"
+      ? "recording"
+      : note.sourceType === "file"
+        ? "file"
+        : "typed");
+  const source =
+    sourceType === "recording"
+      ? "Recording"
+      : sourceType === "file"
+        ? "Document"
+        : "Typed note";
+  const pages = meta?.pagesUsed ?? 0;
+  const minutes = meta?.minutes ?? 0;
+  const read =
+    sourceType === "recording" && minutes > 0
+      ? `${minutes} min recording`
+      : pages > 1
+        ? `${pages} pages read`
+        : null;
+  return {
+    source,
+    read,
+    truncated: Boolean(meta?.truncated),
+    checkFailed: meta?.checkPassed === false,
+  };
 }
 
 async function runOne(

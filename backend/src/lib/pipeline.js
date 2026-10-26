@@ -1,37 +1,16 @@
-import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { readAssetBytes } from "./storage.js";
 import { withUser } from "./db.js";
-import {
-  bulkModel,
-  geminiImageText,
-  geminiTranscribe,
-  openRouterChat,
-  aiConfigured,
-} from "./ai.js";
+import { bulkModel, chatCompletion, aiConfigured } from "./ai.js";
 import { enqueueStudyJob, studyQueueConfigured } from "./queue.js";
-import { extractDocumentText } from "./extract.js";
+import { prepareMaterial, writeNote } from "./note-pipeline.js";
+import {
+  USER_MESSAGES,
+  UserFacingError,
+  isUserFacing,
+  notePipeline,
+} from "../config/ai-pipeline.js";
 import { prisma } from "../config/prisma.js";
-
-// Cap on the cleaning pass; longer cleaned sources are split into sections.
-const CLEAN_CHUNK_CHARS = 30_000;
-// Above this, the material is summarised per section then combined (map/reduce)
-// so a 2-hour lecture does not break the model context window.
-const SECTION_LIMIT_CHARS = 15_000;
-
-const MIME_BY_FORMAT = {
-  m4a: "audio/mp4",
-  mp3: "audio/mpeg",
-  wav: "audio/wav",
-  ogg: "audio/ogg",
-  aac: "audio/aac",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  png: "image/png",
-  webp: "image/webp",
-  heic: "image/heic",
-  heif: "image/heif",
-};
 
 // Free-plan monthly caps; warn-only until Milestone 5 flips ENFORCE_CAPS on.
 export const FREE_MONTHLY_LIMITS = {
@@ -57,13 +36,6 @@ function char(value) {
 
 function maybeGhs(usdMicros) {
   return (usdMicros / 1_000_000) * USD_TO_GHS;
-}
-
-function mimeFor(asset) {
-  const format = String(asset.format ?? "").toLowerCase();
-  if (asset.kind === "audio") return MIME_BY_FORMAT[format] ?? "audio/mp4";
-  if (asset.kind === "image") return MIME_BY_FORMAT[format] ?? "image/jpeg";
-  return "application/octet-stream";
 }
 
 async function fetchAssetBytes(asset) {
@@ -204,70 +176,31 @@ function courseContextOf(note) {
     .join(", ");
 }
 
-const WEAK_SOURCE_ERROR =
-  "No usable source material. Record a longer lecture, upload readable files, or add typed content.";
-
-/** Doc text (already extracted or re-fetched), image OCR, audio transcription. */
-async function collectRawSource(job, note) {
-  const orderedAssets = note.assets
-    .filter((asset) => asset.status === "active" && asset.publicId !== "pending")
-    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-
-  const pieces = [];
-  if (char(note.body)) {
-    pieces.push(char(note.body));
-  }
-
-  for (const asset of orderedAssets) {
-    if (asset.kind === "document" && asset.extractedText) {
-      pieces.push(char(asset.extractedText));
-      continue;
-    }
-    if (asset.kind === "document") {
-      const bytes = await fetchAssetBytes(asset);
-      pieces.push(char(extractDocumentText(bytes, asset.format, asset.kind) ?? ""));
-      continue;
-    }
-    if (asset.kind === "image") {
-      if (asset.extractedText) {
-        pieces.push(char(asset.extractedText));
-        continue;
-      }
-      const bytes = await fetchAssetBytes(asset);
-      const ocr = await geminiImageText({ bytes, mimeType: mimeFor(asset) });
-      await withUser(job.user.clerkId, (tx) =>
-        tx.asset.update({ where: { id: asset.id }, data: { extractedText: ocr.text } }),
-      );
-      await recordAiCall(job.id, "ocr", ocr);
-      if (ocr.text) pieces.push(char(ocr.text));
-      continue;
-    }
-    if (asset.kind === "audio") {
-      if (asset.extractedText) {
-        pieces.push(char(asset.extractedText));
-        continue;
-      }
-      const bytes = await fetchAssetBytes(asset);
-      const transcription = await geminiTranscribe({
-        bytes,
-        mimeType: mimeFor(asset),
-        languageHint: "English (may include a Ghanaian university accent)",
-      });
-      await withUser(job.user.clerkId, (tx) =>
-        tx.asset.update({ where: { id: asset.id }, data: { extractedText: transcription.text } }),
-      );
-      await recordAiCall(job.id, "transcribe", transcription);
-      if (transcription.text) pieces.push(char(transcription.text));
-      continue;
-    }
-  }
-  return pieces.filter(Boolean).join("\n\n");
+/**
+ * Everything the note pipeline needs from the outside world. All of it runs
+ * outside withUser — the pipeline only calls back into the database for short,
+ * idempotent writes.
+ */
+function noteDeps(job) {
+  return {
+    record: (step, result) => recordAiCall(job.id, step, result),
+    readBytes: (asset) => fetchAssetBytes(asset),
+    saveAssetText: (asset, value) =>
+      withUser(job.user.clerkId, (tx) =>
+        tx.asset.update({
+          where: { id: asset.id },
+          data: { extractedText: value },
+        }),
+      ),
+    setStage: (stage) => setStage(job, stage),
+    assertAlive: () => assertNoteAlive(job),
+  };
 }
 
-async function persistTranscript(user, note, raw) {
-  // Keep the original transcript on the note so the student can audit the AI.
-  await withUser(user.clerkId, (tx) =>
-    tx.note.update({ where: { id: note.id }, data: { transcript: raw } }),
+async function persistTranscript(job, note, transcript) {
+  // Keep the original capture on the note so the student can audit the AI.
+  await withUser(job.user.clerkId, (tx) =>
+    tx.note.update({ where: { id: note.id }, data: { transcript } }),
   );
 }
 
@@ -296,85 +229,66 @@ export async function processStudySet(job) {
   await startAttempt(job);
 
   try {
-    // ---- 1. Assemble the raw source text --------------------------------
-    await assertNoteAlive(job);
-    await setStage(job, "transcribing");
-    const raw = await collectRawSource(job, note);
-    if (raw.length < 80) throw new Error(WEAK_SOURCE_ERROR);
-
-    // ---- 2. Clean with course context ------------------------------------
+    // ---- 1-3. Read, clean, split + digest --------------------------------
     const courseContext = courseContextOf(note);
-    const cleaned = await cleanText(raw, courseContext, job);
-    await persistTranscript(user, note, raw);
+    const prepared = await prepareMaterial({
+      note,
+      kind: job.kind,
+      courseContext,
+      deps: noteDeps(job),
+    });
 
-    if (await guardRerun(job, sourceHashOf(cleaned))) return;
+    // The source hash is known before the expensive write, so a repeat run
+    // reuses the existing outputs instead of paying for the strong model.
+    const hash = sourceHashOf(prepared.sourceHashInput);
+    if (await guardRerun(job, hash)) return;
 
-    // ---- 2b. Full lecture note from the uploaded material -----------------
+    let material;
     if (job.kind === "lecture_note") {
-      await setStage(job, "writing");
-      const body = await generateLectureNote({
-        cleaned,
-        courseContext,
-        jobId: job.id,
-      });
+      // ---- 4. Write + check the note body --------------------------------
+      const written = await writeNote({ prepared, kind: job.kind, courseContext });
       await withUser(user.clerkId, (tx) =>
-        tx.note.update({ where: { id: note.id }, data: { body } }),
+        tx.note.update({
+          where: { id: note.id },
+          data: { body: written.body, transcript: written.transcript },
+        }),
       );
+      // The study set is built from the note the student actually reads.
+      material = written.body;
+      prepared.meta = written.meta;
+    } else {
+      await persistTranscript(job, note, prepared.source.transcript);
+      material = prepared.material;
+    }
+    if (material.length < 80) {
+      throw new UserFacingError(USER_MESSAGES.unreadable);
     }
 
-    // ---- 3. Summarise (with sectioning for long material) ----------------
+    // ---- 5. Summary, flashcards and quiz ---------------------------------
     await setStage(job, "summarising");
-    let studySet;
-    if (cleaned.length <= SECTION_LIMIT_CHARS) {
-      studySet = await generateStudySet({
-        cleaned,
-        courseContext,
-        durationMinutes: totalAudioMinutes(note),
-        jobId: job.id,
-      });
-    } else {
-      const sections = splitSections(cleaned);
-      const sectionSummaries = [];
-      for (const [index, section] of sections.entries()) {
-        const result = await openRouterChat({
-          system:
-            `You are Sua, a study assistant for African university students. Summarise ` +
-            `section ${index + 1}/${sections.length} of lecture material for "${courseContext}". ` +
-            "Return plain markdown bullets carrying every fact, term, formula and example. No preamble.",
-          user: section,
-          model: bulkModel(),
-          temperature: 0.2,
-        });
-        await recordAiCall(job.id, "section_summarise", result);
-        sectionSummaries.push(result.text);
-      }
-      studySet = await generateStudySet({
-        cleaned: sectionSummaries.join("\n\n"),
-        courseContext,
-        durationMinutes: totalAudioMinutes(note),
-        jobId: job.id,
-        reduceNote:
-          "The material below is a section-by-section summary of one long lecture; combine it into a single coherent study set.",
-      });
-    }
+    const studySet = await generateStudySet({
+      cleaned: material,
+      courseContext,
+      durationMinutes: totalAudioMinutes(note),
+      jobId: job.id,
+    });
 
     await setStage(job, "making_cards");
 
-    // ---- 4. Persist outputs (replace), usage, spend alert, notify ---------
+    // ---- 6. Persist outputs (replace), usage, spend alert, notify --------
     // Another deletion check: the note may be gone by the time the cards exist.
     await assertNoteAlive(job);
     await persistStudySet(job, note, studySet);
     await bumpUsage(job.userId, job.kind);
     await checkDailySpend();
-    await finishJob(job, sourceHashOf(cleaned));
+    await finishJob(job, hash, prepared.meta);
     await notifyStudent(job, note);
   } catch (error) {
     if (await jobTargetDeleted(job, error)) {
       await closeDeletedJob(job);
       return;
     }
-    const message = error?.message ?? String(error);
-    await setFailed(job, message);
+    await setFailed(job, error);
     throw error;
   }
 }
@@ -445,7 +359,7 @@ export async function processQuizMarking(job) {
     }
 
     const attemptMark = async (stricter) => {
-      const result = await openRouterChat({
+      const result = await chatCompletion({
         system:
           "You are Sua's fair marking assistant for African university students. Mark each short " +
           "answer against the model answer, accepting equivalent phrasing, synonyms and minor " +
@@ -501,7 +415,7 @@ export async function processQuizMarking(job) {
         data: { state: "marking_failed", error: message.slice(0, 500) },
       }),
     ).catch(() => {});
-    await setFailed(job, message);
+    await setFailed(job, error);
     throw error;
   }
 }
@@ -532,43 +446,50 @@ export async function processReference(job) {
   await startAttempt(job);
 
   try {
-    await assertNoteAlive(job);
-    await setStage(job, "transcribing");
-    const raw = await collectRawSource(job, note);
-    if (raw.length < 80) throw new Error(WEAK_SOURCE_ERROR);
-
     const courseContext = courseContextOf(note);
-    const cleaned = await cleanText(raw, courseContext, job);
-    await persistTranscript(user, note, raw);
-
-    if (await guardRerun(job, sourceHashOf(cleaned))) return;
-
-    await setStage(job, "writing");
-    const reference = await generateReference({
-      cleaned,
+    const prepared = await prepareMaterial({
+      note,
+      kind: job.kind,
       courseContext,
-      jobId: job.id,
+      deps: noteDeps(job),
     });
+    const hash = sourceHashOf(prepared.sourceHashInput);
+    if (await guardRerun(job, hash)) return;
+
+    const written = await writeNote({ prepared, kind: job.kind, courseContext });
     await assertNoteAlive(job);
     await withUser(user.clerkId, (tx) =>
-      tx.note.update({ where: { id: note.id }, data: { body: reference } }),
+      tx.note.update({
+        where: { id: note.id },
+        data: { body: written.body, transcript: written.transcript },
+      }),
     );
     await bumpUsage(job.userId, job.kind);
     await checkDailySpend();
-    await finishJob(job, sourceHashOf(cleaned));
+    await finishJob(job, hash, written.meta);
     await notifyStudent(job, note);
   } catch (error) {
     if (await jobTargetDeleted(job, error)) {
       await closeDeletedJob(job);
       return;
     }
-    const message = error?.message ?? String(error);
-    await setFailed(job, message);
+    await setFailed(job, error);
     throw error;
   }
 }
 
-async function setFailed(job, message) {
+/**
+ * Only messages written for the student are stored and shown verbatim. Provider
+ * errors (rate limits, timeouts, stack traces) become the standard retry line:
+ * the app promises not to charge a failed run, so it must not leak internals.
+ */
+async function setFailed(job, error) {
+  const message = isUserFacing(error)
+    ? error.message
+    : USER_MESSAGES.generic;
+  if (!isUserFacing(error)) {
+    console.warn(`Job ${job.id} failed: ${error?.message ?? error}`);
+  }
   const data = {
     state: "failed",
     stage: "failed",
@@ -587,45 +508,6 @@ async function setFailed(job, message) {
 function totalAudioMinutes(note) {
   const audioAssets = note.assets.filter((asset) => asset.kind === "audio").length;
   return Math.max(1, Math.round((audioAssets || 1) * 2));
-}
-
-function splitSections(text, { sectionLimit = SECTION_LIMIT_CHARS } = {}) {
-  const paragraphs = text.split(/\n{2,}/);
-  const sections = [];
-  let current = "";
-  for (const paragraph of paragraphs) {
-    if (current && current.length + paragraph.length + 2 > SECTION_LIMIT_CHARS) {
-      sections.push(current);
-      current = paragraph;
-    } else {
-      current = current ? current + "\n\n" + paragraph : paragraph;
-    }
-  }
-  if (current.trim()) sections.push(current);
-  return sections;
-}
-
-async function cleanText(raw, courseContext, job) {
-  const system =
-    "You are Sua, a text cleaner for Ghanaian university lecture material on " +
-    courseContext +
-    ". Remove filler words and speech artifacts, fix obvious technical-term " +
-    "mishearings using the course name as context, and normalise paragraphs with " +
-    "markdown headings where obvious. Never invent content and never summarise — " +
-    "every stated fact must survive. Output only the cleaned text.";
-  const source = raw.length <= CLEAN_CHUNK_CHARS ? [raw] : splitSections(raw);
-  const cleaned = [];
-  for (const section of source) {
-    const result = await openRouterChat({
-      system,
-      user: section,
-      model: bulkModel(),
-      temperature: 0,
-    });
-    await recordAiCall(job.id, "cleanup", result);
-    cleaned.push(result.text);
-  }
-  return cleaned.join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -703,10 +585,17 @@ export function validateStudySet(set) {
   return null;
 }
 
-export async function generateStudySet({ cleaned, courseContext, durationMinutes, jobId, reduceNote }) {
+export async function generateStudySet({
+  cleaned,
+  courseContext,
+  durationMinutes,
+  jobId,
+  reduceNote,
+  record = (step, result) => recordAiCall(jobId, step, result),
+}) {
   const prompt = studySetPrompt({ courseContext, durationMinutes, reduceNote });
   const attempt = async (stricter) => {
-    const result = await openRouterChat({
+    const result = await chatCompletion({
       system: stricter
         ? "You are Sua, a study assistant for African university students. Output ONLY valid JSON matching the requested schema exactly — no prose, no code fences."
         : "You are Sua, a study assistant for African university students. You are an AI " +
@@ -715,10 +604,10 @@ export async function generateStudySet({ cleaned, courseContext, durationMinutes
       user: `${prompt}\n\n=== LECTURE MATERIAL ===\n${cleaned}`,
       model: bulkModel(),
       json: true,
-      maxTokens: 8192,
+      maxTokens: notePipeline.studySetMaxTokens,
       temperature: stricter ? 0 : 0.2,
     });
-    await recordAiCall(jobId, stricter ? "generate_study_set_retry" : "generate_study_set", result);
+    await record(stricter ? "generate_study_set_retry" : "generate_study_set", result);
     const set = parseStudySetJson(result.text);
     const problem = validateStudySet(set);
     return { result, set, problem };
@@ -805,149 +694,6 @@ async function persistStudySet(job, note, set) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Document → lecture note / course reference generation
-// ---------------------------------------------------------------------------
-
-// Material bound to one writing call; multiple parts continue one document.
-const NOTE_PART_CHARS = 12_000;
-const NOTE_MIN_CHARS = 400;
-const NOTE_BODY_MAX_CHARS = 100_000;
-
-const LECTURE_SYSTEM =
-  "You are Sua, a study assistant for African university students. You are an AI " +
-  "study tool, not the student's lecturer; students verify important facts against " +
-  "their textbook.";
-
-export async function generateLectureNote({ cleaned, courseContext, jobId }) {
-  const parts = splitSections(cleaned, { sectionLimit: NOTE_PART_CHARS });
-  const bodyIntro =
-    `Course context: ${courseContext}. Write the material into a complete,` +
-    " well-structured lecture note in markdown:\n" +
-    "- H2 (##) for major sections matching how the material is organised; H3 for subtopics.\n" +
-    "- Clear flowing explanations (short paragraphs), worked examples, and bulleted lists where they help.\n" +
-    "- Preserve every fact, term, formula and example the material teaches; keep technical terms exact.\n" +
-    "- Use only what the material contains. Never invent extra content.\n" +
-    "- Return markdown only, no preamble.";
-
-  const generated = [];
-  for (const [index, part] of parts.entries()) {
-    // Long lectures are written part by part; feed the tail of the previous
-    // part so the model continues the same structure instead of restarting it.
-    const tail =
-      generated.length > 0
-        ? generated[generated.length - 1].slice(-900).trim()
-        : "";
-    const partHeader =
-      parts.length > 1
-        ? `This is part ${index + 1}/${parts.length} of one long material. Continue the note seamlessly from the previous parts — keep the markdown heading structure coherent, do not repeat headings.` +
-          (tail ? `\nThe previous part ended with:\n"""\n${tail}\n"""\nContinue from there.` : "")
-        : "";
-    const result = await openRouterChat({
-      system: LECTURE_SYSTEM,
-      user: `${bodyIntro}\n${partHeader}\n\n=== SOURCE MATERIAL (part ${index + 1}/${parts.length}) ===\n${part}`,
-      model: bulkModel(),
-      temperature: 0.2,
-      maxTokens: 8192,
-    });
-    await recordAiCall(jobId, "note_part", result);
-    if (char(result.text)) generated.push(char(result.text));
-  }
-
-  const body = generated.join("\n\n");
-  if (body.length < NOTE_MIN_CHARS) {
-    throw new Error(
-      "Generated lecture note was too short. Tap Try again.",
-    );
-  }
-  if (!/^##\s/m.test(body)) {
-    throw new Error(
-      "Generated lecture note had no sections. Tap Try again.",
-    );
-  }
-  return body.slice(0, NOTE_BODY_MAX_CHARS);
-}
-
-const REFERENCE_SCHEMA = `{
-  "overview": "1-3 sentences on what this material covers",
-  "keyTerms": [{"term": "...", "definition": "..."}],
-  "formulas": ["...(omit the key entirely if none exist)"],
-  "keyFacts": ["... must-know facts, all carried over from the material"],
-  "focusAreas": ["... where revision time should go (omit if unclear)"]
-}`;
-
-function referenceToMarkdown(reference) {
-  const lines = ["## Overview", char(reference.overview), "", "## Key Terms"];
-  for (const term of reference.keyTerms ?? []) {
-    lines.push(`- **${char(term.term)}** — ${char(term.definition)}`);
-  }
-  const formulas = reference.formulas ?? [];
-  if (formulas.length) {
-    lines.push("", "## Formulas");
-    for (const formula of formulas) lines.push(`- ${formula}`);
-  }
-  lines.push("", "## Must-Know Facts");
-  for (const fact of reference.keyFacts ?? []) lines.push(`- ${fact}`);
-  if ((reference.focusAreas ?? []).length) {
-    lines.push("", "## Where to Focus");
-    for (const area of reference.focusAreas) lines.push(`- ${area}`);
-  }
-  return lines.join("\n");
-}
-
-function validateReference(reference, minTerms = 3) {
-  if (!reference || !char(reference.overview)) return "missing overview";
-  const keyTerms = reference.keyTerms ?? [];
-  if (keyTerms.length < minTerms) return "too few key terms";
-  for (const term of keyTerms) {
-    if (!char(term?.term) || !char(term?.definition)) return "malformed key term";
-  }
-  const keyFacts = reference.keyFacts ?? [];
-  if (keyFacts.length < 1) return "no key facts";
-  return null;
-}
-
-export async function generateReference({ cleaned, courseContext, jobId }) {
-  // A single photographed slide rarely carries three distinct terms; keep the
-  // bar high for real lecture material and low for short sources.
-  const minTerms = cleaned.length < 2000 ? 1 : 3;
-  const prompt =
-    `Course context: ${courseContext}\nFrom the lecture material below, produce a compact ` +
-    "course reference sheet as a single JSON object:\n" +
-    REFERENCE_SCHEMA +
-    "\nRules:\n" +
-    "- Everything must come from the material itself; keep technical terms exact.\n" +
-    "- Key terms: 3-20 with crisp one-line definitions.\n" +
-    "- Include every formula the material states.\n" +
-    "- Return ONLY the JSON object.";
-  const attempt = async (stricter) => {
-    const result = await openRouterChat({
-      system: stricter
-        ? "Output ONLY valid JSON matching the requested schema exactly — no prose, no code fences."
-        : LECTURE_SYSTEM + " Output only valid JSON.",
-      user: `${prompt}\n\n=== MATERIAL ===\n${cleaned}`,
-      model: bulkModel(),
-      json: true,
-      maxTokens: 4096,
-      temperature: stricter ? 0 : 0.2,
-    });
-    await recordAiCall(jobId, stricter ? "generate_reference_retry" : "generate_reference", result);
-    const reference = parseStudySetJson(result.text);
-    const problem = validateReference(reference, minTerms);
-    return { reference, problem };
-  };
-
-  let outcome = await attempt(false);
-  if (outcome.problem) {
-    outcome = await attempt(true);
-    if (outcome.problem) {
-      throw new Error(
-        `Generated reference failed validation (${outcome.problem}). Tap Try again.`,
-      );
-    }
-  }
-  return referenceToMarkdown(outcome.reference);
-}
 
 /**
  * Pick up a finished upload whose note just arrived server-side (or vice
@@ -973,16 +719,16 @@ export async function maybeEnqueueGeneration(clerkId, noteId) {
       (row) => row.state === "queued" || row.state === "running",
     );
     if (active) return null;
-    // Images and audio start with no extracted text (OCR/transcription happens
-    // inside the job), so their conversions trigger immediately; documents wait for extraction.
+    // Audio is deliberately absent: a recording is many 2-minute assets, so the
+    // server would fire on the first segment. The app enqueues after the last
+    // one uploads. Documents without a text layer (scanned PDFs) are included —
+    // the job OCRs them instead of waiting for extraction that never comes.
     const asset = note.assets
       .filter(
         (row) =>
           row.status === "active" &&
           (row.task === "lecture_note" || row.task === "course_reference") &&
-          (row.kind === "image" ||
-            row.kind === "audio" ||
-            (row.extractedText ?? "").length > 0),
+          (row.kind === "image" || row.kind === "document"),
       )
       // A failed run must not permanently block this destination: the student
       // is allowed to retry a lecture note that died on a model error.
@@ -1049,7 +795,7 @@ async function checkDailySpend() {
   }
 }
 
-async function finishJob(job, hash) {
+async function finishJob(job, hash, meta = null) {
   await withUser(job.user.clerkId, (tx) =>
     tx.$transaction([
       tx.job.update({
@@ -1060,6 +806,9 @@ async function finishJob(job, hash) {
           sourceHash: hash,
           finishedAt: new Date(),
           error: null,
+          // Diagnostics live on the job so the app can show what the AI read
+          // (pages used, truncation, check result) without a schema change.
+          ...(meta ? { payload: JSON.stringify(meta) } : {}),
         },
       }),
       tx.note.update({ where: { id: job.noteId }, data: { aiState: "ready" } }),

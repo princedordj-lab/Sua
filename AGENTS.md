@@ -71,7 +71,7 @@ There is **no test suite**. Verification is `npx tsc --noEmit` + `npx expo lint`
 
 ## Environment & deploy
 
-- `backend/.env` (copy `backend/.env.example`): pooled `DATABASE_URL`, direct `DIRECT_URL`, Clerk keys + webhook secret, Neon storage (`NEON_API_KEY`, `NEON_PROJECT_ID`, `NEON_BRANCH_ID`, `NEON_STORAGE_BUCKET`), `REDIS_URL`, `GEMINI_API_KEY` (transcription/OCR), `OPENROUTER_API_KEY` (bulk generation).
+- `backend/.env` (copy `backend/.env.example`): pooled `DATABASE_URL`, direct `DIRECT_URL`, Clerk keys + webhook secret, Neon storage (`NEON_API_KEY`, `NEON_PROJECT_ID`, `NEON_BRANCH_ID`, `NEON_STORAGE_BUCKET`), `REDIS_URL`, `GEMINI_API_KEY` (transcription/OCR), `XKIRO_API_KEY` (text generation via the OpenAI-compatible xkiro API; model from `AI_BULK_MODEL`/`AI_STRONG_MODEL`, default `qwen/qwen3.8-max:free`).
 - `Sua/.env.local` (copy `Sua/.env.example`): `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY`, `EXPO_PUBLIC_API_URL`. Android emulator needs `http://10.0.2.2:4000/api`; `api.ts` falls back to that when unset.
 - Backend deploys to Vercel from `backend/` (`vercel.json` → `npm run build`); the AI worker needs a long-running host with Redis, not a serverless function.
 

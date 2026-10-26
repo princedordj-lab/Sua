@@ -16,69 +16,66 @@ import {
   useLocalSearchParams,
 } from "expo-router";
 import {
-  AlertTriangle,
   ArrowLeft,
   BookOpen,
   Brain,
-  ChevronDown,
-  ChevronUp,
   Flag,
-  Loader2,
+  MessageCircle,
   Mic,
+  MoreHorizontal,
   Pencil,
+  Play,
   RefreshCw,
   Sparkles,
   Trash2,
 } from "lucide-react-native";
 import { BottomSheet } from "../../../components/sheets";
 import { Markdown, type MarkdownScale } from "../../../components/markdown";
+import {
+  AiFailedCard,
+  AiProgressCard,
+  EmptyCard,
+  NoticeCard,
+  ReaderCard,
+} from "../../../components/note/cards";
+import { SegmentedControl, type SegmentOption } from "../../../components/ui";
 import { useStringSetting } from "../../../state/settings";
 import { jobsApi } from "../../../lib/api";
 import {
   countPendingUploads,
   deleteNote,
   enqueueGeneration,
-  getLastGenerationKind,
+  getLastGeneration,
   getNote,
   listFlashcards,
   listQuizzes,
   pullCourseNotes,
+  type LastGeneration,
+  type LocalFlashcard,
+  type LocalQuiz,
   type Note,
 } from "../../../lib/notes";
 import {
+  aiStageLabel,
   drainGenerationQueue,
   generationKindFor,
+  isAiActive,
   reconcileAiOutputs,
   refreshNoteFromServer,
+  sourceMetaFor,
 } from "../../../lib/generate";
+import { splitNotices } from "../../../lib/markdown";
 import { colors } from "../../../config/theme";
 import { usePalette } from "../../../state/appearance";
 import { useApp } from "../../../state/AppContext";
-import type { GenerationKind } from "../../../lib/types";
+import type { JobMeta } from "../../../lib/types";
 
-const AI_ACTIVE_STATES = [
-  "queued",
-  "transcribing",
-  "summarising",
-  "making_cards",
-  "writing",
-] as const;
+type ReaderTab = "notes" | "summary" | "cards" | "quiz";
 
-function stageLabel(note: Note, pendingUploads: number) {
-  if (note.aiState === "queued") {
-    return pendingUploads > 0 && note.sourceType !== "typed"
-      ? "Waiting for your upload to finish…"
-      : "Waiting to be processed…";
-  }
-  if (note.aiState === "transcribing") return "Transcribing your lecture…";
-  if (note.aiState === "summarising") return "Writing your summary…";
-  if (note.aiState === "writing") {
-    return note.noteKind === "reference"
-      ? "Writing your reference…"
-      : "Writing your lecture note…";
-  }
-  return "Making your flashcards and a quiz…";
-}
+// The pipeline's wording for any failure it did not classify. Kept identical to
+// USER_MESSAGES.generic on the server so the student sees one message, not two.
+const GENERIC_FAILURE =
+  "Something went wrong. Tap to try again. This didn't use your monthly allowance.";
 
 export default function NoteView() {
   const pv = usePalette();
@@ -92,13 +89,19 @@ export default function NoteView() {
   const [note, setNote] = useState<Note | null>(null);
   const [missing, setMissing] = useState(false);
   const [pendingUploads, setPendingUploads] = useState(0);
-  const [flashcardCount, setFlashcardCount] = useState(0);
-  const [quizCount, setQuizCount] = useState(0);
-  const [quizId, setQuizId] = useState<string | null>(null);
-  const [lastGenerationKind, setLastGenerationKind] =
-    useState<GenerationKind | null>(null);
-  const [transcriptOpen, setTranscriptOpen] = useState(false);
+  const [flashcards, setFlashcards] = useState<LocalFlashcard[]>([]);
+  const [quizzes, setQuizzes] = useState<LocalQuiz[]>([]);
+  const [lastGeneration, setLastGeneration] = useState<LastGeneration | null>(
+    null,
+  );
+  // Diagnostics from the server job: what the AI actually read, and the exact
+  // message for a failed run. Best effort — offline notes simply have none.
+  const [jobMeta, setJobMeta] = useState<JobMeta | null>(null);
+  const [jobError, setJobError] = useState<string | null>(null);
+  const [tab, setTab] = useState<ReaderTab>("notes");
+  const [showOriginal, setShowOriginal] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportComment, setReportComment] = useState("");
   const [reportSending, setReportSending] = useState(false);
@@ -111,9 +114,13 @@ export default function NoteView() {
   const deletedRef = useRef(false);
 
   const course = courses.find((item) => item.id === note?.courseId);
-  const aiActive = note
-    ? (AI_ACTIVE_STATES as readonly string[]).includes(note.aiState)
-    : false;
+  const reference = note?.noteKind === "reference";
+  const aiActive = isAiActive(note?.aiState);
+  const quiz = quizzes[0] ?? null;
+  const questionCount = quizzes.reduce(
+    (total, item) => total + (item.questions?.length ?? 0),
+    0,
+  );
 
   const load = useCallback(async () => {
     if (deletedRef.current) return;
@@ -124,24 +131,24 @@ export default function NoteView() {
       setMissing(!row);
       if (!row) {
         setPendingUploads(0);
-        setFlashcardCount(0);
-        setQuizCount(0);
-        setQuizId(null);
-        setLastGenerationKind(null);
+        setFlashcards([]);
+        setQuizzes([]);
+        setLastGeneration(null);
+        setJobMeta(null);
+        setJobError(null);
         return;
       }
-      const [pending, cards, quizzes, lastKind] = await Promise.all([
+      const [pending, cards, quizRows, last] = await Promise.all([
         countPendingUploads(db, row.id),
-        listFlashcards(db, row.id).catch(() => []),
-        listQuizzes(db, row.id).catch(() => []),
-        getLastGenerationKind(db, row.id).catch(() => null),
+        listFlashcards(db, row.id).catch(() => [] as LocalFlashcard[]),
+        listQuizzes(db, row.id).catch(() => [] as LocalQuiz[]),
+        getLastGeneration(db, row.id).catch(() => null),
       ]);
-      if (!screenActiveRef.current) return;
+      if (!screenActiveRef.current || deletedRef.current) return;
       setPendingUploads(pending);
-      setFlashcardCount(cards.length);
-      setQuizCount(quizzes.length);
-      setQuizId(quizzes[0]?.id ?? null);
-      setLastGenerationKind(lastKind);
+      setFlashcards(cards);
+      setQuizzes(quizRows);
+      setLastGeneration(last);
     } catch {
       setMissing(true);
     }
@@ -159,65 +166,28 @@ export default function NoteView() {
 
   // Retries reuse the destination the student originally chose; a reference
   // always regenerates as a reference. See generationKindFor().
-  const generationKind = generationKindFor(note, lastGenerationKind);
+  const generationKind = generationKindFor(note, lastGeneration?.kind ?? null);
 
-  // The empty-state call to action follows the destination this note is for.
-  const emptyStateCopy = useMemo(() => {
-    if (generationKind === "course_reference") {
-      return {
-        title: "Make a course reference from this?",
-        body: "A condensed reference sheet with key terms and key facts — no flashcards or quiz.",
-        cta: "Make reference",
-      };
-    }
-    if (generationKind === "lecture_note") {
-      return {
-        title: "Turn this capture into a lecture note?",
-        body: "Sua writes a full note, then adds a summary, flashcards and a quiz.",
-        cta: "Write note",
-      };
-    }
-    return {
-      title: "Turn this note into a study set?",
-      body: "A summary with flashcards and a quiz, in one tap.",
-      cta: "Generate",
+  // A finished (or failed) run has job metadata on the server: pages read,
+  // truncation, the fidelity check, and the exact failure message. It is not
+  // synced into SQLite, so ask once per state change and keep it in memory.
+  const aiState = note?.aiState;
+  const noteId = note?.id;
+  useEffect(() => {
+    if (!noteId || (aiState !== "ready" && aiState !== "failed")) return;
+    let cancelled = false;
+    void (async () => {
+      const token = await getAuthToken().catch(() => null);
+      if (!token) return;
+      const job = await jobsApi.latestForNote(token, noteId).catch(() => null);
+      if (cancelled || !job) return;
+      setJobMeta(job.meta ?? null);
+      setJobError(job.error ?? null);
+    })();
+    return () => {
+      cancelled = true;
     };
-  }, [generationKind]);
-
-  const queueGeneration = async () => {
-    if (retryingRef.current) return;
-    retryingRef.current = true;
-    setRetrying(true);
-    try {
-      await enqueueGeneration(db, id, generationKind);
-      await load();
-      await drainGenerationQueue({ db, getAuthToken });
-    } catch {
-      if (screenActiveRef.current) Alert.alert(
-        "Couldn’t queue the generation",
-        "Your note is saved — try again in a moment.",
-      );
-    } finally {
-      retryingRef.current = false;
-      setRetrying(false);
-      if (screenActiveRef.current) {
-        await load();
-      }
-    }
-  };
-
-  const pullToRefresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const token = await getAuthToken();
-      if (token && note?.courseId) {
-        await pullCourseNotes(db, token, note.courseId).catch(() => {});
-      }
-    } finally {
-      await load().catch(() => {});
-      setRefreshing(false);
-    }
-  }, [db, getAuthToken, load, note?.courseId]);
+  }, [aiState, getAuthToken, noteId]);
 
   // Mirror pipeline stages live while a generation is in flight. Upload
   // conversions have no local queue row, so the server job is the source.
@@ -240,7 +210,7 @@ export default function NoteView() {
   const reconciledRef = useRef(false);
   useEffect(() => {
     if (!note || note.noteKind === "reference") return;
-    if (note.aiState !== "ready" || flashcardCount > 0 || quizCount > 0) return;
+    if (note.aiState !== "ready" || flashcards.length || quizzes.length) return;
     if (reconciledRef.current) return;
     reconciledRef.current = true;
     let cancelled = false;
@@ -251,7 +221,45 @@ export default function NoteView() {
     return () => {
       cancelled = true;
     };
-  }, [db, flashcardCount, getAuthToken, load, note, quizCount]);
+  }, [db, flashcards.length, getAuthToken, load, note, quizzes.length]);
+
+  const queueGeneration = async () => {
+    if (retryingRef.current) return;
+    retryingRef.current = true;
+    setRetrying(true);
+    setJobError(null);
+    try {
+      await enqueueGeneration(db, id, generationKind);
+      await load();
+      await drainGenerationQueue({ db, getAuthToken });
+    } catch {
+      if (screenActiveRef.current) {
+        Alert.alert(
+          "Couldn’t queue the generation",
+          "Your note is saved — try again in a moment.",
+        );
+      }
+    } finally {
+      retryingRef.current = false;
+      setRetrying(false);
+      if (screenActiveRef.current) {
+        await load();
+      }
+    }
+  };
+
+  const pullToRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const token = await getAuthToken();
+      if (token && note?.courseId) {
+        await pullCourseNotes(db, token, note.courseId).catch(() => {});
+      }
+    } finally {
+      await load().catch(() => {});
+      setRefreshing(false);
+    }
+  }, [db, getAuthToken, load, note?.courseId]);
 
   const confirmDelete = () => {
     Alert.alert(
@@ -282,6 +290,79 @@ export default function NoteView() {
     );
   };
 
+  const openEditor = () => {
+    if (!note) return;
+    router.push({
+      pathname: "/(app)/(tabs)/create",
+      params: { mode: "typing", noteId: note.id, courseId: note.courseId },
+    });
+  };
+
+  // The note body is what the AI wrote; the transcript is the original capture.
+  // Notices are stripped from the body and rendered above it as quotes.
+  const { notices, body } = useMemo(
+    () => splitNotices(note?.body ?? ""),
+    [note?.body],
+  );
+  const original = (note?.transcript ?? "").trim();
+  const canShowOriginal = Boolean(
+    original && body && original !== body.trim(),
+  );
+
+  const tabs = useMemo<SegmentOption<ReaderTab>[]>(
+    () => [
+      { key: "notes", label: "Notes" },
+      { key: "summary", label: "Summary" },
+      { key: "cards", label: "Cards", count: flashcards.length || null },
+      { key: "quiz", label: "Quiz", count: questionCount || null },
+    ],
+    [flashcards.length, questionCount],
+  );
+
+  const hasContent = Boolean(
+    note?.body?.trim() ||
+      note?.summary?.trim() ||
+      flashcards.length ||
+      quizzes.length,
+  );
+
+  const study = () => {
+    if (flashcards.length) {
+      router.push({ pathname: "/review", params: { deck: String(id) } });
+      return;
+    }
+    if (quiz) {
+      router.push({ pathname: "/quiz/[id]", params: { id: quiz.id } });
+    }
+  };
+
+  const emptyStateCopy = useMemo(() => {
+    if (generationKind === "course_reference") {
+      return {
+        title: "Make a reference sheet from this?",
+        body: "A one-page reference with key terms, formulas and must-know facts. No flashcards or quiz.",
+        cta: "Make reference sheet",
+      };
+    }
+    if (generationKind === "lecture_note") {
+      return {
+        title: "Turn this into study notes?",
+        body: "Sua writes a full note from your material, then adds a summary, flashcards and a quiz.",
+        cta: "Write study notes",
+      };
+    }
+    return {
+      title: "Add a summary, flashcards and a quiz?",
+      body: "Your own text stays as written; Sua adds the study set around it.",
+      cta: "Generate study set",
+    };
+  }, [generationKind]);
+
+  const sourceMeta = sourceMetaFor(note, jobMeta);
+  const sourceLine = sourceMeta
+    ? [sourceMeta.source, sourceMeta.read].filter(Boolean).join(" · ")
+    : null;
+
   if (missing) {
     return (
       <SafeAreaView className="flex-1 bg-cream">
@@ -299,8 +380,6 @@ export default function NoteView() {
     );
   }
 
-  const reference = note?.noteKind === "reference";
-
   return (
     <SafeAreaView className="flex-1 bg-cream">
       <ScrollView
@@ -315,38 +394,31 @@ export default function NoteView() {
             hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="Go back"
-            className="h-10 w-10 items-center justify-center rounded-full bg-surface active:opacity-80"
+            className="h-11 w-11 items-center justify-center rounded-full bg-surface active:opacity-80"
           >
             <ArrowLeft size={20} color={pv.ink.DEFAULT} />
           </Pressable>
           <View className="flex-1 items-center px-2">
-            <Text numberOfLines={1} className="text-body-lg font-sans-extrabold text-ink">
+            <Text
+              numberOfLines={1}
+              className="text-body-lg font-sans-extrabold text-ink"
+            >
               {note?.title || "Untitled note"}
             </Text>
+            {course ? (
+              <Text numberOfLines={1} className="text-caption text-ink-faint">
+                {course.code || course.name}
+              </Text>
+            ) : null}
           </View>
           <Pressable
-            onPress={() =>
-              note &&
-              router.push({
-                pathname: "/(app)/(tabs)/create",
-                params: { mode: "typing", noteId: note.id, courseId: note.courseId },
-              })
-            }
+            onPress={() => setMenuOpen(true)}
             hitSlop={8}
             accessibilityRole="button"
-            accessibilityLabel="Edit this note"
-            className="h-10 w-10 items-center justify-center rounded-full bg-surface active:opacity-80"
+            accessibilityLabel="More options"
+            className="h-11 w-11 items-center justify-center rounded-full bg-surface active:opacity-80"
           >
-            <Pencil size={18} color={pv.ink.DEFAULT} />
-          </Pressable>
-          <Pressable
-            onPress={confirmDelete}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="Delete this note"
-            className="ml-1 h-10 w-10 items-center justify-center rounded-full bg-surface active:opacity-80"
-          >
-            <Trash2 size={18} color={colors.danger} />
+            <MoreHorizontal size={20} color={pv.ink.DEFAULT} />
           </Pressable>
         </View>
 
@@ -364,255 +436,404 @@ export default function NoteView() {
                 <View className="flex-row items-center gap-1.5 rounded-chip bg-success-soft px-2.5 py-1.5">
                   <Brain size={13} color={colors.brand.DEFAULT} />
                   <Text className="text-caption font-sans-bold text-brand">
-                    Lecture note
+                    Study notes
                   </Text>
                 </View>
               )}
-              {course ? (
-                <View className="rounded-chip bg-surface px-2.5 py-1.5">
-                  <Text className="text-caption font-sans-bold text-ink-soft">
-                    {course.code || course.name}
-                  </Text>
-                </View>
-              ) : null}
-              <View className="flex-1 items-end">
-                <Text className="text-caption text-ink-faint">
-                  {note.syncState === "pending" ? "Waiting to sync" : "Synced"}
+              {sourceLine ? (
+                <Text className="flex-1 text-caption text-ink-faint">
+                  {sourceLine}
                 </Text>
-              </View>
+              ) : (
+                <View className="flex-1" />
+              )}
+              <Text className="text-caption text-ink-faint">
+                {note.syncState === "pending" ? "Waiting to sync" : "Synced"}
+              </Text>
             </View>
 
             {note.aiState === "failed" ? (
-              <View className="mt-4 rounded-card border border-warning bg-warning-soft p-card">
-                <View className="flex-row items-center gap-2">
-                  <AlertTriangle size={18} color={colors.warning} />
-                  <Text className="text-body-lg font-sans-extrabold text-ink">
-                    {reference
-                      ? "Couldn’t finish the reference"
-                      : "Couldn’t finish the summary"}
-                  </Text>
-                </View>
-                <Text className="mt-1 text-small leading-5 text-ink-soft">
-                  Try again while you’re connected. Your note is safe.
-                </Text>
-                {pendingUploads > 0 ? (
-                  <Pressable
-                    onPress={() => router.push("/uploads")}
-                    accessibilityRole="link"
-                    accessibilityLabel="Check upload status first"
-                    className="mt-2 active:opacity-70"
-                  >
-                    <Text className="text-small font-sans-bold text-brand">
-                      Some files still need to upload — check Uploads first.
-                    </Text>
-                  </Pressable>
-                ) : null}
-                <View className={`mt-3 self-start ${retrying ? "opacity-60" : ""}`}>
-                  <Pressable
-                    disabled={retrying}
-                    onPress={() => void queueGeneration()}
-                    accessibilityRole="button"
-                    accessibilityLabel="Try generating again"
-                    className="min-h-10 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong px-4 active:opacity-80"
-                  >
-                    <RefreshCw size={15} color={colors.ink.inverse} />
-                    <Text className="text-label font-sans-bold text-ink-inverse">
-                      Try again
-                    </Text>
-                  </Pressable>
-                </View>
-              </View>
-            ) : aiActive ? (
-              <View className="mt-4 flex-row items-center justify-between gap-2 rounded-card bg-surface p-card shadow-card">
-                <View className="flex-row flex-1 items-center gap-2.5">
-                  <Loader2 size={17} color={colors.brand.DEFAULT} />
-                  <Text className="flex-1 text-body font-sans-bold text-ink">
-                    {stageLabel(note, pendingUploads)}
-                  </Text>
-                </View>
-                {pendingUploads > 0 ? (
-                  <Pressable
-                    onPress={() => router.push("/uploads")}
-                    accessibilityRole="link"
-                    accessibilityLabel="View upload progress"
-                    className="active:opacity-70"
-                  >
-                    <Text className="text-caption font-sans-bold text-brand">
-                      View uploads
-                    </Text>
-                  </Pressable>
-                ) : null}
-              </View>
+              <AiFailedCard
+                title={
+                  reference
+                    ? "Couldn’t finish the reference"
+                    : "Couldn’t finish these notes"
+                }
+                message={jobError ?? lastGeneration?.error ?? GENERIC_FAILURE}
+                onRetry={() => void queueGeneration()}
+                retrying={retrying}
+                pendingUploads={pendingUploads}
+                onViewUploads={() => router.push("/uploads")}
+              />
+            ) : aiActive && note.aiState ? (
+              <AiProgressCard
+                label={aiStageLabel(note.aiState, generationKind, {
+                  pendingUploads,
+                  sourceType: note.sourceType,
+                })}
+                pendingUploads={pendingUploads}
+                onViewUploads={() => router.push("/uploads")}
+              />
             ) : null}
 
-            {/* Reference pages are written straight into the body. */}
             {reference ? (
-              note.body ? (
-                <View className="mt-4 rounded-card bg-surface p-card-lg shadow-card">
-                  <View className="flex-row items-center justify-between">
-                    <View className="flex-row items-center gap-2">
-                      <BookOpen size={18} color={colors.brand.DEFAULT} />
-                      <Text className="text-body-lg font-sans-extrabold text-ink">
-                        Reference
-                      </Text>
-                    </View>
-                    <Pressable
-                      onPress={() => setReportOpen(true)}
-                      hitSlop={8}
-                      accessibilityRole="button"
-                      accessibilityLabel="Report a mistake in the reference"
-                      className="h-9 w-9 items-center justify-center rounded-full active:opacity-80"
-                    >
-                      <Flag size={17} color={pv.ink.faint} />
-                    </Pressable>
-                  </View>
-                  <Markdown text={note.body} className="mt-3" scale={noteScaleValue} />
-                  <Text className="mt-2 text-caption text-ink-faint">
-                    AI study aid — verify important facts against your textbook.
-                  </Text>
-                </View>
-              ) : !aiActive && note.aiState !== "failed" ? (
-                <View className="mt-4 rounded-card bg-surface p-card shadow-card">
-                  <Text className="text-body font-sans-bold text-ink">
-                    Sua hasn’t written this page yet.
-                  </Text>
-                  <Pressable
-                    onPress={() => void queueGeneration()}
-                    accessibilityRole="button"
-                    accessibilityLabel="Generate the course reference"
-                    className="mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand-strong px-4 active:opacity-80"
+              body ? (
+                <>
+                  <NoticeCard notices={notices} />
+                  <ReaderCard
+                    title={showOriginal ? "Original material" : "Reference sheet"}
+                    action={
+                      canShowOriginal ? (
+                        <Pressable
+                          onPress={() => setShowOriginal((open) => !open)}
+                          hitSlop={8}
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            showOriginal
+                              ? "Show the reference sheet"
+                              : "Show the original material"
+                          }
+                          className="min-h-11 justify-center active:opacity-70"
+                        >
+                          <Text className="text-caption font-sans-bold text-brand">
+                            {showOriginal ? "Reference" : "Original"}
+                          </Text>
+                        </Pressable>
+                      ) : undefined
+                    }
                   >
-                    <RefreshCw size={15} color={colors.ink.inverse} />
-                    <Text className="text-label font-sans-bold text-ink-inverse">
-                      Make it now
-                    </Text>
-                  </Pressable>
+                    <Markdown
+                      text={showOriginal ? original : body}
+                      scale={noteScaleValue}
+                    />
+                    {showOriginal ? null : (
+                      <Text className="mt-3 text-caption text-ink-faint">
+                        AI study aid — verify important facts against your
+                        textbook.
+                      </Text>
+                    )}
+                  </ReaderCard>
+                </>
+              ) : !aiActive && note.aiState !== "failed" ? (
+                <View className="mt-4">
+                  <EmptyCard
+                    title={emptyStateCopy.title}
+                    body={emptyStateCopy.body}
+                    cta={emptyStateCopy.cta}
+                    onPress={() => void queueGeneration()}
+                    Icon={BookOpen}
+                  />
                 </View>
               ) : null
-            ) : (
+            ) : hasContent ? (
               <>
-                {note.summary ? (
-                  <View className="mt-4 rounded-card bg-surface p-card-lg shadow-card">
-                    <View className="flex-row items-center justify-between">
-                      <View className="flex-row items-center gap-2">
-                        <Sparkles size={18} color={colors.brand.DEFAULT} />
-                        <Text className="text-body-lg font-sans-extrabold text-ink">
-                          AI Study Summary
+                <SegmentedControl
+                  options={tabs}
+                  value={tab}
+                  onChange={setTab}
+                  className="mt-4 shadow-card"
+                />
+
+                {tab === "notes" ? (
+                  <>
+                    <NoticeCard notices={notices} />
+                    <ReaderCard
+                      title={showOriginal ? "Original capture" : "Study notes"}
+                      action={
+                        canShowOriginal ? (
+                          <Pressable
+                            onPress={() => setShowOriginal((open) => !open)}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel={
+                              showOriginal
+                                ? "Show the AI notes"
+                                : "Show the original capture"
+                            }
+                            className="min-h-11 justify-center active:opacity-70"
+                          >
+                            <Text className="text-caption font-sans-bold text-brand">
+                              {showOriginal ? "AI notes" : "Original"}
+                            </Text>
+                          </Pressable>
+                        ) : undefined
+                      }
+                    >
+                      <Markdown
+                        text={showOriginal ? original : body}
+                        scale={noteScaleValue}
+                      />
+                      {showOriginal ? null : (
+                        <Text className="mt-3 text-caption text-ink-faint">
+                          AI study aid — verify important facts against your
+                          textbook.
                         </Text>
-                      </View>
-                      <Pressable
-                        onPress={() => setReportOpen(true)}
-                        hitSlop={8}
-                        accessibilityRole="button"
-                        accessibilityLabel="Report a mistake in the summary"
-                        className="h-9 w-9 items-center justify-center rounded-full active:opacity-80"
-                      >
-                        <Flag size={17} color={pv.ink.faint} />
-                      </Pressable>
-                    </View>
-                    <Markdown text={note.summary} className="mt-3" />
-                    <Text className="mt-2 text-caption text-ink-faint">
-                      AI study aid — verify important facts against your textbook.
-                    </Text>
-                  </View>
+                      )}
+                    </ReaderCard>
+                  </>
                 ) : null}
 
-                {note.body ? (
-                  <View className="mt-4 rounded-card bg-surface p-card-lg shadow-card">
-                    <Text className="text-caption font-sans-extrabold text-ink-soft">
-                      YOUR TEXT
-                    </Text>
-                    <Markdown text={note.body} className="mt-2" />
-                  </View>
-                ) : !aiActive && note.aiState === "none" && !note.summary ? (
-                  <View className="mt-4 rounded-card bg-surface p-card shadow-card">
-                    <Text className="text-body font-sans-bold text-ink">
-                      {emptyStateCopy.title}
-                    </Text>
-                    <Text className="mt-1 text-small leading-5 text-ink-soft">
-                      {emptyStateCopy.body}
-                    </Text>
-                    <Pressable
-                      onPress={() => void queueGeneration()}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Generate ${generationKind === "course_reference" ? "a course reference" : generationKind === "lecture_note" ? "a lecture note" : "a study set"}`}
-                      className="mt-3 min-h-10 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand-strong px-4 active:opacity-80"
-                    >
-                      <Sparkles size={15} color={colors.ink.inverse} />
-                      <Text className="text-label font-sans-bold text-ink-inverse">
-                        {emptyStateCopy.cta}
+                {tab === "summary" ? (
+                  note.summary ? (
+                    <ReaderCard title="Summary">
+                      <Markdown text={note.summary} scale={noteScaleValue} />
+                      <Text className="mt-3 text-caption text-ink-faint">
+                        AI study aid — verify important facts against your
+                        textbook.
                       </Text>
-                    </Pressable>
-                  </View>
+                    </ReaderCard>
+                  ) : (
+                    <View className="mt-4">
+                      <EmptyCard
+                        title="No summary yet"
+                        body={
+                          aiActive
+                            ? "Sua is still working on it."
+                            : "Generate a study set to get a summary with key points, terms and likely exam questions."
+                        }
+                        cta={aiActive ? undefined : "Add a summary"}
+                        onPress={() => void queueGeneration()}
+                        Icon={Sparkles}
+                      />
+                    </View>
+                  )
+                ) : null}
+
+                {tab === "cards" ? (
+                  flashcards.length ? (
+                    <ReaderCard
+                      title={`${flashcards.length} ${
+                        flashcards.length === 1 ? "card" : "cards"
+                      }`}
+                      action={
+                        <Pressable
+                          onPress={() =>
+                            router.push({
+                              pathname: "/deck/[id]",
+                              params: { id: String(id) },
+                            })
+                          }
+                          hitSlop={8}
+                          accessibilityRole="button"
+                          accessibilityLabel="Open the deck"
+                          className="min-h-11 justify-center active:opacity-70"
+                        >
+                          <Text className="text-caption font-sans-bold text-brand">
+                            Open deck
+                          </Text>
+                        </Pressable>
+                      }
+                    >
+                      <View className="gap-3">
+                        {flashcards.map((card) => (
+                          <View
+                            key={card.id}
+                            className="rounded-input border border-line p-3"
+                          >
+                            <Text className="text-body font-sans-bold text-ink">
+                              {card.front}
+                            </Text>
+                            <Text className="mt-1 text-small leading-5 text-ink-soft">
+                              {card.back}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    </ReaderCard>
+                  ) : (
+                    <View className="mt-4">
+                      <EmptyCard
+                        title="No flashcards yet"
+                        body={
+                          aiActive
+                            ? "Sua is making them now."
+                            : "Generate a study set and Sua will turn this note into cards you can review."
+                        }
+                        cta={aiActive ? undefined : "Make flashcards"}
+                        onPress={() => void queueGeneration()}
+                        Icon={Brain}
+                      />
+                    </View>
+                  )
+                ) : null}
+
+                {tab === "quiz" ? (
+                  quiz ? (
+                    <ReaderCard title="Quiz">
+                      <Text className="text-small leading-5 text-ink-soft">
+                        {questionCount}{" "}
+                        {questionCount === 1 ? "question" : "questions"} ·
+                        multiple choice, true/false and short answer. Your score
+                        is saved after you finish.
+                      </Text>
+                      <Pressable
+                        onPress={() =>
+                          router.push({
+                            pathname: "/quiz/[id]",
+                            params: { id: quiz.id },
+                          })
+                        }
+                        accessibilityRole="button"
+                        accessibilityLabel="Start the quiz"
+                        className="mt-4 min-h-12 flex-row items-center justify-center gap-2 self-start rounded-btn bg-brand-strong px-4 active:opacity-80"
+                      >
+                        <Play size={15} color={colors.ink.inverse} />
+                        <Text className="text-label font-sans-bold text-ink-inverse">
+                          Start quiz
+                        </Text>
+                      </Pressable>
+                    </ReaderCard>
+                  ) : (
+                    <View className="mt-4">
+                      <EmptyCard
+                        title="No quiz yet"
+                        body={
+                          aiActive
+                            ? "Sua is writing the questions now."
+                            : "Generate a study set to test yourself on this note."
+                        }
+                        cta={aiActive ? undefined : "Make a quiz"}
+                        onPress={() => void queueGeneration()}
+                        Icon={Sparkles}
+                      />
+                    </View>
+                  )
                 ) : null}
               </>
-            )}
-
-            {reference ? null : (
-              <View className="mt-4 flex-row gap-3">
-                <Pressable
-                  disabled={flashcardCount === 0}
-                  onPress={() =>
-                    router.push({ pathname: "/deck/[id]", params: { id: String(id) } })
-                  }
-                  accessibilityRole="button"
-                  accessibilityLabel="Open this note's deck"
-                  // Class set is static; `disabled` already gates interaction.
-                  className="flex-1 rounded-card bg-surface p-card shadow-card active:opacity-80"
-                >
-                  <Text className="text-caption font-sans-extrabold text-ink-soft">
-                    FLASHCARDS
-                  </Text>
-                  <Text className="mt-1 text-body-lg font-sans-extrabold text-ink">
-                    {flashcardCount}
-                  </Text>
-                </Pressable>
-                <Pressable
-                  disabled={quizCount === 0}
-                  onPress={() =>
-                    router.push({ pathname: "/quiz/[id]", params: { id: quizId ?? "" } })
-                  }
-                  accessibilityRole="button"
-                  accessibilityLabel="Open this note's quiz"
-                  className="flex-1 rounded-card bg-surface p-card shadow-card"
-                >
-                  <Text className="text-caption font-sans-extrabold text-ink-soft">
-                    QUIZ
-                  </Text>
-                  <Text className="mt-1 text-body-lg font-sans-extrabold text-ink">
-                    {quizCount}
-                  </Text>
-                </Pressable>
+            ) : !aiActive && note.aiState !== "failed" ? (
+              <View className="mt-4">
+                <EmptyCard
+                  title={emptyStateCopy.title}
+                  body={emptyStateCopy.body}
+                  cta={emptyStateCopy.cta}
+                  onPress={() => void queueGeneration()}
+                  Icon={Sparkles}
+                />
               </View>
-            )}
+            ) : null}
 
-            {note.transcript ? (
+            {/* One gold action per screen: study what exists, or ask about a
+                reference. A note with nothing generated yet has no gold button
+                (the empty card above carries the only call to action). */}
+            {reference ? (
+              body ? (
+                <Pressable
+                  onPress={() =>
+                    note.courseId
+                      ? router.push({
+                          pathname: "/ask-sua",
+                          params: { courseId: note.courseId },
+                        })
+                      : router.push("/ask-sua")
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel="Ask Sua about this reference"
+                  className="mt-5 min-h-14 flex-row items-center justify-center gap-2 rounded-btn bg-gold shadow-gold active:opacity-80"
+                >
+                  <MessageCircle size={18} color={pv.ink.DEFAULT} />
+                  <Text className="text-body font-sans-extrabold text-ink">
+                    Ask Sua about this
+                  </Text>
+                </Pressable>
+              ) : null
+            ) : flashcards.length || quiz ? (
               <Pressable
-                onPress={() => setTranscriptOpen((open) => !open)}
+                onPress={study}
                 accessibilityRole="button"
                 accessibilityLabel={
-                  transcriptOpen ? "Hide the transcript" : "Show the transcript"
+                  flashcards.length ? "Study this note" : "Take this quiz"
                 }
-                className="mt-4 flex-row items-center justify-between rounded-card bg-surface p-card shadow-card active:opacity-80"
+                className="mt-5 min-h-14 flex-row items-center justify-center gap-2 rounded-btn bg-gold shadow-gold active:opacity-80"
               >
-                <Text className="text-body font-sans-bold text-ink">
-                  Transcript
+                <Play size={18} color={pv.ink.DEFAULT} />
+                <Text className="text-body font-sans-extrabold text-ink">
+                  {flashcards.length ? "Study this note" : "Take the quiz"}
                 </Text>
-                {transcriptOpen ? (
-                  <ChevronUp size={18} color={pv.ink.faint} />
-                ) : (
-                  <ChevronDown size={18} color={pv.ink.faint} />
-                )}
               </Pressable>
             ) : null}
-            {note.transcript && transcriptOpen ? (
-              <View className="mt-2 rounded-card bg-surface p-card">
-                <Markdown text={note.transcript} scale={noteScaleValue} />
-              </View>
+
+            {sourceMeta?.truncated || sourceMeta?.checkFailed ? (
+              <Text className="mt-4 text-center text-caption text-ink-faint">
+                {sourceMeta.truncated
+                  ? "Part of your source was too long to read — the notes cover what Sua could read."
+                  : "Some numbers may not match your source — check the important ones."}
+              </Text>
             ) : null}
           </>
         ) : null}
       </ScrollView>
+
+      <BottomSheet
+        visible={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        title="Note options"
+      >
+        <Pressable
+          onPress={() => {
+            setMenuOpen(false);
+            void queueGeneration();
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Regenerate with AI"
+          className="min-h-12 flex-row items-center gap-3 rounded-input bg-surface px-4 active:opacity-80"
+        >
+          <RefreshCw size={18} color={colors.brand.DEFAULT} />
+          <View className="flex-1">
+            <Text className="text-body font-sans-bold text-ink">
+              Regenerate with AI
+            </Text>
+            <Text className="text-caption text-ink-soft">
+              {generationKind === "course_reference"
+                ? "Rewrite this reference sheet from your upload."
+                : generationKind === "lecture_note"
+                  ? "Rewrite the notes, summary, cards and quiz."
+                  : "Rebuild the summary, cards and quiz."}
+            </Text>
+          </View>
+        </Pressable>
+        <Pressable
+          onPress={() => {
+            setMenuOpen(false);
+            openEditor();
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Edit this note"
+          className="min-h-12 flex-row items-center gap-3 rounded-input bg-surface px-4 active:opacity-80"
+        >
+          <Pencil size={18} color={colors.brand.DEFAULT} />
+          <Text className="flex-1 text-body font-sans-bold text-ink">
+            Edit note
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => {
+            setMenuOpen(false);
+            setReportOpen(true);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Report a mistake"
+          className="min-h-12 flex-row items-center gap-3 rounded-input bg-surface px-4 active:opacity-80"
+        >
+          <Flag size={18} color={colors.brand.DEFAULT} />
+          <Text className="flex-1 text-body font-sans-bold text-ink">
+            Report a mistake
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => {
+            setMenuOpen(false);
+            confirmDelete();
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Delete this note"
+          className="min-h-12 flex-row items-center gap-3 rounded-input bg-danger-soft px-4 active:opacity-80"
+        >
+          <Trash2 size={18} color={colors.danger} />
+          <Text className="flex-1 text-body font-sans-bold text-danger">
+            Delete note
+          </Text>
+        </Pressable>
+      </BottomSheet>
 
       <BottomSheet
         visible={reportOpen}
@@ -622,7 +843,9 @@ export default function NoteView() {
       >
         {reported ? (
           <View className="rounded-input bg-success-soft p-4">
-            <Text className="text-body font-sans-bold text-ink">Thanks — report sent.</Text>
+            <Text className="text-body font-sans-bold text-ink">
+              Thanks — report sent.
+            </Text>
           </View>
         ) : (
           <View className="gap-3">
@@ -653,7 +876,10 @@ export default function NoteView() {
                     setReported(true);
                     setReportComment("");
                   } catch {
-                    Alert.alert("Couldn’t send the report", "Try again when you’re connected.");
+                    Alert.alert(
+                      "Couldn’t send the report",
+                      "Try again when you’re connected.",
+                    );
                   } finally {
                     setReportSending(false);
                   }

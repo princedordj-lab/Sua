@@ -1,30 +1,75 @@
 import JSZip from "jszip";
 
 // Server-side text extraction for uploaded documents. Audio transcription and
-// image OCR belong to the AI pipeline (Milestone 3) — everything here is pure
-// JS, runs inline when an upload completes, and never calls a model.
+// image OCR belong to the AI pipeline — everything here is pure JS, and the
+// PDF path renders pages to images only when the pipeline explicitly asks for
+// an OCR fallback.
 //
 // Failures return null instead of throwing: an upload must succeed even when
 // a file turns out to be unparseable, the note simply has no source text.
 const MAX_TEXT_CHARS = 100_000;
 
-export async function extractDocumentText(buffer, format, kind) {
+/**
+ * Extract text with its source structure intact.
+ *
+ * Returns `{ segments, text, pageCount, truncated }` where each segment is
+ * `{ index, label, text }` and `label` is "p. 12", "Slide 4" or null when the
+ * format has no pages (DOCX/TXT). Returns null on any failure.
+ */
+export async function extractDocument(buffer, format, kind) {
   if (kind !== "document") return null;
   try {
-    let text = null;
-    if (format === "pdf") text = await extractPdf(buffer);
-    else if (format === "txt") text = buffer.toString("utf8");
-    else if (format === "docx") text = await extractDocx(buffer);
-    else if (format === "pptx") text = await extractPptx(buffer);
-    if (!text) return null;
-    const normalized = text
-      .replace(/^\uFEFF/, "")
-      .replace(/\r\n/g, "\n")
-      .replace(/[ \t]+\n/g, "\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-    if (!normalized) return null;
-    return normalized.slice(0, MAX_TEXT_CHARS);
+    let segments = [];
+    let pageCount = 0;
+
+    if (format === "pdf") {
+      const result = await extractPdfPages(buffer);
+      if (!result) return null;
+      segments = result.segments;
+      pageCount = result.pageCount;
+    } else if (format === "txt") {
+      segments = [{ index: 1, label: null, text: buffer.toString("utf8") }];
+      pageCount = 1;
+    } else if (format === "docx") {
+      segments = [{ index: 1, label: null, text: await extractDocx(buffer) }];
+      pageCount = 1;
+    } else if (format === "pptx") {
+      segments = await extractPptxSlides(buffer);
+      pageCount = segments.length;
+    } else {
+      return null;
+    }
+
+    const normalized = [];
+    let size = 0;
+    let truncated = false;
+    for (const segment of segments) {
+      const text = normalizeText(segment.text);
+      // A blank PDF page is kept as a placeholder so the pipeline can decide to
+      // OCR it; other formats have no page concept and drop blank blocks.
+      if (!text && format !== "pdf") continue;
+      const room = MAX_TEXT_CHARS - size;
+      if (room <= 0) {
+        truncated = true;
+        break;
+      }
+      if (text.length > room) {
+        normalized.push({ ...segment, text: text.slice(0, room).trim() });
+        truncated = true;
+        size = MAX_TEXT_CHARS;
+        break;
+      }
+      normalized.push({ ...segment, text });
+      size += text.length;
+    }
+
+    if (!normalized.length) return null;
+    return {
+      segments: normalized,
+      text: normalized.map((segment) => segment.text).join("\n\n"),
+      pageCount: pageCount || normalized.length,
+      truncated,
+    };
   } catch (error) {
     console.warn(
       `Text extraction failed (${kind}/${format}):`,
@@ -34,26 +79,77 @@ export async function extractDocumentText(buffer, format, kind) {
   }
 }
 
-async function extractPdf(buffer) {
+/** Back-compat wrapper: the flat string `/complete` stores on the asset. */
+export async function extractDocumentText(buffer, format, kind) {
+  const result = await extractDocument(buffer, format, kind);
+  // A scanned PDF extracts to "" (placeholders only). The asset keeps a null
+  // text so the pipeline knows it still has to OCR the pages.
+  return result?.text?.trim() ? result.text : null;
+}
+
+/**
+ * Rasterise one PDF page for the OCR fallback. Lazy like every PDF import: a
+ * missing native canvas binary degrades OCR to null, never crashes the route.
+ */
+export async function renderPdfPage(buffer, pageNumber, scale = 2) {
+  try {
+    await installCanvasGlobals();
+    const { PDFParse } = await import("pdf-parse");
+    const parser = new PDFParse({ data: copyOf(buffer) });
+    try {
+      const result = await parser.getScreenshot({
+        partial: [pageNumber],
+        scale,
+        imageBuffer: true,
+        imageDataUrl: false,
+      });
+      const page = result.pages[0];
+      return page?.data ? Buffer.from(page.data) : null;
+    } finally {
+      await parser.destroy().catch(() => {});
+    }
+  } catch (error) {
+    console.warn(
+      `PDF page render failed (page ${pageNumber}):`,
+      error?.message ?? error,
+    );
+    return null;
+  }
+}
+
+function normalizeText(value) {
+  return String(value ?? "")
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// pdf-parse transfers typed arrays to its worker, so each parse gets its own
+// copy of the bytes.
+function copyOf(buffer) {
+  return new Uint8Array(buffer);
+}
+
+async function extractPdfPages(buffer) {
   // pdfjs-dist (pulled in by pdf-parse) evaluates `new DOMMatrix()` at module
-  // scope and expects the canvas globals to exist in Node. It does try to
-  // require "@napi-rs/canvas" itself, but not in a form Vercel's file tracer
-  // can follow, so the package was absent from the deployed function and the
-  // app died on import. Importing it here with a literal specifier gets the
-  // package (including its prebuilt .node binary) into the traced bundle, and
-  // installing the globals before pdf-parse is loaded means pdfjs no longer
-  // needs its own polyfill attempt.
-  //
-  // Both imports stay lazy on purpose: the API should not pay for pdfjs on
-  // cold starts that never touch a PDF, and if the native binary is missing
-  // for the current platform only PDF extraction degrades to null instead of
-  // crashing every route at import time.
+  // scope and expects the canvas globals to exist in Node. Importing canvas
+  // here with a literal specifier also gets the prebuilt .node binary into the
+  // traced Vercel bundle (see AGENTS.md).
   await installCanvasGlobals();
   const { PDFParse } = await import("pdf-parse");
-  const parser = new PDFParse({ data: buffer });
+  const parser = new PDFParse({ data: copyOf(buffer) });
   try {
-    const result = await parser.getText();
-    return result.text ?? null;
+    const result = await parser.getText({ pageJoiner: "" });
+    // Every page keeps its slot, even when it has no text layer: the pipeline
+    // OCRs those pages, and page numbers must stay true to the file.
+    const segments = result.pages.map((page) => ({
+      index: page.num,
+      label: `p. ${page.num}`,
+      text: page.text ?? "",
+    }));
+    return { segments, pageCount: result.total || result.pages.length };
   } finally {
     await parser.destroy().catch(() => {});
   }
@@ -106,7 +202,9 @@ async function extractDocx(buffer) {
   return decodeEntities(stripTags(withBreaks));
 }
 
-async function extractPptx(buffer) {
+// One segment per slide, number kept from the file name so labels match the
+// deck the student is looking at even when slides are reordered in the XML.
+async function extractPptxSlides(buffer) {
   const zip = await JSZip.loadAsync(buffer);
   const slides = Object.keys(zip.files)
     .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
@@ -115,14 +213,15 @@ async function extractPptx(buffer) {
         Number.parseInt(a.match(/slide(\d+)\.xml/)[1], 10) -
         Number.parseInt(b.match(/slide(\d+)\.xml/)[1], 10),
     );
-  const parts = [];
+  const segments = [];
   for (const name of slides) {
+    const number = Number.parseInt(name.match(/slide(\d+)\.xml/)[1], 10);
     const xml = await zip.files[name].async("string");
     const withBreaks = xml
       .replace(/<\/a:p>/g, "\n")
       .replace(/<a:br\s*\/>/g, "\n");
     const text = decodeEntities(stripTags(withBreaks)).trim();
-    if (text) parts.push(text);
+    if (text) segments.push({ index: number, label: `Slide ${number}`, text });
   }
-  return parts.length ? parts.join("\n\n") : null;
+  return segments;
 }

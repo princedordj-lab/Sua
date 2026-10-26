@@ -33,7 +33,6 @@ import type {
   StyleState,
 } from "react-native-enriched-markdown";
 import {
-  AlertTriangle,
   Bold,
   Camera,
   CheckCircle2,
@@ -47,12 +46,10 @@ import {
   Italic,
   List,
   ListOrdered,
-  Loader2,
   Mic,
   Pause,
   PenLine,
   Play,
-  RefreshCw,
   Save,
   Sparkles,
   Square,
@@ -62,6 +59,8 @@ import {
 } from "lucide-react-native";
 import { BottomSheet, CoursePickerSheet } from "../../../components/sheets";
 import { Markdown } from "../../../components/markdown";
+import { AiFailedCard, AiProgressCard } from "../../../components/note/cards";
+import { SegmentedControl, type SegmentOption } from "../../../components/ui";
 import { ProgressBar } from "../../../components/progress-bar";
 import { WifiToggle } from "../../../components/wifi-toggle";
 import { colors, fontFamily } from "../../../config/theme";
@@ -80,7 +79,7 @@ import {
   finalizeSegment,
   getNote,
   getSetting,
-  getLastGenerationKind,
+  getLastGeneration,
   listInProgressRecordings,
   listSessionSegments,
   listUploadQueue,
@@ -103,7 +102,7 @@ import type {
   UploadQueueItem,
   UploadTarget,
 } from "../../../lib/notes";
-import { drainGenerationQueue, generationKindFor } from "../../../lib/generate";
+import { drainGenerationQueue, aiStageLabel, generationKindFor, isAiActive } from "../../../lib/generate";
 import { jobsApi } from "../../../lib/api";
 import { flushUploads } from "../../../lib/uploads";
 import {
@@ -125,6 +124,12 @@ const SEGMENT_MS = 2 * 60 * 1000;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const AUTOSAVE_DELAY_MS = 1500;
 
+// The pipeline's wording for failures it did not classify. Identical to
+// USER_MESSAGES.generic on the server; used when the local queue row has no
+// message yet (an upload conversion before the job is polled).
+const GENERIC_FAILURE =
+  "Something went wrong. Tap to try again. This didn't use your monthly allowance.";
+
 // The two destinations the student picks map to three server job kinds.
 // "Lecture note" always requests a real AI-written note (not just a summary).
 function jobKindForTarget(target: UploadTarget): GenerationKind {
@@ -133,6 +138,18 @@ function jobKindForTarget(target: UploadTarget): GenerationKind {
 
 function noteKindForTarget(target: UploadTarget): NoteKind {
   return target === "course_reference" ? "reference" : "note";
+}
+
+/**
+ * Which destination a picked file opens on. Handouts and typed documents
+ * (PDF/DOCX/TXT) are reference material; slide decks and photos of the board
+ * are lecture content. The student can still change it in the sheet.
+ */
+function targetForFile(kind: UploadKind, extension: string): UploadTarget {
+  if (kind !== "document") return "lecture_note";
+  return extension === "pptx" || extension === "ppt"
+    ? "lecture_note"
+    : "course_reference";
 }
 
 // Third-party native component without NativeWind support: typography flows
@@ -179,6 +196,10 @@ const MODES = [
 ] as const;
 
 type Mode = (typeof MODES)[number]["key"];
+
+const MODE_OPTIONS: readonly SegmentOption<Mode>[] = MODES.map(
+  ({ key, label, Icon }) => ({ key, label, Icon }),
+);
 
 const TOOLS = [
   { key: "bold", label: "Bold", Icon: Bold },
@@ -326,55 +347,6 @@ function saveDraftQuietly(db: SQLiteDatabase, draft: Draft) {
     body: draft.body,
     sourceType: draft.sourceType ?? "typed",
   }).catch(() => {});
-}
-
-function SegmentedControl({
-  mode,
-  onChange,
-  disabled = false,
-}: {
-  mode: Mode;
-  onChange: (mode: Mode) => void;
-  disabled?: boolean;
-}) {
-  const pv = usePalette();
-  return (
-    <View className="mt-5 flex-row rounded-chip bg-surface p-1.5 shadow-card">
-      {MODES.map(({ key, label, Icon }) => {
-        const selected = mode === key;
-        return (
-          <View
-            key={key}
-            className={`min-h-12 flex-1 flex-row  ${
-              selected ? "bg-brand-strong rounded-full" : ""
-            } ${disabled ? "opacity-60" : ""}`}
-          >
-            {/* Visual state lives on the wrapper so the pressable's class set
-                stays static; only plain value utilities toggle after mount. */}
-            <Pressable
-              onPress={() => {
-                if (!disabled) onChange(key);
-              }}
-              disabled={disabled}
-              accessibilityRole="tab"
-              accessibilityState={{ selected, disabled }}
-              accessibilityLabel={label}
-              className="flex-1 self-stretch flex-row items-center justify-center gap-2 active:opacity-80"
-            >
-              <Icon size={18} color={selected ? colors.ink.inverse : pv.ink.soft} />
-              <Text
-                className={`text-label font-sans-bold ${
-                  selected ? "text-ink-inverse" : "text-ink-soft"
-                }`}
-              >
-                {label}
-              </Text>
-            </Pressable>
-          </View>
-        );
-      })}
-    </View>
-  );
 }
 
 function CourseSelect({
@@ -1216,30 +1188,50 @@ export default function Create() {
     setAiState(note.aiState);
     setSummaryMarkdown(note.summary);
     setOpenedNoteKind(note.noteKind);
-    setLastRequestedKind(
-      await getLastGenerationKind(db, note.id).catch(() => null),
-    );
+    const last = await getLastGeneration(db, note.id).catch(() => null);
+    setLastRequestedKind(last?.kind ?? null);
     if (note.aiState === "failed") {
-      const generation = await db
-        .getFirstAsync<{ error: string }>(
-          "SELECT error FROM generation_queue WHERE note_id = ? AND state = 'failed' ORDER BY updated_at DESC LIMIT 1",
-          note.id,
-        )
-        .catch(() => null);
-      setSummaryGenerationError(generation?.error ?? null);
+      // The queue row holds the message for a run this device started; an
+      // upload conversion has no row, so ask the server job for its copy.
+      let message = last?.state === "failed" ? last.error : null;
+      if (!message) {
+        const token = await getAuthToken().catch(() => null);
+        const job = token
+          ? await jobsApi.latestForNote(token, note.id).catch(() => null)
+          : null;
+        message = job?.error ?? null;
+      }
+      setSummaryGenerationError(message);
     } else {
       setSummaryGenerationError(null);
     }
-  }, [db, typedNoteId]);
+  }, [db, getAuthToken, typedNoteId]);
+
+  // Retry the destination this note was last asked for. Runs in the parent so
+  // both the failure card and the keyboard flow can use it.
+  const retryGeneration = useCallback(() => {
+    void (async () => {
+      const note = await getNote(db, typedNoteId).catch(() => null);
+      const last = await getLastGeneration(db, typedNoteId).catch(() => null);
+      await enqueueGeneration(
+        db,
+        typedNoteId,
+        generationKindFor(note, last?.kind ?? null),
+      );
+      setAiState("queued");
+      void drainGenerationQueue({
+        db,
+        getAuthToken,
+        onNoteChange: () => {
+          void refreshAiState();
+        },
+      }).catch(() => {});
+    })();
+  }, [db, getAuthToken, refreshAiState, typedNoteId]);
 
   // While a generation is in flight, poll the local row so returning to this
   // screen picks up stage changes and the finished study set.
-  const aiActive =
-    aiState === "queued" ||
-    aiState === "transcribing" ||
-    aiState === "summarising" ||
-    aiState === "making_cards" ||
-    aiState === "writing";
+  const aiActive = isAiActive(aiState);
   useEffect(() => {
     if (!aiActive) return;
     const timer = setInterval(() => {
@@ -1451,7 +1443,7 @@ export default function Create() {
         name: asset.name,
         size: asset.size ?? fileSizeOf(safeUri),
         kind,
-        target: "lecture_note",
+        target: targetForFile(kind, ext),
       });
     } catch {
       Alert.alert("Couldn’t open the file picker", "Try again in a moment.");
@@ -1569,9 +1561,11 @@ export default function Create() {
         ) : (
           <>
             <SegmentedControl
-              mode={mode}
+              options={MODE_OPTIONS}
+              value={mode}
               onChange={setMode}
               disabled={recordingActive}
+              className="mt-5 shadow-card"
             />
             <CourseSelect
               course={course}
@@ -2069,82 +2063,39 @@ export default function Create() {
                 ) : null}
 
                 {aiState === "failed" ? (
-                  <View className="mt-4 rounded-card border border-warning bg-warning-soft p-card">
-                    <View className="flex-row items-center gap-2">
-                      <AlertTriangle size={18} color={colors.warning} />
-                      <Text className="text-body-lg font-sans-extrabold text-ink">
-                        {lastRequestedKind === "lecture_note"
-                          ? "Couldn’t finish the lecture note"
-                          : openedNoteKind === "reference"
-                            ? "Couldn’t finish the reference"
-                            : "Couldn’t finish the summary"}
-                      </Text>
-                    </View>
-                    <Text className="mt-1 text-small leading-5 text-ink-soft">
-                      {summaryGenerationError ||
-                        "Try again while you’re connected. Your note is safe."}
-                    </Text>
-                    <View className="mt-3 flex-row gap-2">
-                      <Pressable
-                        onPress={() => {
-                          void (async () => {
-                            const note = await getNote(db, typedNoteId).catch(
-                              () => null,
-                            );
-                            const lastKind = await getLastGenerationKind(
-                              db,
-                              typedNoteId,
-                            ).catch(() => null);
-                            await enqueueGeneration(
-                              db,
-                              typedNoteId,
-                              generationKindFor(note, lastKind),
-                            );
-                            setAiState("queued");
-                            void drainGenerationQueue({
-                              db,
-                              getAuthToken,
-                              onNoteChange: () => {
-                                void refreshAiState();
-                              },
-                            }).catch(() => {});
-                          })();
-                        }}
-                        accessibilityRole="button"
-                        accessibilityLabel="Try generating again"
-                        className="min-h-10 flex-row items-center justify-center gap-2 rounded-btn bg-brand-strong px-4 active:opacity-80"
-                      >
-                        <RefreshCw size={15} color={colors.ink.inverse} />
-                        <Text className="text-label font-sans-bold text-ink-inverse">
-                          Try again
-                        </Text>
-                      </Pressable>
-                    </View>
-                  </View>
-                ) : aiActive ? (
-                  <View className="mt-4 flex-row items-center gap-2.5 rounded-card bg-surface p-card shadow-card">
-                    <Loader2 size={17} color={colors.brand.DEFAULT} />
-                    <Text className="text-body font-sans-bold text-ink">
-                      {aiState === "queued"
-                        ? "Waiting to be processed…"
-                        : aiState === "transcribing"
-                          ? "Transcribing your lecture…"
-                          : aiState === "summarising"
-                            ? "Writing your summary…"
-                        : aiState === "writing"
-                          ? openedNoteKind === "reference"
-                            ? "Writing your reference…"
-                            : "Writing your lecture note…"
-                          : "Making flashcards and a quiz…"}
-                    </Text>
-                  </View>
-                ) : summaryMarkdown ? (
+                  <AiFailedCard
+                    title={
+                      lastRequestedKind === "lecture_note"
+                        ? "Couldn’t finish the study notes"
+                        : openedNoteKind === "reference"
+                          ? "Couldn’t finish the reference"
+                          : "Couldn’t finish the study set"
+                    }
+                    message={summaryGenerationError || GENERIC_FAILURE}
+                    onRetry={retryGeneration}
+                  />
+                ) : null}
+
+                {aiActive ? (
+                  <AiProgressCard
+                    label={aiStageLabel(
+                      aiState,
+                      lastRequestedKind ??
+                        (openedNoteKind === "reference"
+                          ? "course_reference"
+                          : "lecture_note"),
+                      { sourceType: noteSourceType ?? "typed" },
+                    )}
+                  />
+                ) : null}
+
+                {!aiActive && aiState !== "failed" && summaryMarkdown ? (
                   <View className="mt-4 rounded-card bg-surface p-card-lg shadow-card">
                     <View className="flex-row items-center justify-between">
                       <View className="flex-row items-center gap-2">
                         <Sparkles size={18} color={colors.brand.DEFAULT} />
                         <Text className="text-body-lg font-sans-extrabold text-ink">
-                          AI Study Summary
+                          Summary
                         </Text>
                       </View>
                       <Pressable
@@ -2242,14 +2193,14 @@ export default function Create() {
                 {
                   target: "lecture_note" as UploadTarget,
                   Icon: FileText,
-                  title: "Lecture note",
-                  body: "An AI-written note, plus a summary, flashcards and a quiz. Your original capture stays in Transcript.",
+                  title: "Study notes",
+                  body: "Sua writes a full note from your material, then adds a summary, flashcards and a quiz. Your original capture stays on the note.",
                 },
                 {
                   target: "course_reference" as UploadTarget,
                   Icon: BookOpen,
-                  title: "Course reference",
-                  body: "Condensed key terms, formulas and must-know facts, shown in the course Reference section.",
+                  title: "Reference sheet",
+                  body: "A one-page reference with key terms, formulas and must-know facts, kept with the course. No flashcards or quiz.",
                 },
               ] as const
             ).map(({ target, Icon, title: rowTitle, body }) => {

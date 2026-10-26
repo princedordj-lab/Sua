@@ -3,7 +3,7 @@ import { withUser } from "../lib/db.js";
 import { ensureUser } from "../lib/user.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { aiConfigured, geminiTranscribe } from "../lib/ai.js";
-import { openRouterChat, strongModel } from "../lib/ai.js";
+import { chatCompletion, strongModel } from "../lib/ai.js";
 
 export const chatRouter = Router();
 
@@ -192,7 +192,7 @@ chatRouter.post("/ask", async (req, res) => {
 
   if (prepared.error) return res.status(prepared.status).json({ error: prepared.error });
 
-  const answer = await openRouterChat({
+  const answer = await chatCompletion({
     system: systemPrompt(prepared.course),
     user: buildUserTurn(question, quickAction, prepared.built.context, prepared.history),
     model: strongModel(),

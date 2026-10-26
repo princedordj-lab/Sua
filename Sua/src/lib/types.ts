@@ -71,12 +71,32 @@ export type SettingKey =
 export type AiState =
   | "none"
   | "queued"
-  | "transcribing"
+  | "reading"
+  | "reading_scans"
+  | "digesting"
+  | "writing"
+  | "checking"
   | "summarising"
   | "making_cards"
-  | "writing"
   | "ready"
   | "failed";
+
+// Diagnostics the server stores on the job for a finished generation. Optional
+// everywhere: older jobs and offline notes have none.
+export type JobMeta = {
+  promptVersion?: string;
+  sourceType?: "file" | "recording" | "typed" | null;
+  truncated?: boolean;
+  pagesUsed?: number;
+  pageCount?: number;
+  minutes?: number;
+  digests?: number;
+  words?: number;
+  checkPassed?: boolean | null;
+  unsupportedNumbers?: string[];
+  unsupportedFormulas?: string[];
+  modelCalls?: number;
+};
 
 export type NoteKind = "note" | "reference";
 
@@ -166,6 +186,8 @@ export type ServerJob = {
   stage: AiState;
   attempts: number;
   error: string | null;
+  // Generation diagnostics (pages read, truncation, fidelity check).
+  meta?: JobMeta | null;
   startedAt: string | null;
   finishedAt: string | null;
   createdAt: string;

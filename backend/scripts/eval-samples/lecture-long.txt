@@ -1,0 +1,207 @@
+# PHYS 201 — Mechanics and Thermal Physics (lecture transcript)
+
+## Introduction
+
+Today we cover the material that appears in the end-of-semester paper, so write every formula down and check the units as we go. If a number is given in the question, use it exactly as written; do not round until the final line.
+
+## 1. Units, dimensions and measurement
+
+Every physical quantity has a dimension and a unit; the SI unit of length is the metre, of mass the kilogram, and of time the second.
+Dimensional analysis checks an equation by comparing the dimensions on both sides: `[v] = L T^-1` and `[a] = L T^-2`.
+A measurement of 25.4 mm is the same as 2.54 cm and 0.0254 m.
+The uncertainty of a single reading with this ruler is 0.5 mm, so 25.4 mm is written as 25.4 ± 0.5 mm.
+Significant figures follow the instrument: 3 significant figures for this ruler, not 6.
+
+Worked examples:
+- Convert 72 km/h to m/s: 72 × 1000 / 3600 = 20 m/s.
+- A rod measures 1.25 m with a 1 mm tape, giving a percentage uncertainty of 0.1 / 125 = 0.08%.
+
+Remember: this topic contributed 2 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 2. Displacement, velocity and acceleration
+
+Average velocity is displacement divided by time: `v = Δx / Δt`.
+Acceleration is the rate of change of velocity: `a = Δv / Δt`, measured in m/s^2.
+Velocity is a vector, so reversing direction changes its sign even when the speed is constant.
+On a displacement-time graph the slope is velocity; on a velocity-time graph the slope is acceleration and the area is displacement.
+Uniform acceleration means the velocity changes by the same amount every second.
+
+Worked examples:
+- A bus covers 240 m in 12 s, so its average velocity is 20 m/s.
+- A car speeds up from 8 m/s to 20 m/s in 4 s, so a = (20 - 8) / 4 = 3 m/s^2.
+
+Remember: this topic contributed 3 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 3. Equations of motion
+
+For constant acceleration the four equations of motion are `v = u + at`, `s = ut + 1/2 at^2`, `v^2 = u^2 + 2as` and `s = (u + v)t / 2`.
+u is the initial velocity, v the final velocity, a the acceleration, t the time and s the displacement.
+Each equation leaves out exactly one quantity, so choose the equation that omits what you are not given.
+The equations only hold while the acceleration stays constant.
+For free fall near the Earth's surface a = 9.8 m/s^2 downward, often rounded to 10 m/s^2 in estimates.
+
+Worked examples:
+- A stone dropped from rest falls 45 m: 45 = 1/2 × 10 × t^2, so t = 3 s and v = 30 m/s.
+- A train at 15 m/s brakes at 2 m/s^2 and stops after 56.25 m, because v^2 = u^2 + 2as gives 0 = 225 - 4s.
+
+Remember: this topic contributed 4 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 4. Newton's laws of motion
+
+Newton's first law: a body stays at rest or in uniform motion unless a resultant force acts on it.
+Newton's second law: the resultant force equals mass times acceleration, `F = ma`, with F in newtons.
+Newton's third law: every action has an equal and opposite reaction, acting on a different body.
+One newton accelerates 1 kg at 1 m/s^2.
+Weight is a force, `W = mg`, so a 60 kg student weighs 588 N on Earth.
+
+Worked examples:
+- A 1200 kg car accelerates at 2 m/s^2, so the resultant force is 2400 N.
+- A 5 kg block on a frictionless table pulled by 15 N accelerates at 3 m/s^2.
+
+Remember: this topic contributed 5 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 5. Friction and inclined planes
+
+Static friction rises to a maximum of `f = μN` before the surfaces slide.
+Kinetic friction is usually smaller than the maximum static friction.
+The normal reaction N is perpendicular to the surface, not always equal to the weight.
+On a slope of angle θ the component of weight along the slope is `mg sin θ` and the normal reaction is `mg cos θ`.
+The coefficient of friction μ has no unit.
+
+Worked examples:
+- A 10 kg crate on a floor with μ = 0.4 needs 39.2 N to start moving, since f = 0.4 × 98 N.
+- On a 30 degree slope with no friction a block accelerates at 4.9 m/s^2, from 9.8 × sin 30.
+
+Remember: this topic contributed 6 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 6. Work, energy and power
+
+Work is force times displacement along the force: `W = Fs cos θ`, measured in joules.
+Kinetic energy is `KE = 1/2 mv^2` and gravitational potential energy is `PE = mgh`.
+The work-energy theorem says the resultant work equals the change in kinetic energy.
+Power is the rate of doing work: `P = W / t`, measured in watts.
+Energy is conserved in a closed system, though it may change form.
+
+Worked examples:
+- A 2 kg ball at 6 m/s has KE = 1/2 × 2 × 36 = 36 J.
+- Lifting 20 kg by 3 m takes 588 J of work, and doing it in 2 s needs 294 W.
+
+Remember: this topic contributed 7 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 7. Momentum and collisions
+
+Momentum is `p = mv`, measured in kg m/s and pointing along the velocity.
+In a collision with no external force, total momentum before equals total momentum after.
+Impulse is `FΔt = Δp`, the change in momentum.
+An elastic collision conserves kinetic energy; an inelastic one does not.
+A perfectly inelastic collision joins the bodies, so they share one final velocity.
+
+Worked examples:
+- A 0.15 kg ball at 20 m/s has momentum 3 kg m/s.
+- A 2 kg trolley at 3 m/s hits a stationary 4 kg trolley and they stick: v = 6 / 6 = 1 m/s.
+
+Remember: this topic contributed 8 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 8. Circular motion
+
+Angular velocity is `ω = 2π / T`, measured in rad/s.
+Centripetal acceleration is `a = v^2 / r = ω^2 r`, always pointing to the centre.
+The centripetal force is `F = mv^2 / r`, supplied by tension, friction or gravity.
+Velocity is tangential while acceleration is radial, so the speed can stay constant.
+One full revolution is 2π radians, or 360 degrees.
+
+Worked examples:
+- A 0.5 kg mass on a 2 m string at 4 m/s needs 4 N inward, from 0.5 × 16 / 2.
+- A wheel with T = 0.5 s has ω = 4π rad/s, about 12.6 rad/s.
+
+Remember: this topic contributed 9 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 9. Simple harmonic motion
+
+In simple harmonic motion the acceleration is proportional to the displacement and opposite in direction: `a = -ω^2 x`.
+The period of a spring is `T = 2π √(m/k)` and of a simple pendulum `T = 2π √(L/g)`.
+Amplitude is the maximum displacement; the period does not depend on amplitude.
+At maximum displacement the velocity is zero and the acceleration is greatest.
+At the equilibrium position the velocity is greatest and the acceleration is zero.
+
+Worked examples:
+- A pendulum of length 1 m has T = 2π √(1 / 9.8) = 2.0 s.
+- A 0.2 kg mass on a spring with k = 20 N/m oscillates with T = 0.63 s.
+
+Remember: this topic contributed 10 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 10. Waves and sound
+
+The wave equation is `v = fλ`, so a 440 Hz note with λ = 0.78 m travels at 343 m/s.
+Frequency is the number of oscillations per second, measured in hertz.
+Sound needs a medium, and its speed is about 343 m/s in air at 20 degrees Celsius.
+Diffraction is most noticeable when the gap is about the same size as the wavelength.
+Resonance occurs when a driving frequency matches the natural frequency.
+
+Worked examples:
+- A wave of period 0.02 s has f = 50 Hz, and at 10 m/s its wavelength is 0.2 m.
+- A pipe closed at one end resonates at odd multiples: 100 Hz, 300 Hz, 500 Hz.
+
+Remember: this topic contributed 11 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 11. Electricity: current, voltage and resistance
+
+Current is the rate of flow of charge: `I = Q / t`, measured in amperes.
+Ohm's law states `V = IR` for a conductor at constant temperature.
+Resistors in series add directly; in parallel the reciprocals add: `1/R = 1/R1 + 1/R2`.
+Electrical power is `P = VI = I^2 R = V^2 / R`, measured in watts.
+One coulomb is the charge carried by 1 A in 1 s.
+
+Worked examples:
+- A 12 V supply across 4 Ω drives 3 A, using 36 W.
+- Two 6 Ω resistors in parallel give 3 Ω.
+
+Remember: this topic contributed 12 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 12. Heat and thermodynamic energy
+
+Heat capacity is `Q = mcΔT`, with c in J/(kg K).
+The specific heat capacity of water is 4180 J/(kg K).
+Latent heat changes state without changing temperature: `Q = mL`.
+The specific latent heat of fusion of ice is about 334 000 J/kg.
+Temperature measures average kinetic energy, while internal energy is the total.
+
+Worked examples:
+- Heating 2 kg of water by 10 K needs 83 600 J.
+- Melting 0.5 kg of ice needs 167 000 J.
+
+Remember: this topic contributed 13 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 13. Pressure, density and fluids
+
+Pressure is force per unit area: `p = F / A`, measured in pascals.
+Pressure in a liquid increases with depth: `p = ρgh`.
+Density is mass per unit volume: `ρ = m / V`.
+Archimedes' principle: the upthrust equals the weight of fluid displaced.
+A body floats when its average density is less than the fluid's density.
+
+Worked examples:
+- At 5 m depth in water the gauge pressure is 1000 × 9.8 × 5 = 49 000 Pa.
+- A 2 kg block of volume 0.001 m^3 has density 2000 kg/m^3 and sinks in water.
+
+Remember: this topic contributed 14 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## 14. Gases and the kinetic model
+
+The ideal gas equation is `PV = nRT`, with R = 8.314 J/(mol K).
+For a fixed mass at constant temperature, `P1V1 = P2V2` (Boyle's law).
+At constant pressure, `V1/T1 = V2/T2` (Charles's law).
+Temperature in the gas laws must be in kelvin, where 0 degrees Celsius is 273 K.
+The kinetic model says pressure comes from molecules colliding with the walls.
+
+Worked examples:
+- 2 mol of gas at 300 K in 0.05 m^3 exerts 99 768 Pa.
+- Doubling the pressure of 3 L of gas at constant temperature gives 1.5 L.
+
+Remember: this topic contributed 15 questions in last year's paper, and the examiner marked the unit errors strictly.
+
+## Revision plan
+
+Work through chapters 1 to 9 of the handbook, then attempt the past paper under timed conditions. Bring your formula sheet to the tutorial on Thursday at 14:00 in Room 204.
+
+That is all for today. Read pages 112 to 148 before the next lecture.

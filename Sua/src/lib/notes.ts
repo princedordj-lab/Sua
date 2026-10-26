@@ -12,10 +12,13 @@ export type NoteSyncState = "pending" | "synced" | "error";
 export type AiState =
   | "none"
   | "queued"
-  | "transcribing"
+  | "reading"
+  | "reading_scans"
+  | "digesting"
+  | "writing"
+  | "checking"
   | "summarising"
   | "making_cards"
-  | "writing"
   | "ready"
   | "failed";
 
@@ -1427,21 +1430,45 @@ export async function listGenerationQueue(db: SQLiteDatabase) {
 }
 
 /**
- * The destination the student last asked for on this note. Retries reuse it so
- * a failed lecture-note run is retried as a lecture note, not a plain summary.
+ * The destination the student last asked for on this note, plus the message the
+ * queue row carries. Retries reuse the destination, so a failed lecture-note run
+ * is retried as a lecture note, not a plain summary.
  */
+export type LastGeneration = {
+  kind: GenerationKind;
+  state: GenerationQueueItem["state"];
+  error: string | null;
+};
+
+export async function getLastGeneration(
+  db: SQLiteDatabase,
+  noteId: string,
+): Promise<LastGeneration | null> {
+  const row = await db.getFirstAsync<{
+    kind: string | null;
+    state: string;
+    error: string | null;
+  }>(
+    "SELECT kind, state, error FROM generation_queue WHERE note_id = ? ORDER BY id DESC LIMIT 1",
+    noteId,
+  );
+  if (!row) return null;
+  return {
+    kind:
+      row.kind === "lecture_note" || row.kind === "course_reference"
+        ? row.kind
+        : "study_set",
+    state: row.state as GenerationQueueItem["state"],
+    error: row.error ?? null,
+  };
+}
+
 export async function getLastGenerationKind(
   db: SQLiteDatabase,
   noteId: string,
 ): Promise<GenerationKind | null> {
-  const row = await db.getFirstAsync<{ kind: string | null }>(
-    "SELECT kind FROM generation_queue WHERE note_id = ? ORDER BY id DESC LIMIT 1",
-    noteId,
-  );
-  if (!row?.kind) return null;
-  return row.kind === "lecture_note" || row.kind === "course_reference"
-    ? row.kind
-    : "study_set";
+  const last = await getLastGeneration(db, noteId);
+  return last?.kind ?? null;
 }
 
 /**

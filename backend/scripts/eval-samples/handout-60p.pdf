@@ -1,0 +1,946 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R 10 0 R 12 0 R 14 0 R 16 0 R 18 0 R 20 0 R 22 0 R 24 0 R 26 0 R 28 0 R 30 0 R 32 0 R 34 0 R 36 0 R 38 0 R 40 0 R 42 0 R 44 0 R 46 0 R 48 0 R 50 0 R 52 0 R 54 0 R 56 0 R 58 0 R 60 0 R 62 0 R 64 0 R 66 0 R 68 0 R 70 0 R 72 0 R 74 0 R 76 0 R 78 0 R 80 0 R 82 0 R 84 0 R 86 0 R 88 0 R 90 0 R 92 0 R 94 0 R 96 0 R 98 0 R 100 0 R 102 0 R 104 0 R 106 0 R 108 0 R 110 0 R 112 0 R 114 0 R 116 0 R 118 0 R 120 0 R 122 0 R] /Count 60 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 932 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 1 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (## Introduction) Tj ET
+BT /F1 11 Tf 50 726 Td (Today we cover the material that appears in the end-of-semester paper, so write every formula down and check the units as we go. If a number is given in the question, use it exactly as written; do not round until the final line.) Tj ET
+BT /F1 11 Tf 50 710 Td (## 1. Units, dimensions and measurement) Tj ET
+BT /F1 11 Tf 50 694 Td (Every physical quantity has a dimension and a unit; the SI unit of length is the metre, of mass the kilogram, and of time the second.) Tj ET
+BT /F1 11 Tf 50 678 Td (Dimensional analysis checks an equation by comparing the dimensions on both sides: `[v] = L T^-1` and `[a] = L T^-2`.) Tj ET
+BT /F1 11 Tf 50 662 Td (A measurement of 25.4 mm is the same as 2.54 cm and 0.0254 m.) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 807 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 2 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (The uncertainty of a single reading with this ruler is 0.5 mm, so 25.4 mm is written as 25.4 ± 0.5 mm.) Tj ET
+BT /F1 11 Tf 50 726 Td (Significant figures follow the instrument: 3 significant figures for this ruler, not 6.) Tj ET
+BT /F1 11 Tf 50 710 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 694 Td (- Convert 72 km/h to m/s: 72 × 1000 / 3600 = 20 m/s.) Tj ET
+BT /F1 11 Tf 50 678 Td (- A rod measures 1.25 m with a 1 mm tape, giving a percentage uncertainty of 0.1 / 125 = 0.08%.) Tj ET
+BT /F1 11 Tf 50 662 Td (Remember: this topic contributed 2 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 835 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 3 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (## 2. Displacement, velocity and acceleration) Tj ET
+BT /F1 11 Tf 50 726 Td (Average velocity is displacement divided by time: `v = ”x / ”t`.) Tj ET
+BT /F1 11 Tf 50 710 Td (Acceleration is the rate of change of velocity: `a = ”v / ”t`, measured in m/s^2.) Tj ET
+BT /F1 11 Tf 50 694 Td (Velocity is a vector, so reversing direction changes its sign even when the speed is constant.) Tj ET
+BT /F1 11 Tf 50 678 Td (On a displacement-time graph the slope is velocity; on a velocity-time graph the slope is acceleration and the area is displacement.) Tj ET
+BT /F1 11 Tf 50 662 Td (Uniform acceleration means the velocity changes by the same amount every second.) Tj ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 776 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 4 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 726 Td (- A bus covers 240 m in 12 s, so its average velocity is 20 m/s.) Tj ET
+BT /F1 11 Tf 50 710 Td (- A car speeds up from 8 m/s to 20 m/s in 4 s, so a = \(20 - 8\) / 4 = 3 m/s^2.) Tj ET
+BT /F1 11 Tf 50 694 Td (Remember: this topic contributed 3 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+BT /F1 11 Tf 50 678 Td (## 3. Equations of motion) Tj ET
+BT /F1 11 Tf 50 662 Td (For constant acceleration the four equations of motion are `v = u + at`, `s = ut + 1/2 at^2`, `v^2 = u^2 + 2as` and `s = \(u + v\)t / 2`.) Tj ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 13 0 R >>
+endobj
+13 0 obj
+<< /Length 813 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 5 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (u is the initial velocity, v the final velocity, a the acceleration, t the time and s the displacement.) Tj ET
+BT /F1 11 Tf 50 726 Td (Each equation leaves out exactly one quantity, so choose the equation that omits what you are not given.) Tj ET
+BT /F1 11 Tf 50 710 Td (The equations only hold while the acceleration stays constant.) Tj ET
+BT /F1 11 Tf 50 694 Td (For free fall near the Earth's surface a = 9.8 m/s^2 downward, often rounded to 10 m/s^2 in estimates.) Tj ET
+BT /F1 11 Tf 50 678 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 662 Td (- A stone dropped from rest falls 45 m: 45 = 1/2 × 10 × t^2, so t = 3 s and v = 30 m/s.) Tj ET
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 15 0 R >>
+endobj
+15 0 obj
+<< /Length 885 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 6 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (- A train at 15 m/s brakes at 2 m/s^2 and stops after 56.25 m, because v^2 = u^2 + 2as gives 0 = 225 - 4s.) Tj ET
+BT /F1 11 Tf 50 726 Td (Remember: this topic contributed 4 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+BT /F1 11 Tf 50 710 Td (## 4. Newton's laws of motion) Tj ET
+BT /F1 11 Tf 50 694 Td (Newton's first law: a body stays at rest or in uniform motion unless a resultant force acts on it.) Tj ET
+BT /F1 11 Tf 50 678 Td (Newton's second law: the resultant force equals mass times acceleration, `F = ma`, with F in newtons.) Tj ET
+BT /F1 11 Tf 50 662 Td (Newton's third law: every action has an equal and opposite reaction, acting on a different body.) Tj ET
+endstream
+endobj
+16 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 17 0 R >>
+endobj
+17 0 obj
+<< /Length 730 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 7 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (One newton accelerates 1 kg at 1 m/s^2.) Tj ET
+BT /F1 11 Tf 50 726 Td (Weight is a force, `W = mg`, so a 60 kg student weighs 588 N on Earth.) Tj ET
+BT /F1 11 Tf 50 710 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 694 Td (- A 1200 kg car accelerates at 2 m/s^2, so the resultant force is 2400 N.) Tj ET
+BT /F1 11 Tf 50 678 Td (- A 5 kg block on a frictionless table pulled by 15 N accelerates at 3 m/s^2.) Tj ET
+BT /F1 11 Tf 50 662 Td (Remember: this topic contributed 5 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+endstream
+endobj
+18 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 19 0 R >>
+endobj
+19 0 obj
+<< /Length 757 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 8 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (## 5. Friction and inclined planes) Tj ET
+BT /F1 11 Tf 50 726 Td (Static friction rises to a maximum of `f = ¼N` before the surfaces slide.) Tj ET
+BT /F1 11 Tf 50 710 Td (Kinetic friction is usually smaller than the maximum static friction.) Tj ET
+BT /F1 11 Tf 50 694 Td (The normal reaction N is perpendicular to the surface, not always equal to the weight.) Tj ET
+BT /F1 11 Tf 50 678 Td (On a slope of angle ¸ the component of weight along the slope is `mg sin ¸` and the normal reaction is `mg cos ¸`.) Tj ET
+BT /F1 11 Tf 50 662 Td (The coefficient of friction ¼ has no unit.) Tj ET
+endstream
+endobj
+20 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 21 0 R >>
+endobj
+21 0 obj
+<< /Length 767 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 9 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 726 Td (- A 10 kg crate on a floor with ¼ = 0.4 needs 39.2 N to start moving, since f = 0.4 × 98 N.) Tj ET
+BT /F1 11 Tf 50 710 Td (- On a 30 degree slope with no friction a block accelerates at 4.9 m/s^2, from 9.8 × sin 30.) Tj ET
+BT /F1 11 Tf 50 694 Td (Remember: this topic contributed 6 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+BT /F1 11 Tf 50 678 Td (## 6. Work, energy and power) Tj ET
+BT /F1 11 Tf 50 662 Td (Work is force times displacement along the force: `W = Fs cos ¸`, measured in joules.) Tj ET
+endstream
+endobj
+22 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 23 0 R >>
+endobj
+23 0 obj
+<< /Length 705 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 10 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (Kinetic energy is `KE = 1/2 mv^2` and gravitational potential energy is `PE = mgh`.) Tj ET
+BT /F1 11 Tf 50 726 Td (The work-energy theorem says the resultant work equals the change in kinetic energy.) Tj ET
+BT /F1 11 Tf 50 710 Td (Power is the rate of doing work: `P = W / t`, measured in watts.) Tj ET
+BT /F1 11 Tf 50 694 Td (Energy is conserved in a closed system, though it may change form.) Tj ET
+BT /F1 11 Tf 50 678 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 662 Td (- A 2 kg ball at 6 m/s has KE = 1/2 × 2 × 36 = 36 J.) Tj ET
+endstream
+endobj
+24 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 25 0 R >>
+endobj
+25 0 obj
+<< /Length 769 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 11 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (- Lifting 20 kg by 3 m takes 588 J of work, and doing it in 2 s needs 294 W.) Tj ET
+BT /F1 11 Tf 50 726 Td (Remember: this topic contributed 7 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+BT /F1 11 Tf 50 710 Td (## 7. Momentum and collisions) Tj ET
+BT /F1 11 Tf 50 694 Td (Momentum is `p = mv`, measured in kg m/s and pointing along the velocity.) Tj ET
+BT /F1 11 Tf 50 678 Td (In a collision with no external force, total momentum before equals total momentum after.) Tj ET
+BT /F1 11 Tf 50 662 Td (Impulse is `F”t = ”p`, the change in momentum.) Tj ET
+endstream
+endobj
+26 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 27 0 R >>
+endobj
+27 0 obj
+<< /Length 768 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 12 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (An elastic collision conserves kinetic energy; an inelastic one does not.) Tj ET
+BT /F1 11 Tf 50 726 Td (A perfectly inelastic collision joins the bodies, so they share one final velocity.) Tj ET
+BT /F1 11 Tf 50 710 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 694 Td (- A 0.15 kg ball at 20 m/s has momentum 3 kg m/s.) Tj ET
+BT /F1 11 Tf 50 678 Td (- A 2 kg trolley at 3 m/s hits a stationary 4 kg trolley and they stick: v = 6 / 6 = 1 m/s.) Tj ET
+BT /F1 11 Tf 50 662 Td (Remember: this topic contributed 8 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+endstream
+endobj
+28 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 29 0 R >>
+endobj
+29 0 obj
+<< /Length 710 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 13 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (## 8. Circular motion) Tj ET
+BT /F1 11 Tf 50 726 Td (Angular velocity is `É = 2À / T`, measured in rad/s.) Tj ET
+BT /F1 11 Tf 50 710 Td (Centripetal acceleration is `a = v^2 / r = É^2 r`, always pointing to the centre.) Tj ET
+BT /F1 11 Tf 50 694 Td (The centripetal force is `F = mv^2 / r`, supplied by tension, friction or gravity.) Tj ET
+BT /F1 11 Tf 50 678 Td (Velocity is tangential while acceleration is radial, so the speed can stay constant.) Tj ET
+BT /F1 11 Tf 50 662 Td (One full revolution is 2À radians, or 360 degrees.) Tj ET
+endstream
+endobj
+30 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 31 0 R >>
+endobj
+31 0 obj
+<< /Length 756 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 14 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 726 Td (- A 0.5 kg mass on a 2 m string at 4 m/s needs 4 N inward, from 0.5 × 16 / 2.) Tj ET
+BT /F1 11 Tf 50 710 Td (- A wheel with T = 0.5 s has É = 4À rad/s, about 12.6 rad/s.) Tj ET
+BT /F1 11 Tf 50 694 Td (Remember: this topic contributed 9 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+BT /F1 11 Tf 50 678 Td (## 9. Simple harmonic motion) Tj ET
+BT /F1 11 Tf 50 662 Td (In simple harmonic motion the acceleration is proportional to the displacement and opposite in direction: `a = -É^2 x`.) Tj ET
+endstream
+endobj
+32 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 33 0 R >>
+endobj
+33 0 obj
+<< /Length 741 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 15 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (The period of a spring is `T = 2À \(m/k\)` and of a simple pendulum `T = 2À \(L/g\)`.) Tj ET
+BT /F1 11 Tf 50 726 Td (Amplitude is the maximum displacement; the period does not depend on amplitude.) Tj ET
+BT /F1 11 Tf 50 710 Td (At maximum displacement the velocity is zero and the acceleration is greatest.) Tj ET
+BT /F1 11 Tf 50 694 Td (At the equilibrium position the velocity is greatest and the acceleration is zero.) Tj ET
+BT /F1 11 Tf 50 678 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 662 Td (- A pendulum of length 1 m has T = 2À \(1 / 9.8\) = 2.0 s.) Tj ET
+endstream
+endobj
+34 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 35 0 R >>
+endobj
+35 0 obj
+<< /Length 785 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 16 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (- A 0.2 kg mass on a spring with k = 20 N/m oscillates with T = 0.63 s.) Tj ET
+BT /F1 11 Tf 50 726 Td (Remember: this topic contributed 10 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+BT /F1 11 Tf 50 710 Td (## 10. Waves and sound) Tj ET
+BT /F1 11 Tf 50 694 Td (The wave equation is `v = f»`, so a 440 Hz note with » = 0.78 m travels at 343 m/s.) Tj ET
+BT /F1 11 Tf 50 678 Td (Frequency is the number of oscillations per second, measured in hertz.) Tj ET
+BT /F1 11 Tf 50 662 Td (Sound needs a medium, and its speed is about 343 m/s in air at 20 degrees Celsius.) Tj ET
+endstream
+endobj
+36 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 37 0 R >>
+endobj
+37 0 obj
+<< /Length 787 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 17 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (Diffraction is most noticeable when the gap is about the same size as the wavelength.) Tj ET
+BT /F1 11 Tf 50 726 Td (Resonance occurs when a driving frequency matches the natural frequency.) Tj ET
+BT /F1 11 Tf 50 710 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 694 Td (- A wave of period 0.02 s has f = 50 Hz, and at 10 m/s its wavelength is 0.2 m.) Tj ET
+BT /F1 11 Tf 50 678 Td (- A pipe closed at one end resonates at odd multiples: 100 Hz, 300 Hz, 500 Hz.) Tj ET
+BT /F1 11 Tf 50 662 Td (Remember: this topic contributed 11 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+endstream
+endobj
+38 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 39 0 R >>
+endobj
+39 0 obj
+<< /Length 730 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 18 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (## 11. Electricity: current, voltage and resistance) Tj ET
+BT /F1 11 Tf 50 726 Td (Current is the rate of flow of charge: `I = Q / t`, measured in amperes.) Tj ET
+BT /F1 11 Tf 50 710 Td (Ohm's law states `V = IR` for a conductor at constant temperature.) Tj ET
+BT /F1 11 Tf 50 694 Td (Resistors in series add directly; in parallel the reciprocals add: `1/R = 1/R1 + 1/R2`.) Tj ET
+BT /F1 11 Tf 50 678 Td (Electrical power is `P = VI = I^2 R = V^2 / R`, measured in watts.) Tj ET
+BT /F1 11 Tf 50 662 Td (One coulomb is the charge carried by 1 A in 1 s.) Tj ET
+endstream
+endobj
+40 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 41 0 R >>
+endobj
+41 0 obj
+<< /Length 650 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 19 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 726 Td (- A 12 V supply across 4 © drives 3 A, using 36 W.) Tj ET
+BT /F1 11 Tf 50 710 Td (- Two 6 © resistors in parallel give 3 ©.) Tj ET
+BT /F1 11 Tf 50 694 Td (Remember: this topic contributed 12 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+BT /F1 11 Tf 50 678 Td (## 12. Heat and thermodynamic energy) Tj ET
+BT /F1 11 Tf 50 662 Td (Heat capacity is `Q = mc”T`, with c in J/\(kg K\).) Tj ET
+endstream
+endobj
+42 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 43 0 R >>
+endobj
+43 0 obj
+<< /Length 667 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 20 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (The specific heat capacity of water is 4180 J/\(kg K\).) Tj ET
+BT /F1 11 Tf 50 726 Td (Latent heat changes state without changing temperature: `Q = mL`.) Tj ET
+BT /F1 11 Tf 50 710 Td (The specific latent heat of fusion of ice is about 334 000 J/kg.) Tj ET
+BT /F1 11 Tf 50 694 Td (Temperature measures average kinetic energy, while internal energy is the total.) Tj ET
+BT /F1 11 Tf 50 678 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 662 Td (- Heating 2 kg of water by 10 K needs 83 600 J.) Tj ET
+endstream
+endobj
+44 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 45 0 R >>
+endobj
+45 0 obj
+<< /Length 696 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 21 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (- Melting 0.5 kg of ice needs 167 000 J.) Tj ET
+BT /F1 11 Tf 50 726 Td (Remember: this topic contributed 13 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+BT /F1 11 Tf 50 710 Td (## 13. Pressure, density and fluids) Tj ET
+BT /F1 11 Tf 50 694 Td (Pressure is force per unit area: `p = F / A`, measured in pascals.) Tj ET
+BT /F1 11 Tf 50 678 Td (Pressure in a liquid increases with depth: `p = Ágh`.) Tj ET
+BT /F1 11 Tf 50 662 Td (Density is mass per unit volume: `Á = m / V`.) Tj ET
+endstream
+endobj
+46 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 47 0 R >>
+endobj
+47 0 obj
+<< /Length 769 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 22 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (Archimedes' principle: the upthrust equals the weight of fluid displaced.) Tj ET
+BT /F1 11 Tf 50 726 Td (A body floats when its average density is less than the fluid's density.) Tj ET
+BT /F1 11 Tf 50 710 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 694 Td (- At 5 m depth in water the gauge pressure is 1000 × 9.8 × 5 = 49 000 Pa.) Tj ET
+BT /F1 11 Tf 50 678 Td (- A 2 kg block of volume 0.001 m^3 has density 2000 kg/m^3 and sinks in water.) Tj ET
+BT /F1 11 Tf 50 662 Td (Remember: this topic contributed 14 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+endstream
+endobj
+48 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 49 0 R >>
+endobj
+49 0 obj
+<< /Length 725 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 23 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (## 14. Gases and the kinetic model) Tj ET
+BT /F1 11 Tf 50 726 Td (The ideal gas equation is `PV = nRT`, with R = 8.314 J/\(mol K\).) Tj ET
+BT /F1 11 Tf 50 710 Td (For a fixed mass at constant temperature, `P1V1 = P2V2` \(Boyle's law\).) Tj ET
+BT /F1 11 Tf 50 694 Td (At constant pressure, `V1/T1 = V2/T2` \(Charles's law\).) Tj ET
+BT /F1 11 Tf 50 678 Td (Temperature in the gas laws must be in kelvin, where 0 degrees Celsius is 273 K.) Tj ET
+BT /F1 11 Tf 50 662 Td (The kinetic model says pressure comes from molecules colliding with the walls.) Tj ET
+endstream
+endobj
+50 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 51 0 R >>
+endobj
+51 0 obj
+<< /Length 788 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 24 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (Worked examples:) Tj ET
+BT /F1 11 Tf 50 726 Td (- 2 mol of gas at 300 K in 0.05 m^3 exerts 99 768 Pa.) Tj ET
+BT /F1 11 Tf 50 710 Td (- Doubling the pressure of 3 L of gas at constant temperature gives 1.5 L.) Tj ET
+BT /F1 11 Tf 50 694 Td (Remember: this topic contributed 15 questions in last year's paper, and the examiner marked the unit errors strictly.) Tj ET
+BT /F1 11 Tf 50 678 Td (## Revision plan) Tj ET
+BT /F1 11 Tf 50 662 Td (Work through chapters 1 to 9 of the handbook, then attempt the past paper under timed conditions. Bring your formula sheet to the tutorial on Thursday at 14:00 in Room 204.) Tj ET
+endstream
+endobj
+52 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 53 0 R >>
+endobj
+53 0 obj
+<< /Length 249 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 25 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+BT /F1 11 Tf 50 742 Td (That is all for today. Read pages 112 to 148 before the next lecture.) Tj ET
+endstream
+endobj
+54 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 55 0 R >>
+endobj
+55 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 26 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+56 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 57 0 R >>
+endobj
+57 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 27 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+58 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 59 0 R >>
+endobj
+59 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 28 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+60 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 61 0 R >>
+endobj
+61 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 29 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+62 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 63 0 R >>
+endobj
+63 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 30 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+64 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 65 0 R >>
+endobj
+65 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 31 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+66 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 67 0 R >>
+endobj
+67 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 32 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+68 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 69 0 R >>
+endobj
+69 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 33 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+70 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 71 0 R >>
+endobj
+71 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 34 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+72 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 73 0 R >>
+endobj
+73 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 35 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+74 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 75 0 R >>
+endobj
+75 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 36 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+76 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 77 0 R >>
+endobj
+77 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 37 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+78 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 79 0 R >>
+endobj
+79 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 38 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+80 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 81 0 R >>
+endobj
+81 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 39 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+82 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 83 0 R >>
+endobj
+83 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 40 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+84 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 85 0 R >>
+endobj
+85 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 41 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+86 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 87 0 R >>
+endobj
+87 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 42 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+88 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 89 0 R >>
+endobj
+89 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 43 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+90 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 91 0 R >>
+endobj
+91 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 44 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+92 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 93 0 R >>
+endobj
+93 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 45 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+94 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 95 0 R >>
+endobj
+95 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 46 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+96 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 97 0 R >>
+endobj
+97 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 47 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+98 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 99 0 R >>
+endobj
+99 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 48 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+100 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 101 0 R >>
+endobj
+101 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 49 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+102 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 103 0 R >>
+endobj
+103 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 50 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+104 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 105 0 R >>
+endobj
+105 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 51 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+106 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 107 0 R >>
+endobj
+107 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 52 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+108 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 109 0 R >>
+endobj
+109 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 53 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+110 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 111 0 R >>
+endobj
+111 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 54 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+112 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 113 0 R >>
+endobj
+113 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 55 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+114 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 115 0 R >>
+endobj
+115 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 56 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+116 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 117 0 R >>
+endobj
+117 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 57 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+118 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 119 0 R >>
+endobj
+119 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 58 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+120 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 121 0 R >>
+endobj
+121 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 59 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+122 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 123 0 R >>
+endobj
+123 0 obj
+<< /Length 148 >>
+stream
+BT /F1 11 Tf 50 790 Td (PHYS 201  Mechanics and Thermal Physics) Tj ET
+BT /F1 11 Tf 50 774 Td (Page 60 of 60) Tj ET
+BT /F1 11 Tf 50 758 Td () Tj ET
+endstream
+endobj
+xref
+0 124
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000539 00000 n 
+0000000636 00000 n 
+0000000762 00000 n 
+0000001745 00000 n 
+0000001871 00000 n 
+0000002729 00000 n 
+0000002855 00000 n 
+0000003741 00000 n 
+0000003869 00000 n 
+0000004697 00000 n 
+0000004825 00000 n 
+0000005690 00000 n 
+0000005818 00000 n 
+0000006755 00000 n 
+0000006883 00000 n 
+0000007665 00000 n 
+0000007793 00000 n 
+0000008602 00000 n 
+0000008730 00000 n 
+0000009549 00000 n 
+0000009677 00000 n 
+0000010434 00000 n 
+0000010562 00000 n 
+0000011383 00000 n 
+0000011511 00000 n 
+0000012331 00000 n 
+0000012459 00000 n 
+0000013221 00000 n 
+0000013349 00000 n 
+0000014157 00000 n 
+0000014285 00000 n 
+0000015078 00000 n 
+0000015206 00000 n 
+0000016043 00000 n 
+0000016171 00000 n 
+0000017010 00000 n 
+0000017138 00000 n 
+0000017920 00000 n 
+0000018048 00000 n 
+0000018750 00000 n 
+0000018878 00000 n 
+0000019597 00000 n 
+0000019725 00000 n 
+0000020473 00000 n 
+0000020601 00000 n 
+0000021422 00000 n 
+0000021550 00000 n 
+0000022327 00000 n 
+0000022455 00000 n 
+0000023295 00000 n 
+0000023423 00000 n 
+0000023724 00000 n 
+0000023852 00000 n 
+0000024052 00000 n 
+0000024180 00000 n 
+0000024380 00000 n 
+0000024508 00000 n 
+0000024708 00000 n 
+0000024836 00000 n 
+0000025036 00000 n 
+0000025164 00000 n 
+0000025364 00000 n 
+0000025492 00000 n 
+0000025692 00000 n 
+0000025820 00000 n 
+0000026020 00000 n 
+0000026148 00000 n 
+0000026348 00000 n 
+0000026476 00000 n 
+0000026676 00000 n 
+0000026804 00000 n 
+0000027004 00000 n 
+0000027132 00000 n 
+0000027332 00000 n 
+0000027460 00000 n 
+0000027660 00000 n 
+0000027788 00000 n 
+0000027988 00000 n 
+0000028116 00000 n 
+0000028316 00000 n 
+0000028444 00000 n 
+0000028644 00000 n 
+0000028772 00000 n 
+0000028972 00000 n 
+0000029100 00000 n 
+0000029300 00000 n 
+0000029428 00000 n 
+0000029628 00000 n 
+0000029756 00000 n 
+0000029956 00000 n 
+0000030084 00000 n 
+0000030284 00000 n 
+0000030412 00000 n 
+0000030612 00000 n 
+0000030740 00000 n 
+0000030940 00000 n 
+0000031068 00000 n 
+0000031268 00000 n 
+0000031398 00000 n 
+0000031599 00000 n 
+0000031729 00000 n 
+0000031930 00000 n 
+0000032060 00000 n 
+0000032261 00000 n 
+0000032391 00000 n 
+0000032592 00000 n 
+0000032722 00000 n 
+0000032923 00000 n 
+0000033053 00000 n 
+0000033254 00000 n 
+0000033384 00000 n 
+0000033585 00000 n 
+0000033715 00000 n 
+0000033916 00000 n 
+0000034046 00000 n 
+0000034247 00000 n 
+0000034377 00000 n 
+0000034578 00000 n 
+0000034708 00000 n 
+0000034909 00000 n 
+0000035039 00000 n 
+trailer
+<< /Size 124 /Root 1 0 R >>
+startxref
+35240
+%%EOF
