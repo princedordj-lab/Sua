@@ -1,0 +1,17 @@
+# Fly.io configuration for Sua Background AI Worker
+# Headless worker: no [http_service] block so Fly never expects an open HTTP port
+# and never shuts down the machine due to lack of web traffic.
+
+app = "sua-ai-worker"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpus = 1
