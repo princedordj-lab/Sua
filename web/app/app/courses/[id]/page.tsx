@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -80,6 +80,12 @@ export default function CourseDetailPage() {
   const [deleteNotesToo, setDeleteNotesToo] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const closeMenu = useCallback(() => setMenuOpen(false), []);
+  const closeEditor = useCallback(() => setEditOpen(false), []);
+  const closeDelete = useCallback(() => setDeleteOpen(false), []);
+  const closeMoveNote = useCallback(() => setMoveNote(null), []);
+  const closeDeleteNote = useCallback(() => setDeleteNote(null), []);
   const [form, setForm] = useState({
     name: "",
     code: "",
@@ -475,7 +481,7 @@ export default function CourseDetailPage() {
         </>
       )}
 
-      <Modal open={menuOpen} onClose={() => setMenuOpen(false)} title={course.name} description="Course actions">
+      <Modal open={menuOpen} onClose={closeMenu} title={course.name} description="Course actions">
         <div className="action-list">
           <button type="button" className="action-list-row" onClick={openEditor}>
             <Pencil size={17} /> <span>Edit course details</span>
@@ -502,12 +508,12 @@ export default function CourseDetailPage() {
 
       <Modal
         open={editOpen}
-        onClose={() => setEditOpen(false)}
+        onClose={closeEditor}
         title="Edit course"
         description="Notes and study sets stay attached to this course."
         footer={
           <>
-            <Button variant="ghost" onClick={() => setEditOpen(false)}>
+            <Button variant="ghost" onClick={closeEditor}>
               Cancel
             </Button>
             <Button busy={busy} onClick={() => void saveCourse()}>
@@ -552,12 +558,12 @@ export default function CourseDetailPage() {
 
       <Modal
         open={Boolean(moveNote)}
-        onClose={() => setMoveNote(null)}
+        onClose={closeMoveNote}
         title="Move note"
         description={`Choose where “${moveNote?.title || "this note"}” should live.`}
         footer={
           <>
-            <Button variant="ghost" onClick={() => setMoveNote(null)}>
+            <Button variant="ghost" onClick={closeMoveNote}>
               Cancel
             </Button>
             <Button busy={busy} disabled={!moveTarget} onClick={() => void moveNoteTo()}>
@@ -588,12 +594,12 @@ export default function CourseDetailPage() {
 
       <Modal
         open={Boolean(deleteNote)}
-        onClose={() => setDeleteNote(null)}
+        onClose={closeDeleteNote}
         title={`Delete ${deleteNote?.title || "this note"}?`}
         description="The note, its uploads and its study set are removed from every device."
         footer={
           <>
-            <Button variant="ghost" onClick={() => setDeleteNote(null)}>
+            <Button variant="ghost" onClick={closeDeleteNote}>
               Cancel
             </Button>
             <Button variant="danger" busy={busy} onClick={() => void confirmDeleteNote()}>
@@ -608,7 +614,7 @@ export default function CourseDetailPage() {
 
       <Modal
         open={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
+        onClose={closeDelete}
         title={`Delete ${course.name}?`}
         description={
           course.noteCount > 0
@@ -617,7 +623,7 @@ export default function CourseDetailPage() {
         }
         footer={
           <>
-            <Button variant="ghost" onClick={() => setDeleteOpen(false)}>
+            <Button variant="ghost" onClick={closeDelete}>
               Cancel
             </Button>
             <Button

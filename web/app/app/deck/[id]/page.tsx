@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
@@ -55,6 +55,10 @@ export default function DeckPage() {
   const [reportFor, setReportFor] = useState<{ id: string; front: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const closeEditor = useCallback(() => setEditor(null), []);
+  const closeDelete = useCallback(() => setDeleteFor(null), []);
+  const closeReport = useCallback(() => setReportFor(null), []);
 
   const course = courses.find((row) => row.id === note.data?.courseId);
   const style = courseStyle(course?.colour);
@@ -294,12 +298,12 @@ export default function DeckPage() {
 
       <Modal
         open={Boolean(editor)}
-        onClose={() => setEditor(null)}
+        onClose={closeEditor}
         title={editor?.mode === "edit" ? "Edit card" : "New card"}
         description="Keep the front short and the back specific — that is what makes recall work."
         footer={
           <>
-            <Button variant="ghost" onClick={() => setEditor(null)}>
+            <Button variant="ghost" onClick={closeEditor}>
               Cancel
             </Button>
             <Button busy={busy} onClick={() => void saveCard()}>
@@ -335,12 +339,12 @@ export default function DeckPage() {
 
       <Modal
         open={Boolean(deleteFor)}
-        onClose={() => setDeleteFor(null)}
+        onClose={closeDelete}
         title="Delete this card?"
         description={deleteFor?.front}
         footer={
           <>
-            <Button variant="ghost" onClick={() => setDeleteFor(null)}>
+            <Button variant="ghost" onClick={closeDelete}>
               Cancel
             </Button>
             <Button variant="danger" busy={busy} onClick={() => void confirmDelete()}>
@@ -355,7 +359,7 @@ export default function DeckPage() {
 
       <ReportMistake
         open={Boolean(reportFor)}
-        onClose={() => setReportFor(null)}
+        onClose={closeReport}
         noteId={id}
         targetType="flashcard"
         targetId={reportFor?.id}

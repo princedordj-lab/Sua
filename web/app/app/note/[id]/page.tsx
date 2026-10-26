@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -80,6 +80,10 @@ export default function NoteViewPage() {
   const [showTranscript, setShowTranscript] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const closeMenu = useCallback(() => setMenuOpen(false), []);
+  const closeDelete = useCallback(() => setDeleteOpen(false), []);
+  const closeReport = useCallback(() => setReport(null), []);
 
   const note = noteResource.data;
   const study = studyResource.data;
@@ -560,7 +564,7 @@ export default function NoteViewPage() {
 
       <Modal
         open={menuOpen}
-        onClose={() => setMenuOpen(false)}
+        onClose={closeMenu}
         title={note.title || "Note"}
         description="Note actions"
       >
@@ -579,7 +583,7 @@ export default function NoteViewPage() {
             <Link
               href={`/app/create?noteId=${note.id}&mode=type`}
               className="action-list-row"
-              onClick={() => setMenuOpen(false)}
+              onClick={closeMenu}
             >
               <Pencil size={17} /> <span>Edit note</span>
             </Link>
@@ -613,12 +617,12 @@ export default function NoteViewPage() {
 
       <Modal
         open={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
+        onClose={closeDelete}
         title={`Delete ${note.title || "this note"}?`}
         description="The note, its uploads and its study set are removed from the phone and the web."
         footer={
           <>
-            <Button variant="ghost" onClick={() => setDeleteOpen(false)}>
+            <Button variant="ghost" onClick={closeDelete}>
               Cancel
             </Button>
             <Button variant="danger" busy={busy} onClick={() => void confirmDelete()}>
@@ -633,7 +637,7 @@ export default function NoteViewPage() {
 
       <ReportMistake
         open={Boolean(report)}
-        onClose={() => setReport(null)}
+        onClose={closeReport}
         noteId={note.id}
         targetType={report?.targetType ?? "summary"}
         targetId={report?.targetId}

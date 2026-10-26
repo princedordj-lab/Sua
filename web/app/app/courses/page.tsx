@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   Archive,
@@ -77,6 +77,10 @@ export default function CoursesPage() {
   const [deleteFor, setDeleteFor] = useState<ServerCourse | null>(null);
   const [moveTo, setMoveTo] = useState<string>("");
   const [deleteNotes, setDeleteNotes] = useState(false);
+
+  const closeEditor = useCallback(() => setEditorOpen(false), []);
+  const closeActions = useCallback(() => setActionsFor(null), []);
+  const closeDelete = useCallback(() => setDeleteFor(null), []);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -271,7 +275,7 @@ export default function CoursesPage() {
 
       <Modal
         open={editorOpen}
-        onClose={() => setEditorOpen(false)}
+        onClose={closeEditor}
         title={editing ? "Edit course" : "New course"}
         description={
           editing
@@ -280,7 +284,7 @@ export default function CoursesPage() {
         }
         footer={
           <>
-            <Button variant="ghost" onClick={() => setEditorOpen(false)}>
+            <Button variant="ghost" onClick={closeEditor}>
               Cancel
             </Button>
             <Button busy={busy} onClick={() => void save()}>
@@ -345,7 +349,7 @@ export default function CoursesPage() {
 
       <Modal
         open={Boolean(actionsFor)}
-        onClose={() => setActionsFor(null)}
+        onClose={closeActions}
         title={actionsFor?.name ?? "Course"}
         description="Rename it, archive it for the semester, or delete it."
       >
@@ -378,7 +382,7 @@ export default function CoursesPage() {
 
       <Modal
         open={Boolean(deleteFor)}
-        onClose={() => setDeleteFor(null)}
+        onClose={closeDelete}
         title={`Delete ${deleteFor?.name ?? "course"}?`}
         description={
           deleteFor && deleteFor.noteCount > 0
@@ -387,7 +391,7 @@ export default function CoursesPage() {
         }
         footer={
           <>
-            <Button variant="ghost" onClick={() => setDeleteFor(null)}>
+            <Button variant="ghost" onClick={closeDelete}>
               Cancel
             </Button>
             <Button variant="danger" busy={busy} onClick={() => void confirmDelete()} disabled={

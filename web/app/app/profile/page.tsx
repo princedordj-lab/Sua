@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import Link from "next/link";
 import { useClerk, useUser } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
@@ -47,6 +47,12 @@ export default function ProfilePage() {
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [phrase, setPhrase] = useState("");
+
+  const closeEditor = useCallback(() => setEditOpen(false), []);
+  const closeDelete = useCallback(() => {
+    setDeleteOpen(false);
+    setPhrase("");
+  }, []);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [form, setForm] = useState({
@@ -318,12 +324,12 @@ export default function ProfilePage() {
 
       <Modal
         open={editOpen}
-        onClose={() => setEditOpen(false)}
+        onClose={closeEditor}
         title="Edit profile"
         description="These details personalise Sua and appear on your profile."
         footer={
           <>
-            <Button variant="ghost" onClick={() => setEditOpen(false)}>
+            <Button variant="ghost" onClick={closeEditor}>
               Cancel
             </Button>
             <Button busy={busy} onClick={() => void saveProfile()}>
@@ -376,20 +382,14 @@ export default function ProfilePage() {
 
       <Modal
         open={deleteOpen}
-        onClose={() => {
-          setDeleteOpen(false);
-          setPhrase("");
-        }}
+        onClose={closeDelete}
         title="Delete your account?"
         description="This is permanent. It removes everything on the server and on every device."
         footer={
           <>
             <Button
               variant="ghost"
-              onClick={() => {
-                setDeleteOpen(false);
-                setPhrase("");
-              }}
+              onClick={closeDelete}
             >
               Cancel
             </Button>

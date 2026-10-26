@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Flag, Send } from "lucide-react";
 import { Alert, Button, Modal, TextArea } from "@/components/ui";
 import { useApi } from "@/lib/use-api";
@@ -35,12 +35,12 @@ export function ReportMistake({
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function close() {
+  const close = useCallback(() => {
     onClose();
     setComment("");
     setSent(false);
     setError(null);
-  }
+  }, [onClose]);
 
   async function send() {
     if (!comment.trim() || busy) return;
