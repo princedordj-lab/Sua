@@ -25,7 +25,7 @@ export default function AppLayout() {
   const isChat = pathname === "/ask-sua";
   const bottom = TAB_ROUTES.includes(pathname) ? 112 : 28;
   return (
-    <View className="flex-1">
+    <View className="flex-1 bg-cream">
       {hydrationIssue ? (
         <View className="flex-row items-center justify-between bg-surface px-4 py-2">
           <Text className="flex-1 text-xs text-ink-soft">

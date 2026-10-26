@@ -64,6 +64,13 @@ const QUICK_ACTIONS = [
 
 // Bubble layout mirrors the mock: student bubbles right, Sua bubbles left.
 
+// Even gutter between bubbles. It lives in a separator (rather than per-item
+// margin) so the list stays symmetric: the same 12px sits under a student turn
+// and under Sua's answer, and the inverted list flips the order but not the gap.
+function MessageSeparator() {
+  return <View className="h-3" />;
+}
+
 function toRow(message: ChatMessageView): ChatMessageRow {
   return {
     id: message.id,
@@ -335,57 +342,70 @@ export default function AskSua() {
   }, [asking, courseId, messages, pendingTurns]);
 
   const renderItem = useCallback(
-    ({ item }: { item: ChatMessageRow }) => (
-      <View className={item.role === "user" ? "items-end" : "flex-row items-end gap-2"}>
-        {item.role === "assistant" ? (
-          <View className="h-10 w-10 items-center justify-center rounded-full bg-brand-strong">
-            <Text className="text-title font-sans-extrabold text-gold">S</Text>
+    ({ item }: { item: ChatMessageRow }) => {
+      const isUser = item.role === "user";
+      const isThinking = item.id === "pending";
+      const sources = isThinking ? [] : item.sourceNoteIds.slice(0, 2);
+
+      // Column, not row: the source chips belong *under* Sua's bubble. As a
+      // row sibling they were a zero-width flex child that still carried `pt-2`
+      // when there were no sources, which pushed the bubble up inside its own
+      // cell and showed as a phantom gap between the student's turn and the
+      // answer (and a taller, squeezed chip column when sources did exist).
+      return (
+        <View className={isUser ? "items-end" : "items-start"}>
+          <View className={isUser ? "items-end" : "flex-row items-end gap-2"}>
+            {isUser ? null : (
+              <View className="h-10 w-10 items-center justify-center rounded-full bg-brand-strong">
+                <Text className="text-title font-sans-extrabold text-gold">S</Text>
+              </View>
+            )}
+            {isThinking ? (
+              <View className="rounded-input bg-surface px-4 py-3 shadow-card">
+                <Text className="text-body text-ink-soft">Thinking…</Text>
+              </View>
+            ) : (
+              <View
+                className={`max-w-[78%] px-4 py-3 ${
+                  isUser
+                    ? "rounded-input bg-brand-strong"
+                    : "rounded-input bg-surface shadow-card"
+                }`}
+              >
+                {isUser ? (
+                  <Text className="text-body text-white">{item.content}</Text>
+                ) : (
+                  <Markdown text={item.content} className="text-body leading-6 text-ink" />
+                )}
+              </View>
+            )}
           </View>
-        ) : null}
-        {item.id === "pending" ? (
-          <View className="rounded-input bg-surface px-4 py-3 shadow-card">
-            <Text className="text-body text-ink-soft">Thinking…</Text>
-          </View>
-        ) : (
-        <View
-          className={`max-w-[78%] px-4 py-3 ${
-            item.role === "user"
-              ? "rounded-input bg-brand-strong"
-              : "rounded-input bg-surface shadow-card"
-          }`}
-        >
-          {item.role === "user" ? (
-            <Text className="text-body text-white">{item.content}</Text>
-          ) : (
-            <Markdown text={item.content} className="text-body leading-6 text-ink" />
-          )}
+          {sources.length ? (
+            <View className="gap-2 pl-12 pt-2">
+              {sources.map((sourceId) => {
+                const label = sourceTitles.get(sourceId) ?? "your notes";
+                return (
+                  <Pressable
+                    key={sourceId}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open source: ${label}`}
+                    onPress={() =>
+                      router.push("/courses")
+                    }
+                    className="flex-row items-center gap-2 rounded-chip bg-success-soft px-3 py-2"
+                  >
+                    <FileText size={16} color={colors.brand.DEFAULT} />
+                    <Text className="text-small font-sans-medium text-brand">
+                      From: {label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
         </View>
-        )}
-        {item.role === "assistant" && item.id !== "pending" ? (
-          <View className="flex-1 items-start gap-2 pl-12 pt-2">
-            {item.sourceNoteIds.slice(0, 2).map((sourceId) => {
-              const label = sourceTitles.get(sourceId) ?? "your notes";
-              return (
-                <Pressable
-                  key={sourceId}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Open source: ${label}`}
-                  onPress={() =>
-                    router.push("/courses")
-                  }
-                  className="flex-row items-center gap-2 rounded-chip bg-success-soft px-3 py-2"
-                >
-                  <FileText size={16} color={colors.brand.DEFAULT} />
-                  <Text className="text-small font-sans-medium text-brand">
-                    From: {label}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-        ) : null}
-      </View>
-    ),
+      );
+    },
     [sourceTitles],
   );
 
@@ -437,6 +457,7 @@ export default function AskSua() {
           keyExtractor={(item) => item.id}
           className="flex-1"
           contentContainerClassName="px-5 pb-6 pt-8"
+          ItemSeparatorComponent={MessageSeparator}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
           onContentSizeChange={() => {
