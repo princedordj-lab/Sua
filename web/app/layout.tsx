@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import Script from "next/script";
 import { Plus_Jakarta_Sans } from "next/font/google";
 import { ClerkProvider } from "@clerk/nextjs";
+import { Analytics } from "@vercel/analytics/next";
 import { AppearanceProvider } from "@/config/appearance";
 import { colors } from "@/config/theme";
 import "./globals.css";
@@ -86,6 +87,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         >
           <AppearanceProvider>{children}</AppearanceProvider>
         </ClerkProvider>
+        <Analytics />
       </body>
     </html>
   );
