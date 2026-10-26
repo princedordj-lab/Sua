@@ -26,10 +26,13 @@ app.use(
 
 app.use(express.json());
 
+
 const origins = (process.env.CORS_ORIGIN ?? "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+
 
 app.use(
   cors({

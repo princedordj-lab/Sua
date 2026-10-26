@@ -10,3 +10,6 @@ skills-lock.json
 
 # esbuild bundle from `npm run build` (Vercel rebuilds it on deploy)
 /dist
+
+# Local environment variables (ignored by version control)
+.env.local
