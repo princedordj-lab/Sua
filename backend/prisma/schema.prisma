@@ -143,19 +143,27 @@ model Job {
   stage      String    @default("queued")
   // JSON payload for kinds that carry extra inputs (quiz_marking answers).
   payload    String?   @db.Text
-  attempts   Int       @default(0)
-  error      String?
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  error       String?
+  errorCode   String?
+  errorStage  String?
+  checkpoint  Json?
+  runAfter    DateTime  @default(now())
+  lockedUntil DateTime?
   // Hash of the cleaned source; identical requests reuse existing outputs.
-  sourceHash String?
-  startedAt  DateTime?
-  finishedAt DateTime?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  sourceHash  String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   aiCalls AiCall[]
 
   @@index([userId, updatedAt])
   @@index([noteId])
+  @@index([state, runAfter])
+  @@index([lockedUntil])
   @@map("jobs")
 }
 

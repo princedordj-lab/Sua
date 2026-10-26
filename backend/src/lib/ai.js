@@ -35,7 +35,7 @@ export function aiConfigured() {
   return Boolean(
     process.env.GEMINI_API_KEY &&
       process.env.XKIRO_API_KEY &&
-      process.env.REDIS_URL,
+      process.env.DATABASE_URL,
   );
 }
 

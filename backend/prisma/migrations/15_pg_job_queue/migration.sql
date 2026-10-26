@@ -1,0 +1,11 @@
+-- AlterTable
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "maxAttempts" INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "errorCode" TEXT;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "errorStage" TEXT;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "checkpoint" JSONB;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "runAfter" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "lockedUntil" TIMESTAMP(3);
+
+-- CreateIndex
+CREATE INDEX IF NOT EXISTS "jobs_state_runAfter_idx" ON "jobs"("state", "runAfter");
+CREATE INDEX IF NOT EXISTS "jobs_lockedUntil_idx" ON "jobs"("lockedUntil");

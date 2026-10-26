@@ -10,6 +10,8 @@ import { notesRouter } from "./routes/notes.js";
 import { assetsRouter, uploadsRouter } from "./routes/uploads.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { chatRouter } from "./routes/chat.js";
+import { timingSafeEqual } from "node:crypto";
+import { runJobs } from "./lib/runner.js";
 import { studyRouter } from "./routes/study.js";
 
 const app = express();
@@ -49,6 +51,46 @@ app.get("/api/health", (_req, res) => {
 // /api, so there is nothing to expose here.
 app.get("/", (_req, res) => {
   res.json({ service: "Sua API", status: "ok", health: "/api/health" });
+});
+
+function checkCronAuth(req) {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) {
+    if (process.env.VERCEL) return false;
+    return true;
+  }
+
+  const authHeader = req.headers["authorization"] || "";
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  const bearerToken = match ? match[1].trim() : "";
+  const customHeader = (req.headers["x-cron-secret"] || "").toString().trim();
+  const provided = bearerToken || customHeader;
+
+  if (!provided) return false;
+
+  const expectedBuf = Buffer.from(secret);
+  const providedBuf = Buffer.from(provided);
+  if (expectedBuf.length !== providedBuf.length) return false;
+
+  return timingSafeEqual(expectedBuf, providedBuf);
+}
+
+// Background cron tick for scheduled job draining in serverless environments.
+// Mounted before clerkMiddleware so it does not require student session auth.
+app.post("/api/internal/jobs/tick", async (req, res) => {
+  if (!checkCronAuth(req)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const maxJobs = Math.min(10, Math.max(1, Number(req.query?.maxJobs ?? 5)));
+    const budgetMs = Math.min(270_000, Math.max(10_000, Number(req.query?.budgetMs ?? 240_000)));
+    const result = await runJobs({ maxJobs, budgetMs });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("Tick error:", err);
+    res.status(500).json({ error: "Tick failed", message: err?.message ?? String(err) });
+  }
 });
 
 app.use(
@@ -106,6 +148,14 @@ export default app;
 
 // Start server locally if not running on Vercel
 if (!process.env.VERCEL) {
+  // Local development background runner loop
+  const devInterval = setInterval(() => {
+    runJobs({ maxJobs: 2, budgetMs: 15_000 }).catch((err) => {
+      console.warn("[dev-runner] loop error:", err?.message ?? err);
+    });
+  }, 3000);
+  devInterval.unref?.();
+
   app.listen(port, () => {
     if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
       console.warn(
