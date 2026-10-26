@@ -94,7 +94,7 @@ app.use((err, req, res, _next) => {
   const constraint = prismaCode === "P2002" && constraintFields.length
     ? ` constraint=${[...new Set(constraintFields)].map((v) => v.replace(/[^A-Za-z0-9_.,-]/g, "").slice(0, 100)).join(",")}`
     : "";
-  console.error(`[api-error] method=${req.method} path=${safePath} name=${name} prismaCode=${prismaCode}${constraint}`);
+  console.error(`[api-error] method=${req.method} path=${safePath} name=${name} prismaCode=${prismaCode}${constraint}:`, err?.message || err);
   if (err?.status === 409 && err?.code === "ACCOUNT_CONFLICT") {
     return res.status(409).json({ error: "ACCOUNT_CONFLICT", message: err.message });
   }
