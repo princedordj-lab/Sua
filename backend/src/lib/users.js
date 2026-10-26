@@ -60,7 +60,7 @@ async function oldClerkIdIsStale(clerkId, clerkApi = clerkClient) {
 
 /** Provision or refresh the local account from a Clerk user or webhook payload. */
 export async function ensureUser(clerkUser, { tx = null, db = prisma, clerk = clerkClient } = {}) {
-  const clerkId = clerkUser.id ?? clerkUser.clerkId;
+  const clerkId = clerkUser.clerkId ?? clerkUser.id;
   if (!clerkId) throw new Error("Clerk user id is required.");
   const { email, verified } = emailDetails(clerkUser);
   const name = nameFor(clerkUser);
@@ -87,9 +87,15 @@ export async function ensureUser(clerkUser, { tx = null, db = prisma, clerk = cl
   }
 
   // Only first-seen accounts need the full Clerk Backend User and old-id check.
-  const fullUser = clerkUser.emailAddresses || clerkUser.email_addresses
-    ? clerkUser
-    : await clerk.users.getUser(clerkId);
+  let fullUser = clerkUser.emailAddresses || clerkUser.email_addresses ? clerkUser : null;
+  if (!fullUser) {
+    try {
+      fullUser = await clerk.users.getUser(clerkId);
+    } catch (err) {
+      console.error(`[clerk-fetch-user-error] clerkId=${clerkId} status=${err?.status ?? err?.statusCode} message=${err?.message}`);
+      throw err;
+    }
+  }
   const details = emailDetails(fullUser);
   const normalizedEmail = details.email || email;
   const normalizedName = nameFor(fullUser) ?? name;

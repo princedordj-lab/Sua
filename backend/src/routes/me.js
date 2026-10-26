@@ -35,10 +35,9 @@ async function shapeWithUsage(tx, profile) {
 }
 
 meRouter.get("/", async (req, res) => {
-  const provisioned = await ensureUser(req.suaUser);
   const identity = await identityFromRequest(req);
   const profile = await withUser(identity.clerkId, async (tx) => {
-    return shapeWithUsage(tx, provisioned);
+    return shapeWithUsage(tx, req.suaUser);
   });
   res.json(profile);
 });
