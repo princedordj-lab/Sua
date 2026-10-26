@@ -32,7 +32,7 @@ import {
 import { ReportButton, ReportMistake } from "@/components/report-mistake";
 import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
-import { dueLabel, relativeDate } from "@/lib/format";
+import { dueLabel, examCountdown, relativeDate } from "@/lib/format";
 import { courseStyle } from "@/lib/course-style";
 import type { ServerNote, ServerStudy } from "@/lib/types";
 

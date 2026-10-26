@@ -2079,11 +2079,12 @@
 .course-detail {
   display: grid;
   gap: 20px;
+  width: min(880px, 100%);
+  margin-inline: auto;
 }
 
 .course-hero {
   position: relative;
-  overflow: hidden;
   padding: 26px 28px 22px 34px;
   background:
     radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--color-gold) 20%, transparent), transparent 44%),
@@ -2216,7 +2217,7 @@
 
 .course-set-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
   gap: 11px;
 }
 
@@ -2297,7 +2298,7 @@
 
 .note-tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
   gap: 10px;
 }
 
@@ -4022,6 +4023,8 @@
 .deck-page {
   display: grid;
   gap: 15px;
+  width: min(880px, 100%);
+  margin-inline: auto;
 }
 
 .deck-head-actions {
@@ -4065,6 +4068,10 @@
 .deck-summary .btn {
   flex-shrink: 0;
   margin-left: auto;
+}
+
+.deck-exam-chip {
+  flex-shrink: 0;
 }
 
 .deck-list {
@@ -6530,6 +6537,21 @@
 
   .review-complete-card {
     padding: 26px 18px;
+  }
+
+  .deck-summary {
+    flex-wrap: wrap;
+  }
+
+  .deck-summary .btn {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .deck-page {
+    width: 100%;
+    margin-inline: 0;
+    padding-inline: 0 18px;
   }
 
   .deck-summary {
