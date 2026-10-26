@@ -1656,6 +1656,7 @@
 }
 
 @media (max-width: 760px) {
+  .app-content { padding: 24px 18px 96px; }
   .review-hero {
     grid-template-columns: 1fr;
     padding: 22px;
@@ -1693,7 +1694,14 @@
   }
 
   .home-greeting {
-    align-items: flex-start;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .home-greeting-copy {
+    flex: 1 1 100%;
+  }
+  .streak-chip {
+    min-width: 100%;
   }
 
   .streak-chip {
@@ -5497,6 +5505,52 @@
 }
 
 /* Respect prefers-reduced-motion */
+@media (max-width: 390px) {
+  .app-content {
+    padding: 16px 12px 80px;
+  }
+
+  .review-hero {
+    padding: 18px;
+  }
+
+  .home-greeting {
+    gap: 10px;
+  }
+
+  .streak-chip {
+    min-height: 28px;
+    font-size: 10px;
+  }
+
+  .page-header {
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .page-title {
+    font-size: clamp(20px, 5vw, 26px);
+  }
+
+  .eyebrow-sm {
+    font-size: 8px;
+  }
+
+  .btn-sm {
+    min-height: 36px;
+    padding: 0 11px;
+    font-size: 11.5px;
+  }
+
+  .section-title {
+    font-size: 15px;
+  }
+
+  .section-hint {
+    font-size: 11px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ask-composer-card,
   .ask-send-btn,
@@ -6646,6 +6700,9 @@
 }
 
 @media (max-width: 560px) {
+  .review-hero {
+    overflow: visible;
+  }
   .deck-card {
     flex-wrap: wrap;
   }
