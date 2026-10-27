@@ -469,7 +469,7 @@ export default function Home() {
             {recentNotes.length ? (
               recentNotes.map((note, index) => {
                 const course = courseById.get(note.courseId);
-                const style = courseStyle(course?.color ?? "", pv);
+                const style = courseStyle(course?.color || pv.brand.DEFAULT, pv);
                 const cards = stats?.cardsByNote.get(note.id) ?? 0;
                 const noteDue = stats?.dueCardsByNote.get(note.id) ?? 0;
                 return (
