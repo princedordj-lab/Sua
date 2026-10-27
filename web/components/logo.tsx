@@ -16,8 +16,8 @@ export function Logo({
         <Image
           src="/icon.png"
           alt=""
-          width={compact ? 28 : 50}
-          height={compact ? 28 : 50}
+          width={compact ? 28 : 34}
+          height={compact ? 28 : 34}
           className="brand-mark-image"
         />
       </span>

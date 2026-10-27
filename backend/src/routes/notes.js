@@ -27,12 +27,6 @@ function shapeNote(note) {
       bytes: asset.bytes,
       format: asset.format,
       status: asset.status,
-      task: asset.task ?? "none",
-      extractState: asset.extractState ?? "pending",
-      extractedPages: asset.extractedPages ?? 0,
-      totalPages: asset.totalPages ?? 0,
-      extractErrorCode: asset.extractErrorCode ?? null,
-      extractTruncated: Boolean(asset.extractTruncated),
     })),
   };
 }
@@ -46,18 +40,7 @@ notesRouter.get("/course/:courseId", async (req, res) => {
       orderBy: { updatedAt: "desc" },
       include: {
         assets: {
-          select: {
-            id: true,
-            bytes: true,
-            format: true,
-            status: true,
-            task: true,
-            extractState: true,
-            extractedPages: true,
-            totalPages: true,
-            extractErrorCode: true,
-            extractTruncated: true,
-          },
+          select: { id: true, bytes: true, format: true, status: true },
           orderBy: { createdAt: "asc" },
         },
       },
@@ -76,18 +59,7 @@ notesRouter.get("/:noteId", async (req, res) => {
       where: { id: req.params.noteId, userId: user.id },
       include: {
         assets: {
-          select: {
-            id: true,
-            bytes: true,
-            format: true,
-            status: true,
-            task: true,
-            extractState: true,
-            extractedPages: true,
-            totalPages: true,
-            extractErrorCode: true,
-            extractTruncated: true,
-          },
+          select: { id: true, bytes: true, format: true, status: true },
           orderBy: { createdAt: "asc" },
         },
       },

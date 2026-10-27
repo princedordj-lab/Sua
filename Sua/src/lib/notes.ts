@@ -87,9 +87,6 @@ export type UploadKind = "audio" | "document" | "image";
 export type UploadState = "pending" | "uploading" | "uploaded" | "failed";
 export type UploadTarget = "lecture_note" | "course_reference";
 
-// Server-side document reading (see backend lib/extract-runner.js).
-export type ExtractState = "pending" | "running" | "done" | "partial" | "failed";
-
 export type UploadQueueItem = {
   id: number;
   noteId: string;
@@ -105,11 +102,6 @@ export type UploadQueueItem = {
   // Live progress (0-100); persisted so a killed app still shows where it was.
   sentBytes: number;
   progress: number;
-  // Server-side reading of the uploaded document.
-  extractState: ExtractState;
-  extractedPages: number;
-  totalPages: number;
-  extractTruncated: boolean;
   error: string | null;
   createdAt: string;
   updatedAt: string;
@@ -393,39 +385,6 @@ const MIGRATIONS: ((db: SQLiteDatabase) => Promise<void>)[] = [
         deleted_at TEXT NOT NULL
       );
     `);
-  },
-  // 14 — background reading state for uploaded documents. The server extracts
-  // text after the upload response; these columns let the queue show
-  // "Reading your file" and the page progress offline.
-  async (db) => {
-    const columns = await db.getAllAsync<{ name: string }>(
-      "PRAGMA table_info(upload_queue)",
-    );
-    if (!columns.some((column) => column.name === "extract_state")) {
-      await db.execAsync(
-        "ALTER TABLE upload_queue ADD COLUMN extract_state TEXT NOT NULL DEFAULT 'pending'",
-      );
-      // Rows uploaded before this feature were parsed inline by /complete, so
-      // they are already read; without this they would say "Reading…" forever.
-      await db.execAsync(
-        "UPDATE upload_queue SET extract_state = 'done' WHERE state = 'uploaded'",
-      );
-    }
-    if (!columns.some((column) => column.name === "extracted_pages")) {
-      await db.execAsync(
-        "ALTER TABLE upload_queue ADD COLUMN extracted_pages INTEGER NOT NULL DEFAULT 0",
-      );
-    }
-    if (!columns.some((column) => column.name === "total_pages")) {
-      await db.execAsync(
-        "ALTER TABLE upload_queue ADD COLUMN total_pages INTEGER NOT NULL DEFAULT 0",
-      );
-    }
-    if (!columns.some((column) => column.name === "extract_truncated")) {
-      await db.execAsync(
-        "ALTER TABLE upload_queue ADD COLUMN extract_truncated INTEGER NOT NULL DEFAULT 0",
-      );
-    }
   },
 ];
 
@@ -1051,10 +1010,6 @@ function rowToUpload(row: Record<string, unknown>): UploadQueueItem {
     target: row.target == null ? null : (String(row.target) as UploadTarget),
     sentBytes: Number(row.sent_bytes ?? 0),
     progress: Number(row.progress ?? 0),
-    extractState: (row.extract_state ?? "pending") as ExtractState,
-    extractedPages: Number(row.extracted_pages ?? 0),
-    totalPages: Number(row.total_pages ?? 0),
-    extractTruncated: Number(row.extract_truncated ?? 0) === 1,
     error: row.error == null ? null : String(row.error),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -1132,31 +1087,6 @@ export async function listUploadHistory(db: SQLiteDatabase) {
   return rows.map(rowToUpload);
 }
 
-// Largest reading progress for a note: uploaded documents the server is still
-// working through. Used by the note screen to show "Reading your file" before
-// any generation job exists.
-export async function noteExtractProgress(db: SQLiteDatabase, noteId: string) {
-  const row = await db.getFirstAsync<{
-    state: string | null;
-    extracted_pages: number;
-    total_pages: number;
-    truncated: number;
-  }>(
-    `SELECT extract_state AS state, extracted_pages, total_pages, extract_truncated AS truncated
-       FROM upload_queue
-      WHERE note_id = ? AND state = 'uploaded' AND kind = 'document' AND extract_state IN ('pending', 'running', 'failed')
-      ORDER BY id DESC LIMIT 1`,
-    noteId,
-  );
-  if (!row?.state) return null;
-  return {
-    state: row.state as ExtractState,
-    extractedPages: Number(row.extracted_pages ?? 0),
-    totalPages: Number(row.total_pages ?? 0),
-    truncated: Number(row.truncated ?? 0) === 1,
-  };
-}
-
 // Progress-only write; kept separate from updateUploadState and not touching
 // updated_at so frequent progress ticks do not reshuffle history ordering.
 export async function updateUploadProgress(
@@ -1168,28 +1098,6 @@ export async function updateUploadProgress(
     "UPDATE upload_queue SET sent_bytes = ?, progress = ? WHERE id = ?",
     sentBytes,
     progress,
-    id,
-  );
-}
-
-// Server reading state for one queued document. Progress ticks are cheap and
-// stay out of updated_at so history ordering does not jump while reading.
-export async function updateUploadExtractState(
-  db: SQLiteDatabase,
-  id: number,
-  patch: {
-    state: ExtractState;
-    extractedPages?: number;
-    totalPages?: number;
-    truncated?: boolean;
-  },
-) {
-  await db.runAsync(
-    "UPDATE upload_queue SET extract_state = ?, extracted_pages = ?, total_pages = ?, extract_truncated = ? WHERE id = ?",
-    patch.state,
-    patch.extractedPages ?? 0,
-    patch.totalPages ?? 0,
-    patch.truncated ? 1 : 0,
     id,
   );
 }

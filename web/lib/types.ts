@@ -77,9 +77,6 @@ export type AiState =
 export type NoteKind = "note" | "reference";
 export type SourceType = "typed" | "audio" | "file";
 export type UploadTask = "lecture_note" | "course_reference";
-
-// Server-side document reading (mirrors Sua/src/lib/notes.ts).
-export type ExtractState = "pending" | "running" | "done" | "partial" | "failed";
 export type GenerationKind = "study_set" | "lecture_note" | "course_reference";
 
 export type ServerNote = {
@@ -97,12 +94,6 @@ export type ServerNote = {
     bytes: number;
     format: string | null;
     status: "pending" | "active";
-    task?: UploadTask | "none";
-    extractState?: ExtractState;
-    extractedPages?: number;
-    totalPages?: number;
-    extractErrorCode?: string | null;
-    extractTruncated?: boolean;
   }[];
   createdAt: string;
   updatedAt: string;
@@ -143,12 +134,6 @@ export type ServerAsset = {
   noteId: string | null;
   task?: UploadTask | "none";
   extractedText?: string | null;
-  // Background reading state (backend lib/extract-runner.js).
-  extractState?: ExtractState;
-  extractedPages?: number;
-  totalPages?: number;
-  extractErrorCode?: string | null;
-  extractTruncated?: boolean;
   createdAt: string;
 };
 

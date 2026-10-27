@@ -1,7 +1,7 @@
 import NetInfo, { NetInfoStateType } from "@react-native-community/netinfo";
 import { File, UploadType } from "expo-file-system";
 import type { SQLiteDatabase } from "expo-sqlite";
-import { assetsApi, uploadsApi } from "./api";
+import { uploadsApi } from "./api";
 import {
   getSetting,
   listPendingUploads,
@@ -10,7 +10,6 @@ import {
   resetUploadProgress,
   setNoteTranscript,
   syncPendingNotes,
-  updateUploadExtractState,
   updateUploadProgress,
   updateUploadState,
 } from "./notes";
@@ -262,15 +261,6 @@ async function uploadOne(
       error: null,
     });
     announce({ ...item, state: "uploaded", sentBytes: size, progress: 100 });
-    // The server now reads the document in the background; record the state it
-    // reported so the queue can say "Reading your file" instead of "Uploaded".
-    const extractState = asset.extractState ?? (item.kind === "document" ? "pending" : "done");
-    await updateUploadExtractState(db, item.id, {
-      state: extractState,
-      extractedPages: asset.extractedPages ?? 0,
-      totalPages: asset.totalPages ?? 0,
-      truncated: Boolean(asset.extractTruncated),
-    }).catch(() => {});
     // Documents come back with their extracted text (server-side parsing);
     // mirror it into the local note so it reads without another round trip.
     if (asset.extractedText && item.kind !== "audio") {
@@ -307,46 +297,4 @@ async function uploadOne(
     activeUploads.delete(item.id);
     release();
   }
-}
-
-/**
- * Polls the reading state of uploads the server is still working through and
- * writes it to SQLite so the queue and the note reader stay accurate.
- *
- * Extraction happens after /complete has already answered, so without this the
- * row would sit on "Reading your file" until the app is reinstalled. Cheap and
- * best-effort: a failed request simply leaves the last known state in place.
- */
-export async function refreshReadingUploads(opts: {
-  db: SQLiteDatabase;
-  getAuthToken: () => Promise<string | null>;
-}): Promise<number> {
-  const rows = await opts.db
-    .getAllAsync<{ id: number; asset_id: string }>(
-      `SELECT id, asset_id FROM upload_queue
-        WHERE state = 'uploaded' AND asset_id IS NOT NULL
-          AND extract_state IN ('pending', 'running')
-        ORDER BY id DESC LIMIT 25`,
-    )
-    .catch(() => [] as { id: number; asset_id: string }[]);
-  if (!rows.length) return 0;
-
-  const token = await opts.getAuthToken().catch(() => null);
-  if (!token) return 0;
-
-  const settled = await Promise.all(
-    rows.map(async (row) => {
-      const asset = await assetsApi.get(token, row.asset_id).catch(() => null);
-      if (!asset) return false;
-      const state = asset.extractState ?? "done";
-      await updateUploadExtractState(opts.db, row.id, {
-        state,
-        extractedPages: asset.extractedPages ?? 0,
-        totalPages: asset.totalPages ?? 0,
-        truncated: Boolean(asset.extractTruncated),
-      }).catch(() => {});
-      return true;
-    }),
-  );
-  return settled.filter(Boolean).length;
 }

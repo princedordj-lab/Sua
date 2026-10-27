@@ -6,11 +6,12 @@ import {
   MAX_AUDIO_BYTES,
   assetDownloadUrl,
   deleteAssetObject,
+  readAssetBytes,
   storageProviderOf,
   verifyNeonObject,
 } from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
-import { scheduleAssetExtraction } from "../lib/extract-runner.js";
+import { extractDocumentText } from "../lib/extract.js";
 import { maybeEnqueueGeneration } from "../lib/pipeline.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
@@ -73,19 +74,34 @@ function shapeAsset(asset) {
     noteId: asset.noteId,
     task: asset.task ?? "none",
     extractedText: asset.extractedText ?? null,
-    extractState: asset.extractState ?? "pending",
-    extractedPages: asset.extractedPages ?? 0,
-    totalPages: asset.totalPages ?? 0,
-    extractErrorCode: asset.extractErrorCode ?? null,
-    extractTruncated: Boolean(asset.extractTruncated),
     createdAt: asset.createdAt,
   };
 }
 
-/** Same shape without the (large) extracted text, for status polling. */
-function shapeAssetStatus(asset) {
-  const { extractedText: _text, ...status } = shapeAsset(asset);
-  return status;
+function matchesFileSignature(buffer, format) {
+  if (!buffer || buffer.length < 4) return true;
+  if (format === "pdf") {
+    return buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46;
+  }
+  if (format === "docx" || format === "pptx") {
+    return (
+      buffer[0] === 0x50 &&
+      buffer[1] === 0x4b &&
+      (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07) &&
+      (buffer[3] === 0x04 || buffer[3] === 0x06 || buffer[3] === 0x08)
+    );
+  }
+  if (format === "ppt") {
+    return buffer[0] === 0xd0 && buffer[1] === 0xcf && buffer[2] === 0x11 && buffer[3] === 0xe0;
+  }
+  return true;
+}
+
+// Downloads the confirmed bytes through a signed URL (the media itself never
+// travels through the API) and parses any text the format supports.
+async function extractFromStorage(asset) {
+  const buffer = await readAssetBytes(asset);
+  return extractDocumentText(buffer, asset.format, asset.kind);
 }
 
 // Cloudinary's Admin API index can lag behind a direct upload by a few
@@ -310,54 +326,42 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
       return res.status(410).json({ error: "Note was deleted" });
     }
   }
-  // Reading a large PDF must never hold the upload response open: storage
-  // verification is done, so hand the parse to the background worker and
-  // answer immediately. Extraction failures are recorded on the asset and
-  // never fail the upload.
-  let extractionScheduled = false;
+  // Parse the document synchronously once its bytes are confirmed — outside
+  // the transaction so external parsing never blocks database locks.
+  // Re-runs only if a previous attempt failed (extractedText still null).
   if (
     asset.kind === "document" &&
+    !asset.extractedText &&
     asset.bytes > 0 &&
     asset.bytes <= MAX_EXTRACT_BYTES
   ) {
-    if (asset.extractedText) {
-      // Legacy rows read before the state machine existed.
-      if (asset.extractState === "pending") {
-        await withUser(identity.clerkId, (tx) =>
-          tx.asset.updateMany({
-            where: { id: asset.id },
-            data: { extractState: "done" },
+    try {
+      const buffer = remote?.buffer ?? (await readAssetBytes(asset));
+      if (!matchesFileSignature(buffer, asset.format)) {
+        console.warn(
+          `File signature check skipped/failed for asset ${asset.id} (format ${asset.format})`,
+        );
+      }
+      const text = await extractDocumentText(buffer, asset.format, asset.kind);
+      if (text) {
+        const targetId = asset.id;
+        asset = await withUser(identity.clerkId, (tx) =>
+          tx.asset.update({
+            where: { id: targetId },
+            data: { extractedText: text },
           }),
-        ).catch(() => {});
-        asset = { ...asset, extractState: "done" };
+        );
       }
-    } else if (asset.extractState !== "done" && asset.extractState !== "running") {
-      const claimed = await withUser(identity.clerkId, async (tx) => {
-        const updated = await tx.asset.updateMany({
-          where: {
-            id: asset.id,
-            extractState: { in: ["pending", "partial", "failed"] },
-          },
-          data: { extractState: "running" },
-        });
-        return updated.count > 0;
-      }).catch(() => false);
-      if (claimed) {
-        asset = { ...asset, extractState: "running" };
-        extractionScheduled = true;
-        await scheduleAssetExtraction(asset.id, { clerkId: identity.clerkId });
-      }
+    } catch (error) {
+      console.warn(
+        `Extraction failed for asset ${asset.id} (format ${asset.format}; ${error?.name ?? "Error"}: ${error?.message ?? String(error)})`,
+      );
     }
   }
-  // A conversion-marked upload starts its AI job as soon as the file is on the
-  // server. Documents wait for extraction to settle (the extract worker
-  // enqueues then), so generation never runs on an unread file.
-  if (
-    !extractionScheduled &&
-    asset.noteId &&
-    asset.task &&
-    asset.task !== "none"
-  ) {
+  // A conversion-marked upload starts its AI job as soon as both halves are
+  // on the server (extraction may offset the note-sync race either way; the
+  // sync route triggers the other direction).
+  if (asset.noteId && asset.task && asset.task !== "none") {
     try {
       await maybeEnqueueGeneration(identity.clerkId, asset.noteId);
     } catch (error) {
@@ -368,19 +372,6 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     }
   }
   res.status(outcome.status).json(shapeAsset(asset));
-});
-
-// Additive status endpoint: lets the upload list show "Reading your file"
-// without re-downloading the extracted text.
-assetsRouter.get("/:id", async (req, res) => {
-  const identity = await identityFromRequest(req);
-  const { id } = req.params;
-  const asset = await withUser(identity.clerkId, async (tx) => {
-    const user = await requireUser(tx, identity);
-    return tx.asset.findFirst({ where: { id, userId: user.id } });
-  });
-  if (!asset) return res.status(404).json({ error: "Asset not found" });
-  res.json(shapeAssetStatus(asset));
 });
 
 assetsRouter.get("/:id/url", async (req, res) => {

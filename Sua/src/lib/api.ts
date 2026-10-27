@@ -159,9 +159,6 @@ export const uploadsApi = {
 };
 
 export const assetsApi = {
-  // Reading state for one asset (no extracted text body).
-  get: (token: string, id: string) =>
-    apiRequest<ServerAsset>(`/assets/${id}`, { token }),
   signedUrl: (token: string, id: string) =>
     apiRequest<{ id: string; url: string }>(`/assets/${id}/url`, { token }),
   remove: (token: string, id: string) =>

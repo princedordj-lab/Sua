@@ -29,20 +29,7 @@ export const notePipeline = {
   // more than 4096 tokens; a truncated answer is unparseable JSON.
   digestMaxTokens: int("DIGEST_MAX_TOKENS", 8192),
   // Hard cap for one reference sheet (a handout/textbook chapter, not a book).
-  // Extraction stops here; generation reads as much text as the 100k-char cap
-  // allows. There is no "too long" rejection.
-  maxReferencePages: int("MAX_REFERENCE_PAGES", 100),
-  // Page cap for a lecture-note upload. Pages past this are reported as
-  // truncated so the student can upload the rest by chapter.
-  maxNotePages: int("MAX_NOTE_PAGES", 100),
-  // Background extraction budget. On expiry the text so far is kept,
-  // extractState becomes "partial" and the next pass resumes at extractNextPage.
-  extractBudgetMs: int("EXTRACT_BUDGET_MS", 200_000),
-  // A "running" asset untouched for this long is treated as crashed and reclaimed.
-  extractStaleRunningMs: int("EXTRACT_STALE_RUNNING_MS", 600_000),
-  // Only PDF pages with fewer than ocrMinChars go to Gemini OCR.
-  ocrConcurrency: int("OCR_CONCURRENCY", 3),
-  ocrPageTimeoutMs: int("OCR_PAGE_TIMEOUT_MS", 45_000),
+  maxReferencePages: int("MAX_REFERENCE_PAGES", 40),
   // Below this many characters a PDF page is treated as scanned and OCR'd.
   ocrMinChars: int("OCR_MIN_CHARS", 40),
   // A source with less readable text than this cannot produce a note at all;

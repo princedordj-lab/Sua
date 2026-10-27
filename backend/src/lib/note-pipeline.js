@@ -195,62 +195,54 @@ async function imageText(asset, deps) {
 
 async function documentSegments(asset, deps, onScan) {
   if (!asset.bytes || asset.bytes <= 0) {
-    return { segments: [], truncated: false, pageCount: 0, pagesRead: 0 };
+    return { segments: [], truncated: false, pageCount: 0 };
   }
-  // The API extracts uploads in the background; this guarantees the first
-  // pipeline stage never reads an unread file. On Cloudflare (no Node PDF
-  // stack) there is no ensure hook and the fallback below applies.
-  const current = deps.ensureExtracted ? await deps.ensureExtracted(asset) : asset;
-  // Upload completion extracts document text in the Node API. Reuse it for
-  // every format (including PDFs) so a Cloudflare Worker never needs to load
-  // the native canvas/PDF stack merely to process an ordinary upload.
-  if (text(current.extractedText)) {
+  // Upload completion has already extracted document text in the Node API. Reuse
+  // it for every format (including PDFs) so a Cloudflare Worker never needs to
+  // load the native canvas/PDF stack merely to process an ordinary upload.
+  if (text(asset.extractedText)) {
     return {
-      segments: [{ index: 1, label: null, text: text(current.extractedText) }],
-      truncated: Boolean(current.extractTruncated),
-      pageCount: current.totalPages || 1,
-      pagesRead: current.extractedPages || 1,
+      segments: [{ index: 1, label: null, text: text(asset.extractedText) }],
+      truncated: false,
+      pageCount: 1,
     };
   }
   // The Node/BullMQ worker supplies these native-PDF helpers. They are omitted
   // from the Cloudflare Worker dependency graph because Workers cannot load a
   // platform-specific `.node` addon such as @napi-rs/canvas.
   if (!deps.extractDocument) {
-    return { segments: [], truncated: false, pageCount: 0, pagesRead: 0 };
+    return { segments: [], truncated: false, pageCount: 0 };
   }
   let bytes;
   try {
-    bytes = await deps.readBytes(current);
+    bytes = await deps.readBytes(asset);
   } catch (error) {
     console.warn(
-      `Asset ${current.id} could not be read: ${error?.message ?? error}`,
+      `Asset ${asset.id} could not be read: ${error?.message ?? error}`,
     );
     return {
-      segments: text(current.extractedText)
-        ? [{ index: 1, label: null, text: text(current.extractedText) }]
+      segments: asset.extractedText
+        ? [{ index: 1, label: null, text: text(asset.extractedText) }]
         : [],
       truncated: false,
       pageCount: 1,
-      pagesRead: 1,
     };
   }
-  const extracted = await deps.extractDocument(bytes, current.format, current.kind);
+  const extracted = await deps.extractDocument(bytes, asset.format, asset.kind);
   if (!extracted) {
     return {
-      segments: text(current.extractedText)
-        ? [{ index: 1, label: null, text: text(current.extractedText) }]
+      segments: asset.extractedText
+        ? [{ index: 1, label: null, text: text(asset.extractedText) }]
         : [],
       truncated: false,
       pageCount: 1,
-      pagesRead: 1,
     };
   }
-  if (current.format !== "pdf") {
+  if (asset.format !== "pdf") {
     return {
       segments: extracted.segments,
       truncated: extracted.truncated,
       pageCount: extracted.pageCount,
-      pagesRead: extracted.segments.length,
     };
   }
 
@@ -299,7 +291,6 @@ async function documentSegments(asset, deps, onScan) {
     segments,
     truncated: extracted.truncated || scans >= notePipeline.maxOcrPages,
     pageCount: extracted.pageCount,
-    pagesRead: segments.length,
   };
 }
 
@@ -312,7 +303,6 @@ export async function assembleSource(note, deps) {
   const segments = [];
   let truncated = false;
   let pageCount = 0;
-  let pagesRead = 0;
 
   if (sourceType === "typed") {
     const typed = typedSourceOf(note);
@@ -363,13 +353,11 @@ export async function assembleSource(note, deps) {
         });
       }
       pageCount += pages.pageCount || pages.segments.length || 1;
-      pagesRead += pages.pagesRead || pages.segments.length || 1;
       if (pages.truncated) truncated = true;
     }
     if (!segments.length) {
       for (const segment of parseTranscript(note.transcript)) segments.push(segment);
       pageCount = pageCount || segments.length;
-      pagesRead = pagesRead || segments.length;
     }
     // A file note may also carry typed context; never an AI-written body.
     const typed = text(note.body);
@@ -396,7 +384,6 @@ export async function assembleSource(note, deps) {
     transcript: rawText,
     truncated,
     pageCount: pageCount || segments.length,
-    pagesRead: pagesRead || segments.length,
     minutes:
       sourceType === "recording"
         ? Math.max(
@@ -889,6 +876,14 @@ export async function prepareMaterial({ note, kind, courseContext, deps, source:
   meta.pageCount = source.pageCount;
   meta.minutes = source.minutes;
 
+  if (
+    kind === "course_reference" &&
+    source.sourceType === "file" &&
+    source.pageCount > notePipeline.maxReferencePages
+  ) {
+    throw new UserFacingError(USER_MESSAGES.tooLong);
+  }
+
   const cleanedSegments = cleanSegments(source.segments, source.sourceType);
   if (!cleanedSegments.length) throw new UserFacingError(USER_MESSAGES.unreadable);
   const cleaned =
@@ -922,8 +917,7 @@ export async function prepareMaterial({ note, kind, courseContext, deps, source:
       )
     : [];
   meta.digests = digests.length;
-  meta.pagesUsed =
-    source.sourceType === "typed" ? 1 : source.pagesRead || cleaned.length;
+  meta.pagesUsed = source.sourceType === "typed" ? 1 : cleaned.length;
 
   const material = digests.length
     ? digests.map(digestToText).join("\n\n")

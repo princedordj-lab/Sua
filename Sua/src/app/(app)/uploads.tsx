@@ -20,8 +20,7 @@ import {
   updateUploadState,
   type UploadQueueItem,
 } from "../../lib/notes";
-import { flushUploads, refreshReadingUploads } from "../../lib/uploads";
-import { EXTRACT_FAILED_MESSAGE, isReading, readingLabel } from "../../lib/extract-copy";
+import { flushUploads } from "../../lib/uploads";
 import { ProgressBar } from "../../components/progress-bar";
 import { WifiToggle } from "../../components/wifi-toggle";
 import { jobsApi } from "../../lib/api";
@@ -38,18 +37,7 @@ function kindIcon(item: UploadQueueItem, size = 16) {
 function stateLabel(item: UploadQueueItem) {
   if (item.state === "uploading") return "Uploading";
   if (item.state === "failed") return "Failed";
-  if (item.state === "uploaded") {
-    if (isReading(item.extractState)) {
-      return item.totalPages > 0
-        ? `Reading your file — ${Math.min(item.extractedPages, item.totalPages)} of ${item.totalPages} pages`
-        : "Reading your file";
-    }
-    if (item.extractState === "partial") {
-      return readingLabel(item.extractState, item.extractedPages, item.totalPages);
-    }
-    if (item.extractState === "failed") return EXTRACT_FAILED_MESSAGE;
-    return "Uploaded";
-  }
+  if (item.state === "uploaded") return "Uploaded";
   return "Queued";
 }
 
@@ -110,14 +98,6 @@ export default function Uploads() {
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      // "Reading your file" progress comes from the asset endpoint; the rows
-      // are reloaded only when a state actually changed.
-      const updated = await refreshReadingUploads({ db, getAuthToken }).catch(
-        () => 0,
-      );
-      if (cancelled) return;
-      if (updated > 0) void load();
-
       if (!doneNoteIds.length) {
         setJobs((current) => (Object.keys(current).length ? {} : current));
         return;
@@ -145,7 +125,7 @@ export default function Uploads() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [doneNoteIds, getAuthToken, db, load]);
+  }, [doneNoteIds, getAuthToken]);
 
   const retry = async (item: UploadQueueItem) => {
     await updateUploadState(db, item.id, {
@@ -228,13 +208,11 @@ export default function Uploads() {
                 ? "Course reference"
                 : "Lecture note"}
               {item.state === "uploaded"
-                ? isReading(item.extractState)
-                  ? " — reading file"
-                  : jobs[item.noteId] === "done"
-                    ? " — AI ready"
-                    : jobs[item.noteId] === "failed"
-                      ? " — AI failed"
-                      : " — AI generating"
+                ? jobs[item.noteId] === "done"
+                  ? " — AI ready"
+                  : jobs[item.noteId] === "failed"
+                    ? " — AI failed"
+                    : " — AI generating"
                 : ""}
             </Text>
           </View>

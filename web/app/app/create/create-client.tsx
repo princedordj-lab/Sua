@@ -47,7 +47,6 @@ import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
 import { usePrefs } from "@/lib/prefs";
 import { MARKDOWN_PREFIXES, toggleLinePrefix, wrapSelection } from "@/lib/markdown";
-import { isReading } from "@/lib/extract";
 import {
   ACCEPT_ALL,
   formatBytes,
@@ -580,7 +579,7 @@ function UploadPanel({
       ]);
       onCourseUsed();
       setPhase("Uploading your file…");
-      const asset = await uploadFile(api, file, {
+      await uploadFile(api, file, {
         format,
         kind,
         noteId,
@@ -588,13 +587,6 @@ function UploadPanel({
         fileName: file.name,
         onProgress: setPercent,
       });
-      // A document is read in the background after /complete answers; the API
-      // queues the AI run itself once the text is ready, so enqueueing here
-      // would only make the job wait. The note page shows the reading progress.
-      if (asset.kind === "document" && isReading(asset.extractState)) {
-        router.push(`/app/note/${noteId}`);
-        return;
-      }
       setPhase("Starting Sua…");
       await api.jobs.enqueue(
         noteId,

@@ -160,16 +160,8 @@ export type ServerAsset = {
   noteId: string | null;
   task?: UploadTask | "none";
   extractedText?: string | null;
-  // Background reading state (migration 16 on the backend).
-  extractState?: ExtractState;
-  extractedPages?: number;
-  totalPages?: number;
-  extractErrorCode?: string | null;
-  extractTruncated?: boolean;
   createdAt: string;
 };
-
-export type ExtractState = import("./notes").ExtractState;
 
 export type SignedUpload = ServerAsset & {
   uploadUrl: string;
