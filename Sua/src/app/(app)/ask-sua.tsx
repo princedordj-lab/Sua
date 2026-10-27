@@ -488,6 +488,7 @@ export default function AskSua() {
                   source={require("@/assets/images/icons/chatbot-icon.png")}
                   className="h-full w-full"
                   contentFit="cover"
+                  style={{ width: '100%', height: '100%' }}
                   accessibilityLabel="Sua assistant"
                 />
               </View>
