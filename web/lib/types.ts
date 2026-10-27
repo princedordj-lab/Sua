@@ -89,6 +89,12 @@ export type ServerNote = {
   transcript?: string | null;
   summary?: string | null;
   noteKind?: NoteKind;
+  assets?: {
+    id: string;
+    bytes: number;
+    format: string | null;
+    status: "pending" | "active";
+  }[];
   createdAt: string;
   updatedAt: string;
 };

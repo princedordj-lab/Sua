@@ -92,7 +92,7 @@
   --step-card-green: var(--color-brand);
   --ink: rgb(14 31 24);
   --ink-soft: rgb(92 107 99);
-  --ink-faint: rgb(138 151 143);
+  --ink-faint: rgb(98 111 103);
   --line: rgb(232 224 201);
 }
 
@@ -103,7 +103,7 @@
   --step-card-green: rgb(0 75 58);
   --ink: rgb(241 235 221);
   --ink-soft: rgb(181 170 152);
-  --ink-faint: rgb(135 125 108);
+  --ink-faint: rgb(179 169 149);
   --line: rgb(55 50 42);
 }
 
@@ -111,10 +111,6 @@
   * {
     box-sizing: border-box;
     overflow-wrap: break-word;
-  }
-
-  html, body {
-    overflow-x: hidden;
   }
 
   html {
@@ -1607,18 +1603,21 @@
   }
 
   .hero-art::before {
-    width: 390px;
-    height: 390px;
+    width: min(390px, 100%);
+    height: auto;
+    aspect-ratio: 1;
   }
 
   .art-orbit-one {
-    width: 385px;
-    height: 385px;
+    width: min(385px, 100%);
+    height: auto;
+    aspect-ratio: 1;
   }
 
   .art-orbit-two {
-    width: 435px;
-    height: 435px;
+    width: min(435px, 100%);
+    height: auto;
+    aspect-ratio: 1;
   }
 
   .dashboard-card {
@@ -1823,7 +1822,7 @@
   }
 
   .hero-art {
-    margin-inline: -28px;
+    margin-inline: -16px;
     transform: scale(0.8);
   }
 

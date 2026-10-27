@@ -17,6 +17,7 @@ import {
 import { Logo } from "./logo";
 import { Avatar, Button, ErrorState, ProgressBar, Skeleton } from "./ui";
 import { useAppData } from "./app-data";
+import { useVisualViewportHeight } from "@/hooks/use-visual-viewport";
 
 const NAV = [
   { href: "/app/home", label: "Home", Icon: Home },
@@ -96,6 +97,7 @@ function AppShellContent({
   const { signOut } = useClerk();
   const { user } = useUser();
   const { profile, courses, loading, error, refresh } = useAppData();
+  const { containerRef, isKeyboardOpen } = useVisualViewportHeight<HTMLDivElement>();
 
   // New accounts finish onboarding before the shell becomes useful. A
   // mobile-created account with courses skips it even if the flag is missing.
@@ -112,7 +114,7 @@ function AppShellContent({
   const isAskSua = pathname === "/app/ask-sua";
 
   return (
-    <div className={`app-shell${isAskSua ? " is-ask-sua" : ""}`}>
+    <div ref={containerRef} className={`app-shell${isAskSua ? " is-ask-sua" : ""}`}>
       <aside className="app-sidebar" aria-label="Main navigation">
         <div className="sidebar-top">
           <Logo href="/app/home" />
@@ -207,7 +209,10 @@ function AppShellContent({
         )}
       </div>
 
-      <nav className="bottom-nav" aria-label="Primary">
+      <nav
+        className={`bottom-nav${isKeyboardOpen ? " is-keyboard-open" : ""}`}
+        aria-label="Primary"
+      >
         <Suspense fallback={<NavItems pathname={null} mobile />}>
           <BottomNav />
         </Suspense>

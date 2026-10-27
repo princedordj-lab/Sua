@@ -12,7 +12,7 @@ export const colors = {
   ink: {
     DEFAULT: "#0E1F18",
     soft: "#5C6B63",
-    faint: "#8A978F",
+    faint: "#626F67",
     inverse: "#FFFFFF",
   },
   line: "#E8E0C9",
@@ -63,7 +63,7 @@ export const darkPalette = {
     ...colors.ink,
     DEFAULT: "#F1EBDD",
     soft: "#B5AA98",
-    faint: "#877D6C",
+    faint: "#B3A995",
   },
 } as const;
 

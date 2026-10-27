@@ -9,7 +9,7 @@ import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
 import { usePrefs } from "@/lib/prefs";
 import { EmptyState, LoadingBlock } from "@/components/ui";
-import { useVisualViewportHeight } from "./hooks/use-visual-viewport";
+import { useVisualViewportHeight } from "@/hooks/use-visual-viewport";
 import { Composer } from "./components/composer";
 import { MessageList } from "./components/message-list";
 import type { QuickActionItem } from "./components/quick-actions";

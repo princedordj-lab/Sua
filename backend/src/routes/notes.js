@@ -22,6 +22,12 @@ function shapeNote(note) {
     noteKind: note.noteKind ?? "note",
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
+    assets: note.assets?.map((asset) => ({
+      id: asset.id,
+      bytes: asset.bytes,
+      format: asset.format,
+      status: asset.status,
+    })),
   };
 }
 
@@ -32,6 +38,12 @@ notesRouter.get("/course/:courseId", async (req, res) => {
     return tx.note.findMany({
       where: { userId: user.id, courseId: req.params.courseId },
       orderBy: { updatedAt: "desc" },
+      include: {
+        assets: {
+          select: { id: true, bytes: true, format: true, status: true },
+          orderBy: { createdAt: "asc" },
+        },
+      },
     });
   });
   res.json(notes.map(shapeNote));
@@ -43,7 +55,15 @@ notesRouter.get("/:noteId", async (req, res) => {
   const identity = await identityFromRequest(req);
   const note = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
-    return tx.note.findFirst({ where: { id: req.params.noteId, userId: user.id } });
+    return tx.note.findFirst({
+      where: { id: req.params.noteId, userId: user.id },
+      include: {
+        assets: {
+          select: { id: true, bytes: true, format: true, status: true },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
   });
   if (!note) return res.status(404).json({ error: "Note not found" });
   res.json(shapeNote(note));
