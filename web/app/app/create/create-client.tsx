@@ -20,9 +20,11 @@ import {
   Mic,
   Pause,
   Play,
+  Redo2,
   Save,
   Sparkles,
   Square,
+  Undo2,
   X,
 } from "lucide-react";
 import { useAppData } from "@/components/app-data";
@@ -39,14 +41,19 @@ import {
   ProgressBar,
   Segmented,
   Select,
-  TextArea,
   TextInput,
   Toggle,
 } from "@/components/ui";
+import {
+  EMPTY_FORMATTING,
+  RichEditor,
+  type EditorFormatting,
+  type RichEditorHandle,
+} from "@/components/rich-editor";
 import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
 import { usePrefs } from "@/lib/prefs";
-import { MARKDOWN_PREFIXES, toggleLinePrefix, wrapSelection } from "@/lib/markdown";
+import { stripMarkdown } from "@/lib/markdown";
 import {
   ACCEPT_ALL,
   formatBytes,
@@ -300,7 +307,8 @@ function TypedEditor({
   const [savedAt, setSavedAt] = useState<Date | null>(note ? new Date(note.updatedAt) : null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [formatting, setFormatting] = useState<EditorFormatting>(EMPTY_FORMATTING);
+  const editorRef = useRef<RichEditorHandle | null>(null);
   const saveRef = useRef<() => Promise<string | null>>(async () => null);
 
   // A plain function rather than useCallback: the autosave effect calls it
@@ -346,29 +354,11 @@ function TypedEditor({
     return () => clearTimeout(timer);
   }, [saveState, title, body, noteKind, courseId]);
 
-  const words = body.trim() ? body.trim().split(/\s+/).length : 0;
+  const plainText = stripMarkdown(body).trim();
+  const words = plainText ? plainText.split(/\s+/).length : 0;
 
   function markDirty() {
     setSaveState("dirty");
-  }
-
-  function transform(kind: "bold" | "italic" | "code" | "heading" | "bullet" | "numbered") {
-    const element = textareaRef.current;
-    const selection = element
-      ? { start: element.selectionStart, end: element.selectionEnd }
-      : { start: body.length, end: body.length };
-    let result: { value: string; selection: { start: number; end: number } };
-    if (kind === "bold") result = wrapSelection(body, selection, "**");
-    else if (kind === "italic") result = wrapSelection(body, selection, "*");
-    else if (kind === "code") result = wrapSelection(body, selection, "`");
-    else result = toggleLinePrefix(body, selection, MARKDOWN_PREFIXES[kind].prefix, MARKDOWN_PREFIXES[kind].matcher);
-    setBody(result.value);
-    markDirty();
-    requestAnimationFrame(() => {
-      if (!element) return;
-      element.focus();
-      element.setSelectionRange(result.selection.start, result.selection.end);
-    });
   }
 
   async function openNote() {
@@ -414,23 +404,92 @@ function TypedEditor({
           </Chip>
         </div>
 
-        <div className="editor-toolbar" role="toolbar" aria-label="Markdown formatting">
-          <button type="button" onClick={() => transform("heading")} aria-label="Heading" title="Heading">
+        <div className="editor-toolbar" role="toolbar" aria-label="Text formatting">
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => editorRef.current?.undo()}
+            disabled={!formatting.canUndo}
+            aria-label="Undo"
+            title="Undo"
+          >
+            <Undo2 size={16} />
+          </button>
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => editorRef.current?.redo()}
+            disabled={!formatting.canRedo}
+            aria-label="Redo"
+            title="Redo"
+          >
+            <Redo2 size={16} />
+          </button>
+          <span className="editor-toolbar-divider" aria-hidden="true" />
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => editorRef.current?.toggleHeading()}
+            aria-label="Heading"
+            aria-pressed={formatting.heading}
+            title="Heading"
+            className={formatting.heading ? "is-active" : undefined}
+          >
             <Heading2 size={16} />
           </button>
-          <button type="button" onClick={() => transform("bold")} aria-label="Bold" title="Bold">
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => editorRef.current?.toggleBold()}
+            aria-label="Bold"
+            aria-pressed={formatting.bold}
+            title="Bold"
+            className={formatting.bold ? "is-active" : undefined}
+          >
             <Bold size={16} />
           </button>
-          <button type="button" onClick={() => transform("italic")} aria-label="Italic" title="Italic">
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => editorRef.current?.toggleItalic()}
+            aria-label="Italic"
+            aria-pressed={formatting.italic}
+            title="Italic"
+            className={formatting.italic ? "is-active" : undefined}
+          >
             <Italic size={16} />
           </button>
-          <button type="button" onClick={() => transform("bullet")} aria-label="Bulleted list" title="Bulleted list">
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => editorRef.current?.toggleBulletList()}
+            aria-label="Bulleted list"
+            aria-pressed={formatting.bullet}
+            title="Bulleted list"
+            className={formatting.bullet ? "is-active" : undefined}
+          >
             <List size={16} />
           </button>
-          <button type="button" onClick={() => transform("numbered")} aria-label="Numbered list" title="Numbered list">
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => editorRef.current?.toggleNumberedList()}
+            aria-label="Numbered list"
+            aria-pressed={formatting.numbered}
+            title="Numbered list"
+            className={formatting.numbered ? "is-active" : undefined}
+          >
             <ListOrdered size={16} />
           </button>
-          <button type="button" onClick={() => transform("code")} aria-label="Inline code" title="Inline code">
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => editorRef.current?.toggleCode()}
+            aria-label="Inline code"
+            aria-pressed={formatting.code}
+            title="Inline code"
+            className={formatting.code ? "is-active" : undefined}
+          >
             <Code2 size={16} />
           </button>
           <span className="editor-toolbar-spacer" />
@@ -439,18 +498,16 @@ function TypedEditor({
           </span>
         </div>
 
-        <TextArea
-          ref={textareaRef}
-          value={body}
-          onChange={(event) => {
-            setBody(event.target.value);
+        <RichEditor
+          ref={editorRef}
+          initialMarkdown={note?.body ?? ""}
+          onChange={(markdown) => {
+            setBody(markdown);
             markDirty();
           }}
-          placeholder={"Start typing, or paste your lecture notes…\n\n## Key idea\n- A short bullet\n- Another point"}
-          aria-label="Note body"
-          className="editor-body"
-          rows={18}
-          spellCheck
+          onFormattingChange={setFormatting}
+          placeholder="Start typing, or paste your lecture notes…"
+          ariaLabel="Note body"
         />
 
         <div className="editor-status">
