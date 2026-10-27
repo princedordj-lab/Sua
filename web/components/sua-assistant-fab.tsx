@@ -217,7 +217,7 @@ export function SuaAssistantFab() {
     router.push("/app/ask-sua");
   };
 
-  if (!isLoaded || !isSignedIn || isAskSua) return null;
+  if (isAskSua) return null;
 
   return (
     <button
