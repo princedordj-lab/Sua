@@ -251,21 +251,48 @@ chatRouter.get("/messages", async (req, res) => {
 });
 
 // Voice questions: record locally, upload the clip, get text back.
-// The client records m4a/audio per its expo-audio config.
+// Mobile posts base64 JSON because React Native cannot build a Blob from raw
+// bytes; the web app still posts raw audio. Transcription deliberately runs
+// outside withUser — it touches no database, so no transaction budget applies
+// and no usage counter moves (only /ask counts assistant queries).
+const MAX_AUDIO_BYTES = 6 * 1024 * 1024;
+// Base64 inflates by 4/3; cap the encoded string before decoding it.
+const MAX_AUDIO_BASE64_CHARS = Math.ceil(MAX_AUDIO_BYTES / 3) * 4;
+const AUDIO_MIME_PATTERN = /^audio\/[a-z0-9.+-]+$/;
+
 chatRouter.post("/speech", async (req, res) => {
   if (!process.env.GEMINI_API_KEY) {
     return res.status(503).json({ error: "Voice input is not configured" });
   }
-  if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-    return res.status(400).json({ error: "Raw audio body is required" });
+
+  const raw = Buffer.isBuffer(req.body) ? req.body : null;
+  const encoded = typeof req.body?.audio === "string" ? req.body.audio : "";
+  const mimeType = String(raw ? req.headers["content-type"] : req.body?.mimeType ?? "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+
+  if (!raw && !encoded) {
+    return res.status(400).json({ error: "Audio clip is required" });
   }
-  if (req.body.length > 6 * 1024 * 1024) {
+  if (!AUDIO_MIME_PATTERN.test(mimeType)) {
+    return res.status(415).json({ error: "Unsupported audio format" });
+  }
+  if (!raw && encoded.length > MAX_AUDIO_BASE64_CHARS) {
     return res.status(413).json({ error: "Audio clip too large (max 6 MB)" });
   }
-  const mimeType = String(req.headers["content-type"] ?? "audio/mp4");
+
+  const bytes = raw ?? Buffer.from(encoded, "base64");
+  if (bytes.length === 0) {
+    return res.status(400).json({ error: "Audio clip is empty" });
+  }
+  if (bytes.length > MAX_AUDIO_BYTES) {
+    return res.status(413).json({ error: "Audio clip too large (max 6 MB)" });
+  }
+
   try {
     const result = await geminiTranscribe({
-      bytes: req.body,
+      bytes,
       mimeType,
       languageHint: "English",
     });

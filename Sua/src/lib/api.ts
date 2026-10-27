@@ -24,7 +24,7 @@ import { Platform } from "react-native";
 const API_URL =
   process.env.EXPO_PUBLIC_API_URL ??
   (Platform.OS === "android" ? "http://10.0.2.2:4000/api" : "http://localhost:4000/api");
-type RequestOptions = RequestInit & { token?: string };
+type RequestOptions = RequestInit & { token?: string; timeoutMs?: number };
 
 // Every request gets a ceiling. Without one, a half-open connection leaves the
 // fetch pending forever; the note-sync pass is serialised per database, so one
@@ -35,17 +35,19 @@ export async function apiRequest<T>(
   path: string,
   options: RequestOptions = {},
 ) {
+  // `timeoutMs` is a Sua-only option, so it never reaches fetch's RequestInit.
+  const { token, timeoutMs = REQUEST_TIMEOUT_MS, ...init } = options;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
     response = await fetch(`${API_URL}${path}`, {
-      ...options,
-      signal: options.signal ?? controller.signal,
+      ...init,
+      signal: init.signal ?? controller.signal,
       headers: {
         "Content-Type": "application/json",
-        ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
-        ...options.headers,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...init.headers,
       },
     });
   } catch {

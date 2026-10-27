@@ -25,12 +25,14 @@ export const chatApi = {
     apiRequest<ChatMessagesResponse>(`/chat/messages?courseId=${courseId}`, {
       token,
     }),
-  speech: (token: string, audio: Blob, mimeType: string) =>
+  speech: (token: string, input: { audio: string; mimeType: string }) =>
     apiRequest<ChatTranscriptResponse>("/chat/speech", {
       method: "POST",
       token,
-      body: audio,
-      headers: { "Content-Type": mimeType },
+      body: JSON.stringify(input),
+      // Transcribing a 30-second clip can outrun the default 30s ceiling;
+      // aborting early would otherwise read as "check your connection".
+      timeoutMs: 60_000,
     }),
 };
 

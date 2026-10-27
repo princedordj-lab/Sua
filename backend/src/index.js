@@ -26,6 +26,12 @@ app.use(
   clerkWebhookRouter,
 );
 
+// Voice questions arrive two ways: base64 JSON from mobile (React Native
+// cannot build a Blob from raw bytes) and raw audio from the web app. This
+// parser has to be mounted before the global JSON parser below, whose 100 kB
+// default would reject a clip with a 413.
+app.use("/api/chat/speech", express.json({ limit: "8mb" }));
+
 app.use(express.json());
 
 
@@ -137,6 +143,11 @@ app.use((err, req, res, _next) => {
     ? ` constraint=${[...new Set(constraintFields)].map((v) => v.replace(/[^A-Za-z0-9_.,-]/g, "").slice(0, 100)).join(",")}`
     : "";
   console.error(`[api-error] method=${req.method} path=${safePath} name=${name} prismaCode=${prismaCode}${constraint}:`, err?.message || err);
+  // body-parser rejects a body over the mounted limit; answering 413 keeps that
+  // a client problem instead of a mystery 500.
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({ error: "That file is too large to upload" });
+  }
   if (err?.status === 409 && err?.code === "ACCOUNT_CONFLICT") {
     return res.status(409).json({ error: "ACCOUNT_CONFLICT", message: err.message });
   }
