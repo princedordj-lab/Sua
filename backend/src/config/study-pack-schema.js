@@ -3,6 +3,50 @@
  * Matches the production-ready university study pack specification for Sua.
  */
 
+/**
+ * The three shapes the app can render controls for. AI output drifts
+ * ("multiple_choice", "true/false", "fill_blank"); anything else is coerced
+ * here so a stored question is never unanswerable.
+ */
+function normalizeQuizType(value) {
+  const raw = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/-]+/g, "_");
+  if (["mcq", "multiple_choice", "single_choice", "choice"].includes(raw)) return "mcq";
+  if (["true_false", "truefalse", "tf", "boolean", "true_or_false"].includes(raw)) {
+    return "true_false";
+  }
+  if (
+    [
+      "short_answer",
+      "shortanswer",
+      "short",
+      "open",
+      "open_ended",
+      "free_text",
+      "freetext",
+      "essay",
+      "fill_in_the_blank",
+      "fill_blank",
+    ].includes(raw)
+  ) {
+    return "short_answer";
+  }
+  return null;
+}
+
+function sameText(a, b) {
+  return String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+}
+
+function canonicalBoolean(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["true", "t", "yes"].includes(text)) return "True";
+  if (["false", "f", "no"].includes(text)) return "False";
+  return null;
+}
+
 export function validateStudyPack(input) {
   if (!input || typeof input !== "object") {
     return { success: false, error: "Output must be a valid JSON object" };
@@ -81,11 +125,14 @@ export function validateStudyPack(input) {
       return { success: false, error: `quiz[${i}] missing question prompt` };
     }
 
-    let type = q.type || "mcq";
-    let options = Array.isArray(q.options) ? q.options.map((opt) => String(opt).trim()) : null;
+    const cleanOptions = Array.isArray(q.options)
+      ? q.options.map((opt) => String(opt ?? "").trim()).filter(Boolean)
+      : [];
+    const options = cleanOptions.length >= 2 ? cleanOptions : null;
+    let type = normalizeQuizType(q.type) ?? (options ? "mcq" : "short_answer");
     let answer = "";
 
-    if (q.answerIndex !== undefined && options && options[q.answerIndex] !== undefined) {
+    if (q.answerIndex !== undefined && options && options[q.answerIndex]) {
       answer = options[q.answerIndex];
     } else if (typeof q.answer === "string") {
       answer = q.answer.trim();
@@ -93,8 +140,24 @@ export function validateStudyPack(input) {
       answer = options[q.answer];
     }
 
-    if (!answer && options && options.length > 0) {
-      answer = options[0];
+    if (type === "true_false") {
+      const value = canonicalBoolean(answer);
+      if (!value) {
+        // An answer that is not a boolean can only be typed, not tapped.
+        type = options ? "mcq" : "short_answer";
+      } else {
+        answer = value;
+      }
+    }
+
+    if (type === "mcq") {
+      const match = (options ?? []).find((option) => sameText(option, answer));
+      if (!options || !match) {
+        // Choices that do not contain the answer are worse than a text input.
+        type = "short_answer";
+      } else {
+        answer = match;
+      }
     }
 
     if (!answer) {
@@ -104,7 +167,12 @@ export function validateStudyPack(input) {
     cleanQuiz.push({
       type,
       prompt,
-      options,
+      options:
+        type === "mcq"
+          ? options
+          : type === "true_false"
+            ? ["True", "False"]
+            : null,
       answer,
       explanation: String(q.explanation || "").trim(),
     });

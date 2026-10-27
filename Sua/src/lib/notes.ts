@@ -1273,6 +1273,17 @@ export async function storeStudySet(
         now,
       );
     }
+    // Regeneration replaces the previous quiz wholesale, exactly like the
+    // cards. Without this the note keeps listing the quiz it just replaced.
+    const keepQuizIds = new Set(study.quizzes.map((quiz) => quiz.id));
+    for (const stale of await db.getAllAsync<{ id: string }>(
+      "SELECT id FROM quizzes WHERE note_id = ?",
+      noteId,
+    )) {
+      if (keepQuizIds.has(stale.id)) continue;
+      await db.runAsync("DELETE FROM quiz_questions WHERE quiz_id = ?", stale.id);
+      await db.runAsync("DELETE FROM quizzes WHERE id = ?", stale.id);
+    }
     for (const quiz of study.quizzes) {
       await db.runAsync(
         "DELETE FROM quiz_questions WHERE quiz_id = ?",
@@ -1285,7 +1296,11 @@ export async function storeStudySet(
         quiz.title,
         now,
       );
-      for (const question of quiz.questions) {
+      // Canonicalise on the way in as well, so the quiz screen never has to
+      // guess what an unusual AI type or option list means.
+      for (const raw of quiz.questions as unknown as Record<string, unknown>[]) {
+        const question = normalizeQuizQuestion({ ...raw, quizId: quiz.id });
+        if (!question) continue;
         await db.runAsync(
           "INSERT OR REPLACE INTO quiz_questions (id, quiz_id, ordinal, type, prompt, options, answer, explanation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
           question.id,
@@ -1295,7 +1310,7 @@ export async function storeStudySet(
           question.prompt,
           question.options ? JSON.stringify(question.options) : null,
           question.answer,
-          question.explanation ?? "",
+          question.explanation,
         );
       }
     }
@@ -1331,36 +1346,165 @@ export type LocalQuiz = {
   questions: LocalQuizQuestion[];
 };
 
+function sameText(a: string, b: string) {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/** Options arrive as a JSON string from SQLite and as an array from the API. */
+function readQuizOptions(value: unknown): string[] | null {
+  const clean = (items: unknown[]) =>
+    items.map((item) => String(item ?? "").trim()).filter(Boolean);
+  if (Array.isArray(value)) {
+    const options = clean(value);
+    return options.length ? options : null;
+  }
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (Array.isArray(parsed)) {
+        const options = clean(parsed);
+        return options.length ? options : null;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function canonicalType(value: unknown, options: string[] | null) {
+  const raw = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/-]+/g, "_");
+  if (["mcq", "multiple_choice", "single_choice", "choice"].includes(raw)) {
+    return "mcq" as const;
+  }
+  if (["true_false", "truefalse", "tf", "boolean", "true_or_false"].includes(raw)) {
+    return "true_false" as const;
+  }
+  if (
+    [
+      "short_answer",
+      "shortanswer",
+      "short",
+      "open",
+      "open_ended",
+      "free_text",
+      "freetext",
+      "essay",
+      "fill_in_the_blank",
+      "fill_blank",
+    ].includes(raw)
+  ) {
+    return "short_answer" as const;
+  }
+  // Unknown vocabulary: answer it the way the question itself allows.
+  return options && options.length >= 2 ? ("mcq" as const) : ("short_answer" as const);
+}
+
+function canonicalBoolean(answer: string): "True" | "False" | null {
+  const value = answer.trim().toLowerCase();
+  if (["true", "t", "yes"].includes(value)) return "True";
+  if (["false", "f", "no"].includes(value)) return "False";
+  return null;
+}
+
+/**
+ * One canonical shape for every stored question. AI output (and older app
+ * builds) can hand us "multiple_choice", options as a JSON string, or an answer
+ * that is not one of its own options — any of which leaves the quiz screen with
+ * no answer controls at all. Repairing here means existing rows render without
+ * regenerating anything.
+ */
+function normalizeQuizQuestion(row: Record<string, unknown>): LocalQuizQuestion | null {
+  const prompt = String(row.prompt ?? "").trim();
+  if (!prompt) return null;
+
+  let options = readQuizOptions(row.options);
+  let answer = String(row.answer ?? "").trim();
+  let type = canonicalType(row.type, options);
+
+  if (type === "true_false") {
+    const value = canonicalBoolean(answer);
+    if (value) {
+      answer = value;
+      options = ["True", "False"];
+    } else {
+      type = options && options.length >= 2 ? "mcq" : "short_answer";
+    }
+  }
+
+  if (type === "mcq") {
+    const choices = options ?? [];
+    const match = choices.find((option) => sameText(option, answer));
+    if (choices.length < 2 || !match) {
+      // Choices that cannot contain the answer are worse than a typed answer.
+      type = "short_answer";
+      options = null;
+    } else {
+      answer = match;
+    }
+  }
+
+  if (type !== "mcq") options = null;
+
+  return {
+    id: String(row.id),
+    quizId: String(row.quiz_id ?? row.quizId ?? ""),
+    ordinal: Number(row.ordinal ?? 0),
+    type,
+    prompt,
+    options,
+    answer,
+    explanation: String(row.explanation ?? ""),
+  };
+}
+
+function hydrateQuiz(
+  quizRow: Record<string, unknown>,
+  questionRows: Record<string, unknown>[],
+): LocalQuiz {
+  const questions = questionRows
+    .map(normalizeQuizQuestion)
+    .filter((question): question is LocalQuizQuestion => question !== null);
+  return {
+    id: String(quizRow.id),
+    noteId: String(quizRow.note_id ?? quizRow.noteId ?? ""),
+    title: String(quizRow.title ?? ""),
+    questions,
+  };
+}
+
+async function quizQuestions(db: SQLiteDatabase, quizId: string) {
+  return db.getAllAsync<Record<string, unknown>>(
+    "SELECT * FROM quiz_questions WHERE quiz_id = ? ORDER BY ordinal ASC",
+    quizId,
+  );
+}
+
+/** One quiz by its own id — the /quiz/[id] route param is a quiz, not a note. */
+export async function getQuiz(
+  db: SQLiteDatabase,
+  quizId: string,
+): Promise<LocalQuiz | null> {
+  const row = await db.getFirstAsync<Record<string, unknown>>(
+    "SELECT * FROM quizzes WHERE id = ?",
+    quizId,
+  );
+  if (!row) return null;
+  return hydrateQuiz(row, await quizQuestions(db, quizId));
+}
+
 export async function listQuizzes(db: SQLiteDatabase, noteId: string) {
+  // Newest first: a regenerated study set must win over the quiz it replaced.
   const quizRows = await db.getAllAsync<Record<string, unknown>>(
-    "SELECT * FROM quizzes WHERE note_id = ? ORDER BY created_at ASC",
+    "SELECT * FROM quizzes WHERE note_id = ? ORDER BY created_at DESC",
     noteId,
   );
   const quizzes: LocalQuiz[] = [];
   for (const quiz of quizRows) {
-    const id = String(quiz.id);
-    const questions = (
-      await db.getAllAsync<Record<string, unknown>>(
-        "SELECT * FROM quiz_questions WHERE quiz_id = ? ORDER BY ordinal ASC",
-        id,
-      )
-    ).map(
-      (row): LocalQuizQuestion => ({
-        id: String(row.id),
-        quizId: String(row.quiz_id),
-        type: row.type as LocalQuizQuestion["type"],
-        prompt: String(row.prompt),
-        options: row.options ? (JSON.parse(String(row.options)) as string[]) : null,
-        answer: String(row.answer),
-        explanation: String(row.explanation ?? ""),
-      }),
-    );
-    quizzes.push({
-      id,
-      noteId: String(quiz.note_id),
-      title: String(quiz.title ?? ""),
-      questions,
-    });
+    quizzes.push(hydrateQuiz(quiz, await quizQuestions(db, String(quiz.id))));
   }
   return quizzes;
 }
@@ -1498,7 +1642,11 @@ export async function listNotesMissingStudySet(
      WHERE n.note_kind != 'reference'
        AND n.ai_state = 'ready'
        AND NOT EXISTS (SELECT 1 FROM flashcards f WHERE f.note_id = n.id)
-       AND NOT EXISTS (SELECT 1 FROM quizzes q WHERE q.note_id = n.id)
+       AND NOT EXISTS (
+         SELECT 1 FROM quizzes q
+         JOIN quiz_questions qq ON qq.quiz_id = q.id
+         WHERE q.note_id = n.id
+       )
      ORDER BY n.updated_at DESC
      LIMIT ?`,
     limit,

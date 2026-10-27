@@ -128,7 +128,16 @@ async function flushAttempts(deps: DrainDeps, token: string) {
         total: attempt.total,
         startedAt: attempt.startedAt,
         finishedAt: attempt.finishedAt,
-        details: attempt.details,
+        // Older builds stored the quiz screen's richer detail shape, where the
+        // student's answer lived in `userAnswer`; the marker reads `answer`.
+        details: attempt.details.map((entry) => {
+          const legacy = entry as { userAnswer?: string };
+          return {
+            questionId: entry.questionId,
+            answer: entry.answer ?? legacy.userAnswer ?? undefined,
+            verdict: entry.verdict,
+          };
+        }),
       });
       if (response.attempt.state === "pending_marking") continue;
       await updateAttemptResult(deps.db, {

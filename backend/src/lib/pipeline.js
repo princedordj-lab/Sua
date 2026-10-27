@@ -431,10 +431,17 @@ function countCorrect(details) {
 }
 
 async function settleMarking(job, attemptId, details, correct) {
+  // Whatever the marker never saw (a blank typed answer, a question it skipped)
+  // still has to settle as wrong, or the app shows it as "still marking".
+  const settled = details.map((entry) =>
+    entry && (entry.verdict === undefined || entry.verdict === null)
+      ? { ...entry, verdict: false, partial: false, comment: entry.comment ?? "" }
+      : entry,
+  );
   await withUser(job.user.clerkId, (tx) =>
     tx.quizAttempt.update({
       where: { id: attemptId },
-      data: { state: "marked", details, correct },
+      data: { state: "marked", details: settled, correct },
     }),
   );
   await finishMarkingJob(job);

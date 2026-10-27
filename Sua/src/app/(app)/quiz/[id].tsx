@@ -26,7 +26,7 @@ import {
   newId,
   recordQuizAttempt,
   listQuizAttempts,
-  listQuizzes,
+  getQuiz,
   upsertLocalCard,
   updateAttemptResult,
   type LocalQuiz,
@@ -48,12 +48,45 @@ type QuizDetail = {
   comment: string;
 };
 
+/** Case/whitespace-insensitive answer match; AI text is rarely byte-identical. */
+function sameAnswer(a: string | null | undefined, b: string) {
+  return (a ?? "").trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/**
+ * The server persists only {questionId, answer, verdict, partial, comment}, so
+ * merging keeps the prompts and correct answers the result screen renders.
+ */
+function mergeMarkedDetails(local: QuizDetail[], marked: unknown[]): QuizDetail[] {
+  const byQuestion = new Map<string, Record<string, unknown>>();
+  for (const entry of marked) {
+    const row = entry as Record<string, unknown> | null;
+    const questionId = String(row?.questionId ?? "");
+    if (questionId) byQuestion.set(questionId, row as Record<string, unknown>);
+  }
+  if (!byQuestion.size) return local;
+  return local.map((entry) => {
+    const row = byQuestion.get(entry.questionId);
+    if (!row) return entry;
+    return {
+      ...entry,
+      userAnswer:
+        typeof row.answer === "string" && row.answer ? row.answer : entry.userAnswer,
+      verdict:
+        row.verdict === true ? true : row.verdict === false ? false : entry.verdict,
+      partial: row.partial === true,
+      comment: typeof row.comment === "string" ? row.comment : entry.comment,
+    };
+  });
+}
+
 export default function Quiz() {
   const pv = usePalette();
   const { id } = useLocalSearchParams<{ id: string }>();
   const db = useSQLiteContext();
   const { getAuthToken } = useApp();
   const [quiz, setQuiz] = useState<LocalQuiz | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [phase, setPhase] = useState<"loading" | "intro" | "playing" | "marking" | "result">(
     "loading",
   );
@@ -61,13 +94,23 @@ export default function Quiz() {
   const [index, setIndex] = useState(0);
   const [picked, setPicked] = useState<string | null>(null);
   const [typed, setTyped] = useState("");
-  const [attemptId, setAttemptId] = useState<string | null>(null);
   const [attemptError, setAttemptError] = useState<string | null>(null);
+  const detailsRef = useRef<QuizDetail[]>([]);
   const poller = useRef<ReturnType<typeof setInterval> | null>(null);
+  // A double tap on "See results" must not record two attempts.
+  const finishing = useRef(false);
 
+  // Grading reads the mirror, not the render value: state writes are async, so
+  // the last answer of a run would otherwise be graded against stale details.
+  const applyDetails = useCallback((next: QuizDetail[]) => {
+    detailsRef.current = next;
+    setDetails(next);
+  }, []);
+
+  // The route param is a quiz id; listQuizzes() is note-scoped and always
+  // missed, which is why this screen used to say "Quiz not found on this device".
   const loadQuiz = useCallback(async () => {
-    const quizzes = await listQuizzes(db, String(id));
-    return quizzes.find((item) => item.id === String(id)) ?? null;
+    return getQuiz(db, String(id));
   }, [db, id]);
 
   useFocusEffect(
@@ -75,21 +118,32 @@ export default function Quiz() {
       void (async () => {
         const stored = await loadQuiz();
         setQuiz(stored);
-        setDetails([]);
+        applyDetails([]);
         setPhase(stored ? "intro" : "loading");
+        setLoaded(true);
       })();
       return () => {
         if (poller.current) clearInterval(poller.current);
         poller.current = null;
       };
-    }, [loadQuiz]),
+    }, [applyDetails, loadQuiz]),
   );
 
   if (!quiz) {
     return (
       <SafeAreaView className="flex-1 bg-cream">
-        <View className="flex-1 items-center justify-center">
-          <Text className="text-body text-ink-soft">Quiz not found on this device.</Text>
+        <View className="flex-1 items-center justify-center px-8">
+          {loaded ? (
+            <Text className="text-center text-body text-ink-soft">
+              Quiz not found on this device. Open the note and make a study set
+              to get one.
+            </Text>
+          ) : (
+            <>
+              <Loader2 size={24} color={colors.brand.DEFAULT} />
+              <Text className="mt-3 text-small text-ink-soft">Opening your quiz…</Text>
+            </>
+          )}
         </View>
       </SafeAreaView>
     );
@@ -112,76 +166,134 @@ export default function Quiz() {
       partial: false,
       comment: "",
     }));
-    setDetails(fresh);
+    applyDetails(fresh);
     setPicked(null);
     setTyped("");
     setIndex(0);
     setAttemptError(null);
+    finishing.current = false;
     setPhase("playing");
   }
 
-  function finish(graded: QuizDetail[], markState: "marked" | "pending_marking") {
+  /**
+   * Persists the attempt and returns the id it was stored under, so the caller
+   * submits and polls the *same* row (reading it from state here would see the
+   * previous render and update nothing). It resolves only after the row exists,
+   * otherwise the poll could update an attempt that was never inserted.
+   */
+  async function finish(
+    graded: QuizDetail[],
+    markState: "marked" | "pending_marking",
+  ): Promise<{ id: string; startedAt: string; finishedAt: string }> {
     const localId = newId();
-    setAttemptId(localId);
-    void (async () => {
-      const finishedAt = new Date().toISOString();
-      const correct = graded.filter((entry) => entry.verdict === true).length;
-      try {
-        await recordQuizAttempt(db, {
-          id: localId,
-          quizId: current.id,
-          noteId: current.noteId,
-          startedAt: new Date(Date.now() - 60_000).toISOString(),
-          finishedAt,
-          correct,
-          total: graded.length,
-          state: markState,
-          details: graded as unknown as LocalQuizAttempt["details"],
-          error: null,
-        });
-      } catch {
-        // Persisting the attempt is best-effort; grading still shows.
-      }
-    })();
-    setDetails(graded);
+    const endedAt = new Date();
+    const startedAt = new Date(endedAt.getTime() - 60_000);
+    applyDetails(graded);
     setPhase(markState === "marked" ? "result" : "marking");
+    try {
+      await recordQuizAttempt(db, {
+        id: localId,
+        quizId: current.id,
+        noteId: current.noteId,
+        startedAt: startedAt.toISOString(),
+        finishedAt: endedAt.toISOString(),
+        correct: graded.filter((entry) => entry.verdict === true).length,
+        total: graded.length,
+        state: markState,
+        // Stored in the server's shape: this row is what the offline flush
+        // replays, and the marker reads `answer`, not `userAnswer`.
+        details: graded.map((entry) => ({
+          questionId: entry.questionId,
+          answer: entry.userAnswer || undefined,
+          verdict: entry.verdict ?? undefined,
+          partial: entry.partial,
+          comment: entry.comment || undefined,
+        })),
+        error: null,
+      });
+    } catch {
+      // Persisting the attempt is best-effort; grading still shows.
+    }
+    return {
+      id: localId,
+      startedAt: startedAt.toISOString(),
+      finishedAt: endedAt.toISOString(),
+    };
   }
 
-  function submitForMarking() {
-    const grade = details;
-    finish(grade, "pending_marking");
-    void (async () => {
-      const token = await getAuthToken();
-      const net = await NetInfo.fetch();
-      const pollId = attemptId ?? newId();
-      if (!net.isConnected || !token) {
-        setAttemptError(
-          "Sua will mark this as soon as you're back online. Check it later on this screen.",
-        );
+  /** Settles the screen from a server attempt that is already final. */
+  async function applySettledAttempt(
+    id: string,
+    attempt: {
+      state: string;
+      correct?: number;
+      details?: unknown[] | null;
+      error?: string | null;
+    },
+    local: QuizDetail[],
+  ) {
+    const marked = Array.isArray(attempt.details) ? attempt.details : [];
+    const merged = mergeMarkedDetails(local, marked);
+    await updateAttemptResult(db, {
+      id,
+      state: attempt.state as LocalQuizAttempt["state"],
+      correct: attempt.correct ?? 0,
+      details: marked as LocalQuizAttempt["details"],
+      error: attempt.error ?? null,
+    }).catch(() => {});
+    applyDetails(merged);
+    if (attempt.state !== "marked") {
+      setAttemptError(
+        attempt.error || "Marking failed. Try submitting again when online.",
+      );
+    }
+    setPhase("result");
+  }
+
+  async function submitForMarking(
+    grade: QuizDetail[],
+    attempt: { id: string; startedAt: string; finishedAt: string },
+  ) {
+    const token = await getAuthToken();
+    const net = await NetInfo.fetch();
+    if (!net.isConnected || !token) {
+      setAttemptError(
+        "Sua will mark this as soon as you're back online. Check it later on this screen.",
+      );
+      return;
+    }
+    try {
+      const response = await studyApi.submitAttempt(token, {
+        id: attempt.id,
+        quizId: current.id,
+        total: grade.length,
+        startedAt: attempt.startedAt,
+        finishedAt: attempt.finishedAt,
+        details: grade.map((entry) => ({
+          questionId: entry.questionId,
+          answer: entry.userAnswer || undefined,
+          verdict: entry.verdict,
+        })),
+      });
+      // Nothing to mark server-side (e.g. a legacy question type it treats as
+      // tappable): settle here instead of polling forever.
+      if (response.attempt.state !== "pending_marking") {
+        await applySettledAttempt(attempt.id, response.attempt, grade);
         return;
       }
-      try {
-        await studyApi.submitAttempt(token, {
-          id: pollId,
-          quizId: current.id,
-          total: grade.length,
-          startedAt: new Date(Date.now() - 60_000).toISOString(),
-          finishedAt: new Date().toISOString(),
-          details: grade.map((entry) => ({
-            questionId: entry.questionId,
-            answer: entry.userAnswer || undefined,
-            verdict: entry.verdict,
-          })),
-        });
-        startPolling(pollId);
-      } catch {
-        setAttemptError("Couldn't reach the marker. It will retry automatically online.");
-      }
-    })();
+      startPolling(attempt.id);
+    } catch {
+      setAttemptError("Couldn't reach the marker. It will retry automatically online.");
+    }
   }
 
   function startPolling(pollId: string) {
     if (poller.current) clearInterval(poller.current);
+    const stop = (message?: string) => {
+      if (poller.current) clearInterval(poller.current);
+      poller.current = null;
+      if (message) setAttemptError(message);
+    };
     let tries = 0;
     poller.current = setInterval(() => {
       tries += 1;
@@ -191,31 +303,20 @@ export default function Quiz() {
         try {
           const attempt = await studyApi.getAttempt(token, pollId);
           if (attempt.state === "marked" || attempt.state === "marking_failed") {
-            if (poller.current) clearInterval(poller.current);
-            poller.current = null;
-            await updateAttemptResult(db, {
-              id: pollId,
-              state: attempt.state,
-              correct: attempt.correct ?? 0,
-              details: attempt.details ?? [],
-              error: attempt.error ?? null,
-            });
-            if (attempt.state === "marked" && Array.isArray(attempt.details)) {
-              setDetails(attempt.details as QuizDetail[]);
-            } else {
-              setAttemptError(
-                attempt.error || "Marking failed. Try submitting again when online.",
-              );
-            }
-            setPhase("result");
+            stop();
+            await applySettledAttempt(pollId, attempt, detailsRef.current);
           } else if (tries > 60) {
-            if (poller.current) clearInterval(poller.current);
-            poller.current = null;
+            // Don't leave the student on a spinner: the row is held locally
+            // and the next progress flush picks the score up.
+            stop(
+              "Still marking. Your score will appear in Past attempts once it's ready.",
+            );
           }
         } catch {
-          if (tries > 60 && poller.current) {
-            clearInterval(poller.current);
-            poller.current = null;
+          if (tries > 60) {
+            stop(
+              "Still marking. Your score will appear in Past attempts once it's ready.",
+            );
           }
         }
       })();
@@ -225,9 +326,9 @@ export default function Quiz() {
   function pickOption(option: string) {
     if (picked !== null) return;
     setPicked(option);
-    const correct = option === question.answer;
-    setDetails((prev) =>
-      prev.map((entry, position) =>
+    const correct = sameAnswer(option, question.answer);
+    applyDetails(
+      detailsRef.current.map((entry, position) =>
         position === index
           ? { ...entry, userAnswer: option, verdict: correct }
           : entry,
@@ -235,31 +336,43 @@ export default function Quiz() {
     );
   }
 
-  function nextQuestion() {
-    if (index + 1 >= questions.length) {
-      const grade = details;
-      const hasShort = grade.some(
-        (entry) => entry.type === "short_answer" && entry.verdict === null,
-      );
-      if (hasShort) {
-        void submitForMarking();
-      } else {
-        finish(grade, "marked");
-      }
-      return;
-    }
-    setIndex(index + 1);
-    setPicked(null);
-    setTyped("");
+  /** True for a question the student answers by typing rather than tapping. */
+  function isTypedQuestion(entry: { type: LocalQuizQuestion["type"] }) {
+    return entry.type !== "mcq" && entry.type !== "true_false";
   }
 
-  function shortContinue() {
-    setDetails((prev) =>
-      prev.map((entry, position) =>
-        position === index ? { ...entry, userAnswer: typed.trim() } : entry,
-      ),
+  function advance() {
+    const answered = detailsRef.current.map((entry, position) =>
+      position === index && isTypedQuestion(entry)
+        ? { ...entry, userAnswer: typed.trim() }
+        : entry,
     );
-    nextQuestion();
+
+    if (index + 1 < questions.length) {
+      applyDetails(answered);
+      setIndex(index + 1);
+      setPicked(null);
+      setTyped("");
+      return;
+    }
+
+    // Last question: a tap question left unanswered is simply wrong, while a
+    // typed one still needs the server marker.
+    const graded = answered.map((entry) =>
+      entry.verdict === null && !isTypedQuestion(entry)
+        ? { ...entry, verdict: false }
+        : entry,
+    );
+    const needsMarking = graded.some((entry) => entry.verdict === null);
+    if (finishing.current) return;
+    finishing.current = true;
+    void (async () => {
+      const attempt = await finish(
+        graded,
+        needsMarking ? "pending_marking" : "marked",
+      );
+      if (needsMarking) await submitForMarking(graded, attempt);
+    })();
   }
 
   async function makeCardsFromMistakes() {
@@ -308,7 +421,7 @@ export default function Quiz() {
     return <Loader2 size={18} color={pv.ink.faint} />;
   }
 
-  if (phase === "intro" || phase === "loading") {
+  if (phase === "intro" || phase === "loading" || !question) {
     return (
       <SafeAreaView className="flex-1 bg-cream">
         <View className="flex-row items-center px-5 py-2">
@@ -324,20 +437,31 @@ export default function Quiz() {
         </View>
         <ScrollView contentContainerClassName="px-5 pb-10">
           <Text className="mt-2 text-3xl font-sans-black text-ink">{current.title}</Text>
-          <Text className="mt-2 text-body leading-6 text-ink-soft">
-            {questions.length} question{questions.length === 1 ? "" : "s"}
-            {shortCount ? ` · ${shortCount} short answer${shortCount === 1 ? "" : "s"} (marked online)` : ""}
-          </Text>
-          <Pressable
-            onPress={start}
-            accessibilityRole="button"
-            accessibilityLabel="Start the quiz"
-            className="mt-8 min-h-12 items-center justify-center rounded-btn bg-brand-strong active:opacity-80"
-          >
-            <Text className="text-label font-sans-extrabold text-ink-inverse">
-              Start quiz
+          {questions.length ? (
+            <>
+              <Text className="mt-2 text-body leading-6 text-ink-soft">
+                {questions.length} question{questions.length === 1 ? "" : "s"}
+                {shortCount
+                  ? ` · ${shortCount} short answer${shortCount === 1 ? "" : "s"} (marked online)`
+                  : ""}
+              </Text>
+              <Pressable
+                onPress={start}
+                accessibilityRole="button"
+                accessibilityLabel="Start the quiz"
+                className="mt-8 min-h-12 items-center justify-center rounded-btn bg-brand-strong active:opacity-80"
+              >
+                <Text className="text-label font-sans-extrabold text-ink-inverse">
+                  Start quiz
+                </Text>
+              </Pressable>
+            </>
+          ) : (
+            <Text className="mt-2 text-body leading-6 text-ink-soft">
+              This quiz has no questions yet. Regenerate the study set from the
+              note to get one.
             </Text>
-          </Pressable>
+          )}
           <PastAttempts quizId={current.id} />
         </ScrollView>
       </SafeAreaView>
@@ -347,6 +471,9 @@ export default function Quiz() {
   if (phase === "playing") {
     const optionList = question.options ?? [];
     const revealed = picked !== null;
+    const typedQuestion = isTypedQuestion(question);
+    const isLast = index + 1 >= questions.length;
+    const correctPick = picked !== null && sameAnswer(picked, question.answer);
     return (
       <SafeAreaView className="flex-1 bg-cream">
         <View className="flex-row items-center justify-between px-5 py-2">
@@ -373,7 +500,7 @@ export default function Quiz() {
             {question.prompt}
           </Text>
 
-          {question.type === "short_answer" ? (
+          {typedQuestion ? (
             <>
               <TextInput
                 value={typed}
@@ -392,15 +519,15 @@ export default function Quiz() {
           {question.type === "mcq"
             ? optionList.map((option, position) => (
                 <Pressable
-                  key={option}
+                  key={`${position}-${option}`}
                   onPress={() => pickOption(option)}
                   accessibilityRole="button"
                   accessibilityLabel={`Answer option ${String.fromCharCode(65 + position)}`}
                   className={
                     revealed
-                      ? option === question.answer
+                      ? sameAnswer(option, question.answer)
                         ? "mt-3 min-h-12 flex-row items-center rounded-btn border-2 border-success bg-success-soft px-4 active:opacity-80"
-                        : option === picked
+                        : sameAnswer(option, picked)
                           ? "mt-3 min-h-12 flex-row items-center rounded-btn border-2 border-danger bg-danger-soft px-4 active:opacity-80"
                           : "mt-3 min-h-12 items-center justify-center rounded-btn border border-line bg-surface px-4 active:opacity-80"
                       : "mt-3 min-h-12 items-center justify-center rounded-btn border border-line bg-surface px-4 active:opacity-80"
@@ -420,9 +547,9 @@ export default function Quiz() {
                   accessibilityLabel={`Answer ${option}`}
                   className={
                     revealed
-                      ? option === question.answer
+                      ? sameAnswer(option, question.answer)
                         ? "min-h-12 flex-1 items-center justify-center rounded-btn border-2 border-success bg-success-soft px-4 active:opacity-80"
-                        : option === picked
+                        : sameAnswer(option, picked)
                           ? "min-h-12 flex-1 items-center justify-center rounded-btn border-2 border-danger bg-danger-soft px-4 active:opacity-80"
                           : "min-h-12 flex-1 items-center justify-center rounded-btn border border-line bg-surface px-4 active:opacity-80"
                       : "min-h-12 flex-1 items-center justify-center rounded-btn border border-line bg-surface px-4 active:opacity-80"
@@ -437,7 +564,7 @@ export default function Quiz() {
           {revealed ? (
             <View className="mt-4 rounded-card bg-surface-2 p-card shadow-card">
               <Text className="text-caption font-sans-extrabold text-ink-soft">
-                {picked === question.answer ? "CORRECT" : "NOT QUITE"}
+                {correctPick ? "CORRECT" : "NOT QUITE"}
               </Text>
               <Text className="mt-1 text-small leading-5 text-ink">
                 {question.explanation}
@@ -448,13 +575,19 @@ export default function Quiz() {
 
         <View className="px-5 pb-4">
           <Pressable
-            onPress={() => void shortContinue()}
+            onPress={advance}
             accessibilityRole="button"
-            accessibilityLabel="Continue to the next question"
+            accessibilityLabel={isLast ? "Finish the quiz" : "Continue to the next question"}
             className="min-h-12 items-center justify-center rounded-btn bg-brand-strong active:opacity-80"
           >
             <Text className="text-label font-sans-extrabold text-ink-inverse">
-              {revealed ? "Next question" : "Continue"}
+              {isLast
+                ? typedQuestion
+                  ? "Mark my quiz"
+                  : "See results"
+                : revealed
+                  ? "Next question"
+                  : "Continue"}
             </Text>
           </Pressable>
         </View>
@@ -469,8 +602,9 @@ export default function Quiz() {
           <Loader2 size={26} color={colors.brand.DEFAULT} />
           <Text className="mt-4 text-2xl font-sans-black text-ink">Marking your quiz…</Text>
           <Text className="mt-2 text-center text-body leading-6 text-ink-soft">
-            Sua&apos;s AI is reading your short answers. Keep this screen open or come
-            back later — the score lands here either way.
+            Sua&apos;s AI is reading your short answers. Keep this screen open to
+            see the score now, or check Past attempts later — it is marked either
+            way.
           </Text>
           {attemptError ? (
             <Text className="mt-3 text-center text-small text-ink-soft">

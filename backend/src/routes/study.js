@@ -394,13 +394,22 @@ studyRouter.post("/attempts", async (req, res) => {
       .filter((entry) => entry?.questionId && validQuestionIds.has(String(entry.questionId)))
       .slice(0, quiz.questions.length);
 
+    // Anything the app cannot grade by tapping needs the marker. Compare
+    // against the two tappable types rather than "short_answer", so questions
+    // stored with legacy vocabulary ("multiple_choice") are still marked.
     const needsMarking = quiz.questions.some((question) => {
-      if (question.type !== "short_answer") return false;
+      if (question.type === "mcq" || question.type === "true_false") return false;
       const entry = shaped.find((item) => String(item.questionId) === question.id);
       return entry ? entry.verdict === undefined || entry.verdict === null : true;
     });
     const correct = shaped.filter((entry) => entry.verdict === true).length;
 
+    // Resubmitting a held attempt must never undo a settled result: the app
+    // retries pending rows on every flush, and the marker may already be done.
+    const existing = await tx.quizAttempt.findUnique({
+      where: { id: String(attempt.id) },
+      select: { state: true },
+    });
     const row = await tx.quizAttempt.upsert({
       where: { id: String(attempt.id) },
       create: {
@@ -414,12 +423,17 @@ studyRouter.post("/attempts", async (req, res) => {
         state: needsMarking ? "pending_marking" : "marked",
         details: shaped.length ? shaped : undefined,
       },
-      update: needsMarking ? { state: "pending_marking", correct, details: shaped.length ? shaped : undefined } : {},
+      update:
+        needsMarking && existing?.state !== "marked"
+          ? { state: "pending_marking", correct, details: shaped.length ? shaped : undefined }
+          : {},
     });
     return {
       attempt: row,
       noteId: quiz.noteId,
-      needsMarking,
+      // A settled attempt needs no new marking job, even though the payload
+      // still carries unmarked short answers.
+      needsMarking: needsMarking && existing?.state !== "marked",
       attemptId: String(attempt.id),
     };
   });
