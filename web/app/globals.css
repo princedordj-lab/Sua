@@ -110,7 +110,7 @@
 @layer base {
   * {
     box-sizing: border-box;
-    overflow-wrap: break-word;
+    overflow-wrap: anywhere;
   }
 
   html {

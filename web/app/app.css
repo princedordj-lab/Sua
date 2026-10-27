@@ -184,6 +184,10 @@
   padding: 36px 40px 96px;
 }
 
+.app-content > * {
+  min-width: 0;
+}
+
 .mobile-topbar {
   display: none;
 }
@@ -1206,6 +1210,7 @@
 
 .home-page {
   display: grid;
+  min-width: 0;
   gap: 26px;
 }
 
@@ -1268,6 +1273,7 @@
 .review-hero-copy {
   position: relative;
   z-index: 1;
+  min-width: 0;
   max-width: 610px;
 }
 
@@ -1365,6 +1371,7 @@
 
 .stat-card {
   display: grid;
+  min-width: 0;
   gap: 3px;
   padding: 16px 18px;
 }
@@ -1388,6 +1395,7 @@
 .stat-note {
   color: var(--ink-soft);
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .home-section {
@@ -1403,6 +1411,7 @@
 
 .action-tile {
   display: grid;
+  min-width: 0;
   justify-items: start;
   gap: 3px;
   padding: 18px;
@@ -3187,6 +3196,7 @@
 
 .editor-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 2px;
   padding: 3px;
@@ -6717,7 +6727,6 @@
   .deck-page {
     width: 100%;
     margin-inline: 0;
-    padding-inline: 0 18px;
   }
 
   .deck-summary {
@@ -6811,6 +6820,13 @@
   }
 }
 
+@media (max-width: 760px) {
+  .editor-toolbar button {
+    min-width: 48px;
+    min-height: 48px;
+  }
+}
+
 @media (max-width: 339px) {
   .course-detail-actions {
     flex-direction: column;
@@ -6823,9 +6839,6 @@
 }
 
 @media (max-width: 560px) {
-  .review-hero {
-    overflow: visible;
-  }
   .deck-card {
     flex-wrap: wrap;
   }
