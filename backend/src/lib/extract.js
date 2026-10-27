@@ -199,8 +199,12 @@ export async function extractDocumentIncremental(input, format, kind = "document
     if (!buffer || buffer.length === 0) return null;
 
     if (normalizedFormat !== "pdf") {
+      // Non-PDF formats parse in one pass; time it so the timing log stays
+      // honest for DOCX/PPTX/TXT instead of reporting parseMs=0.
+      const parseStartedAt = Date.now();
       const legacy = await extractDocument(buffer, normalizedFormat, kind);
       if (!legacy) return null;
+      result.timings.parseMs = Date.now() - parseStartedAt;
       Object.assign(result, {
         segments: legacy.segments.map((segment) => ({
           ...segment,

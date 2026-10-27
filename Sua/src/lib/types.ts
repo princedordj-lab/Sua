@@ -169,7 +169,7 @@ export type ServerAsset = {
   createdAt: string;
 };
 
-export type ExtractState = "pending" | "running" | "done" | "partial" | "failed";
+export type ExtractState = import("./notes").ExtractState;
 
 export type SignedUpload = ServerAsset & {
   uploadUrl: string;
