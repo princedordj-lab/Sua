@@ -737,29 +737,86 @@ async function syncPendingNotesNow(db: SQLiteDatabase, token: string) {
   return batch.length;
 }
 
+/**
+ * An unsent edit can be older than what the server already holds (the pipeline
+ * wrote the note body while this device was offline). The server rejects those
+ * as stale, so the queue row only keeps the note stuck on "Waiting to sync" and
+ * — before pulls learned to merge — hid every later server copy. Dropping it is
+ * what lets the badge clear once the server copy has been adopted.
+ */
+async function dropSupersededNoteUpsert(
+  db: SQLiteDatabase,
+  noteId: string,
+  serverUpdatedAt: string,
+) {
+  const row = await db.getFirstAsync<{ id: number; payload: string }>(
+    "SELECT id, payload FROM sync_queue WHERE entity = 'note' AND entity_id = ? AND operation = 'upsert' LIMIT 1",
+    noteId,
+  );
+  if (!row) return;
+  let queuedUpdatedAt: string | null = null;
+  try {
+    const payload = JSON.parse(row.payload) as { updatedAt?: string };
+    queuedUpdatedAt = payload?.updatedAt ?? null;
+  } catch {
+    return;
+  }
+  const queued = queuedUpdatedAt ? Date.parse(queuedUpdatedAt) : Number.NaN;
+  const server = Date.parse(serverUpdatedAt);
+  if (!Number.isFinite(queued) || !Number.isFinite(server) || queued >= server) {
+    return;
+  }
+  await db.runAsync("DELETE FROM sync_queue WHERE id = ?", row.id);
+}
+
 // Never clobber local rows that still have queued (or newer) changes — a pull
-// delivering a stale server copy must not lose an offline edit.
+// delivering a stale server copy must not lose an offline edit. A queued row
+// only owns what the device writes (title, body); the pipeline's outputs are
+// adopted either way, so an unsent edit can no longer hide an AI-written note.
 export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
   // A deleted note cannot be re-created by a pull that was already in flight.
   if (await isNoteTombstoned(db, note.id)) return;
-  const queued = await db.getFirstAsync<{ id: number }>(
-    "SELECT id FROM sync_queue WHERE entity = 'note' AND entity_id = ?",
-    note.id,
-  );
-  if (queued) return;
   const local = await getNote(db, note.id);
-  if (local) {
-    if (local.syncState === "pending") return;
-    if (local.updatedAt > note.updatedAt) return;
+  const serverNewer = !local || note.updatedAt >= local.updatedAt;
+
+  // The device holds a newer edit: keep its text, still take the pipeline's
+  // outputs (this device never writes them itself). An empty local body is not
+  // an edit worth protecting — the server already refuses to let an empty push
+  // wipe stored text, so the same rule keeps the note readable here even when
+  // this device's own push is stuck.
+  if (local && !serverNewer) {
+    const adoptBody = !local.body.trim() && Boolean(note.body.trim());
+    await db.runAsync(
+      `UPDATE notes SET body = ?, transcript = COALESCE(?, transcript),
+         summary = COALESCE(?, summary), ai_state = ?,
+         note_kind = COALESCE(?, note_kind)
+       WHERE id = ?`,
+      adoptBody ? note.body : local.body,
+      note.transcript ?? null,
+      note.summary ?? null,
+      note.aiState ?? local.aiState,
+      note.noteKind ?? null,
+      note.id,
+    );
+    return;
   }
+
+  if (local) {
+    // Strictly newer server copy: an unsent upsert older than it is dead
+    // weight — the server would answer "conflict" for it anyway.
+    await dropSupersededNoteUpsert(db, note.id, note.updatedAt);
+  }
+  // Anything left in the queue is a real unsent change; keep the badge honest.
+  const stillPending = await isNotePendingSync(db, note.id);
   await db.runAsync(
     `INSERT INTO notes (id, course_id, title, body, source_type, transcript, ai_state, summary, note_kind, created_at, updated_at, sync_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET course_id = excluded.course_id,
        title = excluded.title, body = excluded.body, source_type = excluded.source_type,
+       transcript = excluded.transcript,
        ai_state = excluded.ai_state, summary = COALESCE(excluded.summary, notes.summary),
        note_kind = excluded.note_kind,
-       updated_at = excluded.updated_at, sync_state = 'synced'`,
+       updated_at = excluded.updated_at, sync_state = excluded.sync_state`,
     note.id,
     note.courseId,
     note.title,
@@ -772,6 +829,7 @@ export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
     note.noteKind ?? local?.noteKind ?? "note",
     note.createdAt,
     note.updatedAt,
+    stillPending ? "pending" : "synced",
   );
 }
 

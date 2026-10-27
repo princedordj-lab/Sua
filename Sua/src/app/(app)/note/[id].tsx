@@ -47,6 +47,7 @@ import {
   enqueueGeneration,
   getLastGeneration,
   getNote,
+  isNotePendingSync,
   listFlashcards,
   listQuizzes,
   pullCourseNotes,
@@ -87,6 +88,9 @@ export default function NoteView() {
   const { courses, getAuthToken } = useApp();
   const [note, setNote] = useState<Note | null>(null);
   const [missing, setMissing] = useState(false);
+  // Whether this device still holds an unsent change. Read from the queue (not
+  // the stored flag) so a lost queue row cannot leave the badge stuck forever.
+  const [syncPending, setSyncPending] = useState(false);
   const [pendingUploads, setPendingUploads] = useState(0);
   const [flashcards, setFlashcards] = useState<LocalFlashcard[]>([]);
   const [quizzes, setQuizzes] = useState<LocalQuiz[]>([]);
@@ -135,19 +139,22 @@ export default function NoteView() {
         setLastGeneration(null);
         setJobMeta(null);
         setJobError(null);
+        setSyncPending(false);
         return;
       }
-      const [pending, cards, quizRows, last] = await Promise.all([
+      const [pending, cards, quizRows, last, queued] = await Promise.all([
         countPendingUploads(db, row.id),
         listFlashcards(db, row.id).catch(() => [] as LocalFlashcard[]),
         listQuizzes(db, row.id).catch(() => [] as LocalQuiz[]),
         getLastGeneration(db, row.id).catch(() => null),
+        isNotePendingSync(db, row.id).catch(() => false),
       ]);
       if (!screenActiveRef.current || deletedRef.current) return;
       setPendingUploads(pending);
       setFlashcards(cards);
       setQuizzes(quizRows);
       setLastGeneration(last);
+      setSyncPending(queued);
     } catch {
       setMissing(true);
     }
@@ -161,6 +168,38 @@ export default function NoteView() {
         screenActiveRef.current = false;
       };
     }, [load]),
+  );
+
+  // Opening a note is the last chance to notice work the server finished while
+  // this device was closed: the stage poll below only runs while a generation
+  // looks active locally, so a missed finish leaves the body blank until a
+  // manual pull. One course pull per visit heals this note (and its siblings).
+  // Throttled rather than once-per-mount: auth callbacks can re-run the focus
+  // effect, and coming back later should still pick up new server work.
+  const healedRef = useRef<{ id: string | null; at: number }>({ id: null, at: 0 });
+  useFocusEffect(
+    useCallback(() => {
+      const key = String(id);
+      const now = Date.now();
+      if (healedRef.current.id === key && now - healedRef.current.at < 20_000) {
+        return;
+      }
+      healedRef.current = { id: key, at: now };
+      let cancelled = false;
+      void (async () => {
+        const local = await getNote(db, id).catch(() => null);
+        if (!local?.courseId) return;
+        const token = await getAuthToken().catch(() => null);
+        if (!token || cancelled) return;
+        // Offline, a stale token or a server hiccup must never block the reader:
+        // the local copy is shown either way.
+        await pullCourseNotes(db, token, local.courseId).catch(() => {});
+        if (!cancelled) await load();
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }, [db, getAuthToken, id, load]),
   );
 
   // Retries reuse the destination the student originally chose; a reference
@@ -447,7 +486,7 @@ export default function NoteView() {
                 <View className="flex-1" />
               )}
               <Text className="text-caption text-ink-faint">
-                {note.syncState === "pending" ? "Waiting to sync" : "Synced"}
+                {syncPending ? "Waiting to sync" : "Synced"}
               </Text>
             </View>
 

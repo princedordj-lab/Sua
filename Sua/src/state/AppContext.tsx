@@ -266,13 +266,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // Mirror courses into SQLite so an offline cold start can still list
         // them (and therefore create notes) without the API.
         void replaceLocalCourses(db, serverCourses.map(serverCourseToCache)).catch(() => {});
+        // Pushes and reads are independent: a failing sync must not stop the
+        // note pulls that carry AI-written bodies (and a failed pull must not
+        // hold the push queue hostage).
         try {
           await syncPendingNotes(db, token);
+        } catch (error) {
+          // Surfaced in the dev console: the note list shows "Waiting to sync",
+          // so the reason the queue is stuck otherwise never leaves the device.
+          console.warn(
+            "note sync failed:",
+            error instanceof Error ? error.message : String(error),
+          );
+          if (!cancelled) requestRefresh(15_000);
+        }
+        try {
           await Promise.all(
             serverCourses.map((course) => pullCourseNotes(db, token, course.id)),
           );
         } catch {
-          // Reachable server but the sync/pull failed (transient): retry soon
+          // Reachable server but the pull failed (transient): retry soon
           // instead of waiting for the next reconnect or foreground event.
           if (!cancelled) requestRefresh(15_000);
         }

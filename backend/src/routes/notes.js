@@ -162,10 +162,16 @@ notesRouter.post("/sync", async (req, res) => {
         results.push({ id: change.id, status: "conflict", note: shapeNote(existing) });
         continue;
       }
+      // A device that has not received the AI-written body yet pushes an empty
+      // one with a fresh timestamp. Accepting it would wipe the note the student
+      // can already read, so empty incoming text never replaces stored text.
+      const incomingBody = change.body;
+      const keepStoredBody =
+        !incomingBody.trim() && Boolean((existing?.body ?? "").trim());
       const data = {
         courseId: change.courseId,
         title: change.title,
-        body: change.body,
+        body: keepStoredBody ? existing.body : incomingBody,
         sourceType: change.sourceType || "typed",
         // A reference stays a reference across edits; new notes default plain.
         noteKind: NOTE_KINDS.has(change.noteKind)
