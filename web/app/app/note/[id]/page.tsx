@@ -52,6 +52,11 @@ import {
   sourceMetaFor,
 } from "@/lib/generation";
 import { splitNotices } from "@/lib/markdown";
+import {
+  EXTRACT_FAILED_MESSAGE,
+  isReading,
+  readingLabel,
+} from "@/lib/extract";
 import type { AiState, ServerJob, ServerNote, ServerQuiz, ServerStudy } from "@/lib/types";
 
 type Tab = "notes" | "summary" | "cards" | "quiz";
@@ -99,6 +104,12 @@ export default function NoteViewPage() {
   const cards = study?.flashcards ?? [];
   const quizzes = study?.quizzes ?? [];
   const quiz = quizzes[0] ?? null;
+  // Background reading of the uploaded document (empty for typed notes).
+  const asset = note?.assets?.[0] ?? null;
+  const reading = Boolean(asset && isReading(asset.extractState));
+  const extractFailed = Boolean(
+    asset?.extractState === "failed" && !note?.body && !active,
+  );
 
   // Poll the pipeline while it works. The job record (not the note row) is the
   // source of truth for the stage; once terminal, reload note + study once.
@@ -133,6 +144,14 @@ export default function NoteViewPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, note?.id, note?.aiState]);
+
+  // The API reads an upload in the background, so progress arrives through
+  // repeated note reads rather than a job record.
+  useEffect(() => {
+    if (!reading) return;
+    const timer = setInterval(() => noteResource.reload(), 5000);
+    return () => clearInterval(timer);
+  }, [reading, noteResource]);
 
   async function generate() {
     if (!note) return;
@@ -270,6 +289,58 @@ export default function NoteViewPage() {
       </header>
 
       {actionError ? <Alert title="That didn’t work">{actionError}</Alert> : null}
+
+      {!active && asset && reading ? (
+        <Card className="ai-progress">
+          <div className="ai-progress-top">
+            <span className="ai-progress-icon">
+              <Sparkles size={20} />
+            </span>
+            <div>
+              <h2>
+                {readingLabel(
+                  asset.extractState ?? "pending",
+                  asset.extractedPages ?? 0,
+                  asset.totalPages ?? 0,
+                )}
+              </h2>
+              <p>
+                Sua reads the file in the background, then writes your notes and
+                study set. You can close this page.
+              </p>
+            </div>
+          </div>
+        </Card>
+      ) : null}
+
+      {!active && asset?.extractState === "partial" && !note?.body ? (
+        <Alert tone="warning" title="Using part of this file">
+          {readingLabel(
+            "partial",
+            asset.extractedPages ?? 0,
+            asset.totalPages ?? 0,
+          )}
+        </Alert>
+      ) : null}
+
+      {extractFailed ? (
+        <Alert
+          tone="danger"
+          title="Couldn’t read this file"
+          action={
+            <Button
+              variant="secondary"
+              size="sm"
+              busy={busy}
+              onClick={() => void generate()}
+            >
+              Try again
+            </Button>
+          }
+        >
+          {EXTRACT_FAILED_MESSAGE}
+        </Alert>
+      ) : null}
 
       {active ? (
         <Card className="ai-progress">

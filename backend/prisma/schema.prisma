@@ -122,11 +122,22 @@ model Asset {
   // none = plain upload; lecture_note / course_reference = auto AI conversion
   task         String   @default("none")
   extractedText String?
+  // Background document extraction: pending | running | done | partial | failed.
+  // `running` is exposed to clients as "extracting"; a stale running row is
+  // reclaimed by the next invocation.
+  extractState     String   @default("pending")
+  extractedPages   Int      @default(0)
+  totalPages       Int      @default(0)
+  // 1-based page the next extraction pass resumes from.
+  extractNextPage  Int      @default(1)
+  extractTruncated Boolean  @default(false)
+  extractErrorCode String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([userId])
   @@index([noteId])
+  @@index([extractState])
   @@map("assets")
 }
 

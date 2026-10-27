@@ -49,11 +49,13 @@ import {
   getNote,
   listFlashcards,
   listQuizzes,
+  noteExtractProgress,
   pullCourseNotes,
   type LastGeneration,
   type LocalFlashcard,
   type LocalQuiz,
   type Note,
+  type ExtractState,
 } from "../../../lib/notes";
 import {
   aiStageLabel,
@@ -66,6 +68,12 @@ import {
   userFacingMessage,
 } from "../../../lib/generate";
 import { splitNotices } from "../../../lib/markdown";
+import { refreshReadingUploads } from "../../../lib/uploads";
+import {
+  EXTRACT_FAILED_MESSAGE,
+  isReading,
+  readingLabel,
+} from "../../../lib/extract-copy";
 import { colors } from "../../../config/theme";
 import { usePalette } from "../../../state/appearance";
 import { useApp } from "../../../state/AppContext";
@@ -88,6 +96,14 @@ export default function NoteView() {
   const [note, setNote] = useState<Note | null>(null);
   const [missing, setMissing] = useState(false);
   const [pendingUploads, setPendingUploads] = useState(0);
+  // Server-side reading of this note's uploaded documents ("Reading your
+  // file"), tracked locally so the reader can show it before any AI job exists.
+  const [extract, setExtract] = useState<{
+    state: ExtractState;
+    extractedPages: number;
+    totalPages: number;
+    truncated: boolean;
+  } | null>(null);
   const [flashcards, setFlashcards] = useState<LocalFlashcard[]>([]);
   const [quizzes, setQuizzes] = useState<LocalQuiz[]>([]);
   const [lastGeneration, setLastGeneration] = useState<LastGeneration | null>(
@@ -130,6 +146,7 @@ export default function NoteView() {
       setMissing(!row);
       if (!row) {
         setPendingUploads(0);
+        setExtract(null);
         setFlashcards([]);
         setQuizzes([]);
         setLastGeneration(null);
@@ -137,14 +154,16 @@ export default function NoteView() {
         setJobError(null);
         return;
       }
-      const [pending, cards, quizRows, last] = await Promise.all([
+      const [pending, cards, quizRows, last, reading] = await Promise.all([
         countPendingUploads(db, row.id),
         listFlashcards(db, row.id).catch(() => [] as LocalFlashcard[]),
         listQuizzes(db, row.id).catch(() => [] as LocalQuiz[]),
         getLastGeneration(db, row.id).catch(() => null),
+        noteExtractProgress(db, row.id).catch(() => null),
       ]);
       if (!screenActiveRef.current || deletedRef.current) return;
       setPendingUploads(pending);
+      setExtract(reading);
       setFlashcards(cards);
       setQuizzes(quizRows);
       setLastGeneration(last);
@@ -162,6 +181,29 @@ export default function NoteView() {
       };
     }, [load]),
   );
+
+  // The server reads uploads after /complete answers, so poll the asset state
+  // while it is live: the copy advances and the note refreshes as soon as the
+  // generated body lands.
+  const extractActive =
+    isReading(extract?.state) || extract?.state === "partial";
+  useEffect(() => {
+    if (!extractActive) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      void (async () => {
+        const updated = await refreshReadingUploads({ db, getAuthToken }).catch(
+          () => 0,
+        );
+        if (cancelled) return;
+        if (updated > 0) void load();
+      })();
+    }, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [extractActive, db, getAuthToken, load]);
 
   // Retries reuse the destination the student originally chose; a reference
   // always regenerates as a reference. See generationKindFor().
@@ -335,6 +377,10 @@ export default function NoteView() {
     }
   };
 
+  // Reading is still in flight (or failed): the "make notes" call to action
+  // waits, because generation would have nothing to read yet.
+  const extractBlocking = Boolean(extract && extract.state !== "done");
+
   const emptyStateCopy = useMemo(() => {
     if (generationKind === "course_reference") {
       return {
@@ -473,6 +519,26 @@ export default function NoteView() {
                 pendingUploads={pendingUploads}
                 onViewUploads={() => router.push("/uploads")}
               />
+            ) : extract &&
+              (isReading(extract.state) || extract.state === "partial") ? (
+              <AiProgressCard
+                label={readingLabel(
+                  extract.state,
+                  extract.extractedPages,
+                  extract.totalPages,
+                )}
+                pendingUploads={pendingUploads}
+                onViewUploads={() => router.push("/uploads")}
+              />
+            ) : extract?.state === "failed" ? (
+              <AiFailedCard
+                title="Couldn’t read this file"
+                message={EXTRACT_FAILED_MESSAGE}
+                onRetry={() => void queueGeneration()}
+                retrying={retrying}
+                pendingUploads={pendingUploads}
+                onViewUploads={() => router.push("/uploads")}
+              />
             ) : null}
 
             {reference ? (
@@ -513,7 +579,7 @@ export default function NoteView() {
                     )}
                   </ReaderCard>
                 </>
-              ) : !aiActive && note.aiState !== "failed" ? (
+              ) : !aiActive && note.aiState !== "failed" && !extractBlocking ? (
                 <View className="mt-4">
                   <EmptyCard
                     title={emptyStateCopy.title}
@@ -699,7 +765,7 @@ export default function NoteView() {
                   )
                 ) : null}
               </>
-            ) : !aiActive && note.aiState !== "failed" ? (
+            ) : !aiActive && note.aiState !== "failed" && !extractBlocking ? (
               <View className="mt-4">
                 <EmptyCard
                   title={emptyStateCopy.title}

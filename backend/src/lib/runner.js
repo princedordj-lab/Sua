@@ -1,6 +1,7 @@
 import { prisma } from "../config/prisma.js";
 import { processJob } from "./pipeline.js";
 import { extractDocument, renderPdfPage } from "./extract.js";
+import { ensureAssetExtracted } from "./extract-runner.js";
 import { isUserFacing, USER_MESSAGES } from "../config/ai-pipeline.js";
 
 export const ALLOWED_JOB_KINDS = [
@@ -22,6 +23,8 @@ export const BACKOFF_DELAYS_SEC = [30, 120, 600];
 export function isTransient(error) {
   if (!error) return false;
   if (isUserFacing(error)) return false;
+  // The pipeline signals "still reading the upload" explicitly.
+  if (error.retryable === true) return true;
   if (error.name === "NoteDeletedError" || error.code === "P2025") return false;
 
   const msg = String(error.message ?? error).toLowerCase();
@@ -94,6 +97,7 @@ export function isTransient(error) {
  */
 export function errorCodeFor(error) {
   if (!error) return null;
+  if (error.name === "ExtractionPendingError") return "EXTRACTION_PENDING";
   if (error.name === "NoteDeletedError" || error.code === "P2025") return "NOTE_DELETED";
   if (isUserFacing(error)) return "USER_FACING";
 
@@ -368,7 +372,7 @@ async function processClaimedJob(claimed) {
   // 4. Run pipeline
   const started = Date.now();
   try {
-    await processJob(jobId, { extractDocument, renderPdfPage });
+    await processJob(jobId, { extractDocument, renderPdfPage, ensureExtracted: ensureAssetExtracted });
     console.log(`Job ${jobId} completed in ${Date.now() - started}ms`);
     // Release lock upon success
     await prisma.job.updateMany({

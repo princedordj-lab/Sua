@@ -13,6 +13,10 @@ import {
 import { validateStudyPack } from "../config/study-pack-schema.js";
 import { prisma } from "../config/prisma.js";
 
+// Material is clamped before it is sent to the model so one giant upload
+// cannot overflow the context window (AGENTS.md: 60,000 characters).
+export const MAX_NOTE_CHARS = 60_000;
+
 // Free-plan monthly caps; warn-only until Milestone 5 flips ENFORCE_CAPS on.
 export const FREE_MONTHLY_LIMITS = {
   summaries: Number(process.env.FREE_MONTHLY_SUMMARIES ?? 10),
@@ -262,7 +266,6 @@ export async function processStudySet(job, documentExtraction) {
       await persistTranscript(job, note, prepared.source.transcript);
       material = prepared.material;
     }
-    const MAX_NOTE_CHARS = 60_000;
     if (material.length > MAX_NOTE_CHARS) {
       material = material.slice(0, MAX_NOTE_CHARS);
     }

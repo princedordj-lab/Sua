@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { MAX_UPLOAD_BYTES, MAX_AUDIO_BYTES } from "../src/lib/storage.js";
-import { ALLOWED_JOB_KINDS, MIN_NOTE_CHARS, MAX_NOTE_CHARS } from "../src/worker.js";
+import { ALLOWED_JOB_KINDS, MIN_NOTE_CHARS } from "../src/lib/runner.js";
+import { MAX_NOTE_CHARS } from "../src/lib/pipeline.js";
 import { MAX_TEXT_CHARS, extractDocumentText } from "../src/lib/extract.js";
 
 console.log("=== Running Upload & Worker Invariants Test Suite ===");
@@ -21,14 +22,14 @@ console.log("=== Running Upload & Worker Invariants Test Suite ===");
 
 // 3. Verify ALLOWED_JOB_KINDS
 {
-  const expectedKinds = ["study_set", "lecture_note", "course_reference"];
-  assert.equal(ALLOWED_JOB_KINDS.length, 3);
+  const expectedKinds = ["study_set", "lecture_note", "course_reference", "quiz_marking"];
+  assert.equal(ALLOWED_JOB_KINDS.length, 4);
   for (const k of expectedKinds) {
     assert.ok(ALLOWED_JOB_KINDS.includes(k), `Missing kind: ${k}`);
   }
-  assert.ok(!ALLOWED_JOB_KINDS.includes("quiz_marking"), "quiz_marking must not be in ALLOWED_JOB_KINDS");
+  // Extraction runs from the upload worker (waitUntil), never as an AI job.
   assert.ok(!ALLOWED_JOB_KINDS.includes("document_extraction"), "document_extraction must not be in ALLOWED_JOB_KINDS");
-  console.log("✓ 3. ALLOWED_JOB_KINDS contains exclusively [study_set, lecture_note, course_reference]");
+  console.log("✓ 3. ALLOWED_JOB_KINDS is exactly [study_set, lecture_note, course_reference, quiz_marking]");
 }
 
 // 4. Verify note character limits (40 min, 60k max)
