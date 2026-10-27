@@ -5,12 +5,11 @@ import {
   type AccessibilityActionEvent,
   type GestureResponderEvent,
 } from "react-native";
+import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { useSQLiteContext } from "expo-sqlite";
-import { BotMessageSquare } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { getSetting, setSetting } from "../lib/notes";
-import { usePalette } from "../state/appearance";
 
 const FAB_SIZE = 56;
 const EDGE = 12;
@@ -43,7 +42,6 @@ function parseRatios(value: string | null): Point | null {
  */
 export function ChatFab() {
   const router = useRouter();
-  const pv = usePalette();
   const db = useSQLiteContext();
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -227,14 +225,20 @@ export function ChatFab() {
       onResponderTerminate={() => {
         if (dragRef.current.moved) void persist(positionRef.current);
       }}
-      className="absolute left-0 top-0 z-50 h-14 w-14 items-center justify-center rounded-full bg-gold shadow-gold"
+      className="absolute left-0 top-0 z-50 h-14 w-14 items-center justify-center overflow-hidden rounded-full border-2 border-gold bg-surface shadow-gold"
       style={{
         opacity: ready ? 1 : 0,
         elevation: 12,
         transform: [{ translateX: translate.x }, { translateY: translate.y }],
       }}
     >
-      <BotMessageSquare size={27} color={pv.brand.DEFAULT} strokeWidth={2.2} />
+      <Image
+        source={require("@/assets/images/icons/chatbot-icon.png")}
+        className="h-full w-full"
+        contentFit="cover"
+        style={{width: '100%', height: '100%'}}
+        accessibilityLabel="Sua assistant"
+      />
     </Animated.View>
   );
 }

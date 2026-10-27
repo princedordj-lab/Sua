@@ -15,6 +15,7 @@ import {
   View,
 } from "react-native";
 import { useSQLiteContext } from "expo-sqlite";
+import { Image } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
   router,
@@ -34,7 +35,6 @@ import {
   Send,
   Sparkles,
 } from "lucide-react-native";
-import { Logo } from "../../components/ui";
 import { CoursePickerSheet } from "../../components/sheets";
 import { Markdown } from "../../components/markdown";
 import { colors } from "../../config/theme";
@@ -356,8 +356,14 @@ export default function AskSua() {
         <View className={isUser ? "items-end" : "items-start"}>
           <View className={isUser ? "items-end" : "flex-row items-end gap-2"}>
             {isUser ? null : (
-              <View className="h-10 w-10 items-center justify-center rounded-full bg-brand-strong">
-                <Text className="text-title font-sans-extrabold text-gold">S</Text>
+              <View className="h-10 w-10 overflow-hidden rounded-full border border-gold bg-surface">
+                <Image
+                  source={require("@/assets/images/icons/chatbot-icon.png")}
+                  className="h-full w-full"
+                  contentFit="cover"
+                  style={{ width: '100%', height: '100%' }}
+                  accessibilityLabel="Sua assistant"
+                />
               </View>
             )}
             {isThinking ? (
@@ -428,7 +434,15 @@ export default function AskSua() {
             <ArrowLeft size={22} color={pv.ink.DEFAULT} />
           </Pressable>
           <View className="flex-1 flex-row items-center justify-center gap-2">
-            <Logo compact />
+            <View className="h-9 w-9 overflow-hidden rounded-full border border-gold bg-surface">
+              <Image
+                source={require("@/assets/images/icons/chatbot-icon.png")}
+                className="h-full w-full"
+                contentFit="cover"
+                style={{ width: '100%', height: '100%' }}
+                accessibilityLabel="Sua assistant"
+              />
+            </View>
             <Text className="text-title font-sans-extrabold text-brand">Ask Sua</Text>
           </View>
           <View className="h-11 w-11" />
@@ -469,8 +483,13 @@ export default function AskSua() {
           }}
           ListEmptyComponent={
             <View className="mt-24 items-center gap-3 px-6">
-              <View className="h-16 w-16 items-center justify-center rounded-full bg-brand-strong">
-                <Sparkles size={26} color={colors.gold.DEFAULT} />
+              <View className="h-16 w-16 overflow-hidden rounded-full border-2 border-gold bg-surface">
+                <Image
+                  source={require("@/assets/images/icons/chatbot-icon.png")}
+                  className="h-full w-full"
+                  contentFit="cover"
+                  accessibilityLabel="Sua assistant"
+                />
               </View>
               <Text className="text-body-lg font-sans-bold text-ink">
                 Ask me about your {course?.name ? `${course.code ? `${course.code} ` : ""}${course.name} notes` : "notes"}
