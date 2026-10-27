@@ -2290,6 +2290,106 @@ export async function computeWeeklyProgress(db: SQLiteDatabase) {
   };
 }
 
+export type HomeStats = {
+  due: number;
+  totalCards: number;
+  reviewedToday: number;
+  quizAttemptsToday: number;
+  streakDays: number;
+  // Local-day buckets (YYYY-MM-DD) for the last seven days, oldest first.
+  weekly: { date: string; reviewed: number }[];
+  cardsByNote: Map<string, number>;
+  dueCardsByNote: Map<string, number>;
+  // Notes that have at least one quiz (card-only sets come from cardsByNote).
+  quizNoteIds: Set<string>;
+};
+
+/**
+ * Everything the Home tab reports, derived from SQLite in one pass so the
+ * screen stays truthful offline and matches the Study tab's streak rule.
+ * Day boundaries are local, matching `computeStreak`/`computeWeeklyProgress`.
+ */
+export async function loadHomeStats(db: SQLiteDatabase): Promise<HomeStats> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const startOfDayIso = startOfDay.toISOString();
+  const weekStart = new Date(startOfDay);
+  weekStart.setDate(weekStart.getDate() - 6);
+  const weekStartIso = weekStart.toISOString();
+
+  const [
+    dueRow,
+    totalRow,
+    todayRow,
+    quizRow,
+    weekRows,
+    cardRows,
+    quizNoteRows,
+    streakDays,
+  ] = await Promise.all([
+    db.getFirstAsync<{ count: number }>(
+      "SELECT COUNT(*) as count FROM flashcards WHERE due_at IS NULL OR due_at <= ?",
+      nowIso,
+    ),
+    db.getFirstAsync<{ count: number }>("SELECT COUNT(*) as count FROM flashcards"),
+    db.getFirstAsync<{ count: number }>(
+      "SELECT COUNT(*) as count FROM reviews WHERE reviewed_at >= ?",
+      startOfDayIso,
+    ),
+    db.getFirstAsync<{ count: number }>(
+      "SELECT COUNT(*) as count FROM quiz_attempts WHERE finished_at >= ? AND state IN ('marked', 'pending_marking')",
+      startOfDayIso,
+    ),
+    db.getAllAsync<{ reviewed_at: string }>(
+      "SELECT reviewed_at FROM reviews WHERE reviewed_at >= ?",
+      weekStartIso,
+    ),
+    db.getAllAsync<{ note_id: string; count: number; due: number }>(
+      `SELECT note_id, COUNT(*) as count,
+         SUM(CASE WHEN due_at IS NULL OR due_at <= ? THEN 1 ELSE 0 END) as due
+       FROM flashcards GROUP BY note_id`,
+      nowIso,
+    ),
+    db.getAllAsync<{ note_id: string }>("SELECT DISTINCT note_id FROM quizzes"),
+    computeStreak(db),
+  ]);
+
+  // Seed the buckets so a quiet day still paints a (zero-height) bar.
+  const buckets = new Map<string, number>();
+  for (let offset = 0; offset < 7; offset += 1) {
+    const day = new Date(weekStart);
+    day.setDate(weekStart.getDate() + offset);
+    const key = dayKey(day.toISOString());
+    if (key) buckets.set(key, 0);
+  }
+  for (const row of weekRows) {
+    const key = dayKey(row.reviewed_at);
+    if (key && buckets.has(key)) buckets.set(key, (buckets.get(key) ?? 0) + 1);
+  }
+
+  const cardsByNote = new Map<string, number>();
+  const dueCardsByNote = new Map<string, number>();
+  for (const row of cardRows) {
+    const noteId = String(row.note_id);
+    cardsByNote.set(noteId, Number(row.count ?? 0));
+    dueCardsByNote.set(noteId, Number(row.due ?? 0));
+  }
+
+  return {
+    due: dueRow?.count ?? 0,
+    totalCards: totalRow?.count ?? 0,
+    reviewedToday: todayRow?.count ?? 0,
+    quizAttemptsToday: quizRow?.count ?? 0,
+    streakDays,
+    weekly: [...buckets.entries()].map(([date, reviewed]) => ({ date, reviewed })),
+    cardsByNote,
+    dueCardsByNote,
+    quizNoteIds: new Set(quizNoteRows.map((row) => String(row.note_id))),
+  };
+}
+
 /**
  * Account deletion (Privacy-first): remove every trace of the signed-out
  * student from the device. Recording segments and queued uploads reference

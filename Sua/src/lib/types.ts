@@ -9,6 +9,22 @@ export type Course = {
   archived?: boolean;
 };
 
+// Free-plan counters from GET /me (mobile only reads them; billing lives on
+// the server). Missing offline or right after a PATCH that omits them.
+export type ServerUsage = {
+  month: string;
+  summaries: number;
+  studySets: number;
+  references: number;
+  assistantQueries: number;
+  limits: {
+    summaries: number;
+    studySets: number;
+    references: number;
+    assistantQueries: number;
+  };
+};
+
 export type UserProfile = {
   name: string;
   email: string;
@@ -18,6 +34,7 @@ export type UserProfile = {
   examDate?: string;
   plan?: string;
   planExpiresAt?: string | null;
+  usage?: ServerUsage;
 };
 
 export type ServerCourse = {
@@ -48,6 +65,8 @@ export type ServerProfile = {
   plan: string;
   planExpiresAt: string | null;
   onboardingCompletedAt: string | null;
+  // Present on GET /me, absent on PATCH /me.
+  usage?: ServerUsage | null;
 };
 
 export type ServerProfileUpdate = {

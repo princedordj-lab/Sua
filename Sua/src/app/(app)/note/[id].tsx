@@ -18,9 +18,9 @@ import {
 import {
   ArrowLeft,
   BookOpen,
+  BotMessageSquare,
   Brain,
   Flag,
-  MessageCircle,
   Mic,
   MoreHorizontal,
   Pencil,
@@ -768,7 +768,7 @@ export default function NoteView() {
                   accessibilityLabel="Ask Sua about this reference"
                   className="mt-5 min-h-14 flex-row items-center justify-center gap-2 rounded-btn bg-gold shadow-gold active:opacity-80"
                 >
-                  <MessageCircle size={18} color={pv.ink.DEFAULT} />
+                  <BotMessageSquare size={18} color={pv.ink.DEFAULT} />
                   <Text className="text-body font-sans-extrabold text-ink">
                     Ask Sua about this
                   </Text>

@@ -5,8 +5,6 @@ import { Pressable, Text, View } from "react-native";
 import { Logo } from "../../components/ui";
 import { ChatFab } from "../../components/chat-fab";
 
-const TAB_ROUTES = ["/home", "/courses", "/create", "/study", "/profile"];
-
 // The <Stack> must stay mounted. An early return that swaps it for a loading
 // view or <Redirect> tears down every screen at once, and hooks such as
 // useFocusEffect then throws "Couldn't find a navigation context" while the
@@ -23,7 +21,6 @@ export default function AppLayout() {
   }, [isLoaded, isSignedIn]);
 
   const isChat = pathname === "/ask-sua";
-  const bottom = TAB_ROUTES.includes(pathname) ? 112 : 28;
   return (
     <View className="flex-1 bg-cream">
       {hydrationIssue ? (
@@ -37,7 +34,7 @@ export default function AppLayout() {
         </View>
       ) : null}
       <Stack screenOptions={{ headerShown: false }} />
-      {!blocked && !isChat ? <ChatFab bottom={bottom} /> : null}
+      {!blocked && !isChat ? <ChatFab /> : null}
       {blocked ? (
         <View className="absolute inset-0 items-center justify-center bg-cream">
           <Logo />

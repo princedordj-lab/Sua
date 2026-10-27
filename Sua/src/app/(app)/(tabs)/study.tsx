@@ -4,10 +4,10 @@ import { useSQLiteContext } from "expo-sqlite";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
 import {
+  BotMessageSquare,
   Brain,
   ChevronRight,
   Flame,
-  MessageCircleQuestion,
   Sparkles,
 } from "lucide-react-native";
 import { colors } from "../../../config/theme";
@@ -205,7 +205,7 @@ export default function Study() {
           className="mt-6 flex-row items-center rounded-card border border-line bg-surface p-card shadow-card active:opacity-80"
         >
           <View className="h-11 w-11 items-center justify-center rounded-input bg-gold/15">
-            <MessageCircleQuestion size={21} color={colors.gold.DEFAULT} />
+            <BotMessageSquare size={21} color={colors.gold.DEFAULT} />
           </View>
           <View className="ml-3 flex-1">
             <Text className="text-body font-sans-extrabold text-ink">Ask Sua</Text>

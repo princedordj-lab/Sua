@@ -96,6 +96,7 @@ function serverProfileToLocal(profile: ServerProfile): UserProfile {
     level: profile.level ?? "",
     plan: profile.plan,
     planExpiresAt: profile.planExpiresAt,
+    usage: profile.usage ?? undefined,
   };
 }
 
@@ -370,7 +371,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setHydrated((prev) => ({
         ...prev,
         clerkId: userId,
-        profile,
+        // PATCH /me omits usage; keep the counters already hydrated so the free
+        // plan meter on Home does not disappear after editing the profile.
+        profile: { ...profile, usage: prev.profile?.usage ?? null },
       }));
     },
     [getToken, userId],
