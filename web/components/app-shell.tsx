@@ -9,7 +9,6 @@ import {
   Brain,
   Home,
   LogOut,
-  MessageCircle,
   Plus,
   Settings,
   User,
@@ -17,16 +16,17 @@ import {
 import { Logo } from "./logo";
 import { Avatar, Button, ErrorState, ProgressBar, Skeleton } from "./ui";
 import { useAppData } from "./app-data";
+import { SuaChatMark, type SuaChatIconComponent } from "./sua-chat-icon";
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport";
 
-const NAV = [
+const NAV: { href: string; label: string; Icon: SuaChatIconComponent; iconSize?: number }[] = [
   { href: "/app/home", label: "Home", Icon: Home },
   { href: "/app/courses", label: "Courses", Icon: BookOpen },
   { href: "/app/create", label: "Create", Icon: Plus },
   { href: "/app/study", label: "Study", Icon: Brain },
-  { href: "/app/ask-sua", label: "Ask Sua", Icon: MessageCircle },
+  { href: "/app/ask-sua", label: "Ask Sua", Icon: SuaChatMark, iconSize: 24 },
   { href: "/app/profile", label: "Profile", Icon: User },
-] as const;
+];
 
 const MOBILE_NAV = NAV.filter((item) => item.href !== "/app/ask-sua");
 
@@ -45,7 +45,7 @@ function NavItems({ pathname, mobile = false }: { pathname: string | null; mobil
   const items = mobile ? MOBILE_NAV : NAV;
   return (
     <>
-      {items.map(({ href, label, Icon }) => {
+      {items.map(({ href, label, Icon, iconSize }) => {
         const active = pathname ? isActive(pathname, href) : false;
         return (
           <Link
@@ -54,7 +54,11 @@ function NavItems({ pathname, mobile = false }: { pathname: string | null; mobil
             className={`${mobile ? "bottom-nav-item" : "nav-item"}${active ? " is-active" : ""}`}
             aria-current={active ? "page" : undefined}
           >
-            <Icon size={mobile ? 21 : 19} strokeWidth={2.1} aria-hidden="true" />
+            <Icon
+              size={iconSize ?? (mobile ? 21 : 19)}
+              strokeWidth={2.1}
+              aria-hidden="true"
+            />
             <span>{label}</span>
           </Link>
         );
@@ -175,7 +179,7 @@ function AppShellContent({
           <Logo href="/app/home" />
           <div className="mobile-topbar-actions">
             <Link href="/app/ask-sua" className="sidebar-icon-link" aria-label="Ask Sua">
-              <MessageCircle size={18} />
+              <SuaChatMark size={26} />
             </Link>
             <Link href="/app/profile" aria-label="Profile">
               <Avatar name={name} imageUrl={user?.imageUrl} size={32} />

@@ -7,8 +7,8 @@ import {
   CalendarClock,
   CloudUpload,
   ListChecks,
-  MessageCircle,
 } from "lucide-react";
+import { SuaChatMark, type SuaChatIconComponent } from "@/components/sua-chat-icon";
 import {
   LandingClosingActions,
   LandingHeaderCta,
@@ -103,7 +103,14 @@ const features = [
   },
 ];
 
-const productFeatures = [
+type ProductFeature = {
+  Icon: SuaChatIconComponent;
+  title: string;
+  copy: string;
+  tag: string;
+};
+
+const productFeatures: ProductFeature[] = [
   {
     Icon: CalendarClock,
     title: "Courses with the exam in view",
@@ -123,7 +130,7 @@ const productFeatures = [
     tag: "AI study sets",
   },
   {
-    Icon: MessageCircle,
+    Icon: SuaChatMark,
     title: "Ask Sua about your notes",
     copy: "Ask a question for one course and get an answer grounded in those notes, with the sources it used.",
     tag: "Ask Sua",
@@ -140,7 +147,7 @@ const productFeatures = [
     copy: "Multiple choice and true/false grade instantly. Short answers are marked by AI, and mistakes become cards.",
     tag: "Quizzes",
   },
-] as const;
+];
 
 export default function Home() {
   return (

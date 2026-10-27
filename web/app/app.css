@@ -7010,3 +7010,69 @@
     transition: none;
   }
 }
+
+/* ------------------------------------------------- floating ask-sua assistant */
+
+.sua-assistant-fab {
+  position: fixed;
+  right: 16px;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  z-index: 45;
+  display: none;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-float);
+  color: var(--ink);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: box-shadow 140ms ease, transform 140ms ease;
+}
+
+.sua-assistant-fab.is-app-route {
+  bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+}
+
+.sua-assistant-fab:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 3px;
+}
+
+.sua-assistant-fab.is-dragging {
+  cursor: grabbing;
+  transform: scale(1.04);
+  box-shadow: 0 16px 34px rgba(14, 31, 24, 0.22);
+}
+
+.sua-assistant-fab.is-keyboard-open {
+  display: none;
+}
+
+.sua-assistant-fab-plate {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--cream) 82%, var(--surface));
+}
+
+.sua-chat-mark {
+  display: block;
+  object-fit: contain;
+}
+
+@media (max-width: 900px) {
+  .sua-assistant-fab {
+    display: grid;
+  }
+}

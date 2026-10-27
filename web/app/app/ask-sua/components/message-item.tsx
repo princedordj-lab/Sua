@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import Image from "next/image";
 import { Check, Copy, RefreshCw } from "lucide-react";
 import { Markdown } from "@/components/markdown";
+import { SuaChatMark } from "@/components/sua-chat-icon";
 import { SourceChips } from "./source-chips";
 import { QuickActions, type QuickActionItem } from "./quick-actions";
 import type { ChatMessageView } from "@/lib/types";
@@ -51,13 +51,7 @@ export function MessageItem({
   return (
     <div className="ask-turn is-sua">
       <div className="ask-sua-avatar" aria-hidden="true">
-        <Image
-          src="/icon.png"
-          alt=""
-          width={24}
-          height={24}
-          className="ask-sua-mark-img"
-        />
+        <SuaChatMark size={26} className="ask-sua-mark-img" />
       </div>
 
       <div className="ask-sua-body">
@@ -120,13 +114,7 @@ export function ThinkingIndicator() {
   return (
     <div className="ask-turn is-sua" aria-busy="true" aria-label="Sua is thinking">
       <div className="ask-sua-avatar" aria-hidden="true">
-        <Image
-          src="/icon.png"
-          alt=""
-          width={24}
-          height={24}
-          className="ask-sua-mark-img"
-        />
+        <SuaChatMark size={26} className="ask-sua-mark-img" />
       </div>
       <div className="ask-sua-body">
         <div className="ask-thinking-dots">
@@ -149,13 +137,7 @@ export function ErrorMessage({
   return (
     <div className="ask-turn is-sua" role="alert">
       <div className="ask-sua-avatar" aria-hidden="true">
-        <Image
-          src="/icon.png"
-          alt=""
-          width={24}
-          height={24}
-          className="ask-sua-mark-img"
-        />
+        <SuaChatMark size={26} className="ask-sua-mark-img" />
       </div>
       <div className="ask-sua-body">
         <div className="ask-error-box">

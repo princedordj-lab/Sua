@@ -8,7 +8,6 @@ import {
   ChevronRight,
   CloudUpload,
   Keyboard,
-  MessageCircle,
   Mic,
   Plus,
   Sparkles,
@@ -16,6 +15,7 @@ import {
 import { useUser } from "@clerk/nextjs";
 import { useAppData } from "@/components/app-data";
 import { Avatar, Card, Chip, EmptyState, ErrorState, ProgressBar, Skeleton } from "@/components/ui";
+import { SuaChatMark } from "@/components/sua-chat-icon";
 import { MarkdownPreview } from "@/components/markdown";
 import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
@@ -255,7 +255,7 @@ export default function HomePage() {
 
           <Card className="ask-card">
             <span className="ask-card-icon">
-              <MessageCircle size={21} aria-hidden="true" />
+              <SuaChatMark size={28} />
             </span>
             <h2>Ask Sua</h2>
             <p>Stuck on a concept? Ask questions grounded in your own course notes.</p>

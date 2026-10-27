@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, MessageCircle, PlusCircle, Trash2 } from "lucide-react";
+import { ArrowLeft, PlusCircle, Trash2 } from "lucide-react";
 import { useAppData } from "@/components/app-data";
+import { SuaChatMark } from "@/components/sua-chat-icon";
 import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
 import { usePrefs } from "@/lib/prefs";
@@ -272,7 +273,7 @@ export function AskSuaClient() {
     return (
       <div className="ask-chat-layout is-no-courses">
         <EmptyState
-          icon={<MessageCircle size={28} />}
+          icon={<SuaChatMark size={32} />}
           title="Add a course first"
           body="Sua answers from the notes in one course, so it needs something to read first."
           action={
