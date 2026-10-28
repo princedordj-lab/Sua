@@ -80,6 +80,9 @@ export async function loadChunkedSource(clerkId, note) {
 
 const NUMBERED_HEADING =
   /^(?:chapter|unit|module|section|part|appendix)\s+(?:\d+|[ivxlIVXL]{1,8}|[A-Za-z])\b|^(\d+(?:\.\d+){0,3})[).:]?\s+\S/i;
+// Provider rate limits / exhausted daily quota deserve their own message, not
+// the generic "too many parts failed" one.
+const RATE_LIMIT_RE = /\b429\b|rate.?limit|quota|daily.?reset/i;
 const ALL_CAPS = /^[A-Z][A-Z0-9 \-':,&]{7,63}$/;
 
 /** Stable over the file's content: the rerun-guard hash of a chunked source. */
@@ -222,14 +225,15 @@ export function groupRowsIntoChunks({ rows, sections }) {
 
   return groups.map((group, index) => {
     const rowsText = group.rows.map((row) => row.text ?? "").join("\n\n");
+    const labels = group.rows.map((row) => row.label).filter(Boolean);
     return {
       index,
       sectionId: group.sectionId,
       rows: group.rows,
       text: rowsText,
       hash: sha1(group.rows.map((row) => row.hash ?? row.text ?? "").join("|")),
-      labels: group.rows.map((row) => row.label).filter(Boolean),
-      labelRange: rangeLabel(group.labels),
+      labels,
+      labelRange: rangeLabel(labels),
     };
   });
 }
@@ -263,6 +267,7 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   const todo = groups.filter((group) => !saved[digestCacheKey(group, model)]);
   const failures = { ...(job.checkpoint?.digestFailures ?? {}) };
   let calls = 0;
+  let rateLimited = false;
 
   // Optional sink for harnesses/tests: captures the checkpoint state that
   // production persists via prisma.job.update (which the real job row does).
@@ -330,7 +335,12 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
       await emitCheckpoint();
     } catch (error) {
       if (error instanceof UserFacingError) throw error;
-      failures[group.hash] = { label: group.labelRange, code: "DIGEST_FAILED" };
+      if (RATE_LIMIT_RE.test(error?.message ?? "")) {
+        rateLimited = true;
+        failures[group.hash] = { label: group.labelRange, code: "RATE_LIMITED" };
+      } else {
+        failures[group.hash] = { label: group.labelRange, code: "DIGEST_FAILED" };
+      }
       await persistMapState();
     }
   });
@@ -342,7 +352,9 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   // sequentially, on purpose, because parallel bursts are usually what broke
   // them. Budget/runtime still bound the sweep; anything still failing is
   // judged by the failure-ratio guard below.
-  const retryList = groups.filter((group) => failures[group.hash]);
+  const retryList = groups.filter(
+    (group) => failures[group.hash] && failures[group.hash].code !== "RATE_LIMITED",
+  );
   if (retryList.length) {
     await deps.setStage("digesting");
     for (const group of retryList) {
@@ -368,11 +380,22 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
           })
           .catch(() => {});
         await emitCheckpoint();
-      } catch {
+      } catch (error) {
+        if (RATE_LIMIT_RE.test(error?.message ?? "")) {
+          rateLimited = true;
+          failures[group.hash] = { label: group.labelRange, code: "RATE_LIMITED" };
+          break;
+        }
         await persistMapState();
       }
     }
     await persistMapState();
+  }
+
+  if (rateLimited) {
+    throw new UserFacingError(
+      "The AI service hit its rate limit or daily quota. Wait a few minutes and tap Try again — finished pages are kept.",
+    );
   }
 
   const failedRatio = groups.length ? Object.keys(failures).length / groups.length : 0;

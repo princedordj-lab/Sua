@@ -260,6 +260,13 @@ function billableCostUsd(data) {
  * reject `response_format` are retried once without it, because every caller
  * still parses the text defensively.
  */
+// Test seam: harnesses and tests can substitute a deterministic handler for
+// every model call — offline, free, repeatable. Production never sets it.
+let aiMock = null;
+export function setAiMock(handler) {
+  aiMock = handler;
+}
+
 export async function chatCompletion({
   system,
   user,
@@ -268,6 +275,9 @@ export async function chatCompletion({
   json = false,
   temperature,
 }) {
+  if (aiMock) {
+    return aiMock({ system, user, model, maxTokens, json, temperature });
+  }
   if (!process.env.XKIRO_API_KEY) {
     throw new Error("XKIRO_API_KEY is not set");
   }

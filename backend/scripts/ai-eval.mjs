@@ -19,8 +19,8 @@ import "../src/config/env.js";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { geminiTranscribe } from "../src/lib/ai.js";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { geminiTranscribe, setAiMock } from "../src/lib/ai.js";
 import { assembleSource, prepareMaterial, sourceFromText, writeNote } from "../src/lib/note-pipeline.js";
 import { generateStudySet, validateStudySet } from "../src/lib/pipeline.js";
 import { notePipeline, longDoc } from "../src/config/ai-pipeline.js";
@@ -36,6 +36,144 @@ const dirname = path.dirname(fileURLToPath(import.meta.url));
 const samplesDir = path.join(dirname, "eval-samples");
 const backendDir = path.join(dirname, "..");
 const outDir = path.join(backendDir, ".tmp", "eval");
+
+// ---------------------------------------------------------------------------
+// Deterministic mock provider (--mock): no network, no cost, repeatable.
+// Answers follow the production prompt families, and the pipeline's own
+// validation (validateDigest / validateStudyPack) still gates every response,
+// so the needle / resume / failure checks exercise the real logic.
+// ---------------------------------------------------------------------------
+
+const NEEDLE_RE = /NEEDLE-KX7[^\n]*/;
+const UNREADABLE_RE = /[\u0000-\u0008\u000e-\u001f]/;
+
+function mockJson(obj, promptText) {
+  const text = JSON.stringify(obj);
+  return {
+    text,
+    promptTokens: Math.ceil((promptText ?? "").length / 4),
+    completionTokens: Math.ceil(text.length / 4),
+  };
+}
+
+function mockDigest(user) {
+  const body = user.split("=== SOURCE PART ===")[1] ?? user;
+  // Garbage bytes: emulate an unreadable part by returning prose the strict
+  // parser cannot turn into JSON, exactly like the live failure mode.
+  if (UNREADABLE_RE.test(body)) {
+    return { text: "I could not read this part of the source.", promptTokens: 12, completionTokens: 9 };
+  }
+  const lines = body.split("\n").map((line) => line.trim()).filter(Boolean);
+  const range = (user.match(/=== SOURCE PART (\S+?) ===/) ?? [])[1] ?? "part";
+  const needle = body.match(NEEDLE_RE)?.[0];
+  const content = lines.filter((line) => !/^SECTION\s/.test(line) && !NEEDLE_RE.test(line));
+  const topics = [
+    {
+      heading: content[0]?.slice(0, 60) || "Part content",
+      points: content.slice(1, 5).length ? content.slice(1, 5) : content.slice(0, 1),
+      terms: [],
+      formulas: [],
+      examples: [],
+      emphasised: [],
+      source: range,
+    },
+  ];
+  if (needle) {
+    topics.push({ heading: "Noted detail", points: [needle], terms: [], formulas: [], examples: [], emphasised: [], source: range });
+  }
+  return mockJson({ range: `part ${range}`, topics, unclear: [] }, user);
+}
+
+function mockMerge(user, rangeLabel) {
+  const payloadText = user.split("=== DIGESTS ===")[1] ?? "[]";
+  let digests = [];
+  try {
+    digests = JSON.parse(payloadText.trim()) ?? [];
+  } catch {
+    digests = [];
+  }
+  const keep = [];
+  const needlePoints = [];
+  const headings = [];
+  for (const digest of digests) {
+    for (const topic of digest?.topics ?? []) {
+      headings.push(topic.heading);
+      for (const point of topic.points ?? []) {
+        (NEEDLE_RE.test(point) ? needlePoints : keep).push(point);
+      }
+    }
+  }
+  // Needle points go first so the 14-point cap can never drop them.
+  const points = [...needlePoints, ...keep].slice(0, 14);
+  return mockJson(
+    {
+      range: rangeLabel,
+      topics: [
+        {
+          heading: headings[0]?.slice(0, 60) || rangeLabel,
+          points: points.length ? points : ["No readable content."],
+          terms: [],
+          formulas: [],
+          examples: [],
+          emphasised: [],
+          source: rangeLabel,
+        },
+      ],
+      unclear: [],
+    },
+    user,
+  );
+}
+
+function mockStudySet(user) {
+  const material = user.split("=== LECTURE MATERIAL ===")[1] ?? user;
+  const needle = material.match(NEEDLE_RE)?.[0] ?? "the half-life of dubnium-268 is 28 hours";
+  const firstLine = material.split("\n").map((line) => line.trim()).filter(Boolean)[0] ?? "the lecture material";
+  const needleBare = needle.replace(/^NEEDLE-KX7:\s*/i, "");
+  return mockJson(
+    {
+      shortSummary: `This source covers ${firstLine.slice(0, 60)} and the reported values around it. ${needleBare[0].toUpperCase()}${needleBare.slice(1)} The sections repeat the mechanism overview with chapter summaries for revision. Use the key terms and cards below for exam preparation.`,
+      keyTerms: [
+        { term: "Dubnium-268 half-life", definition: `${needleBare} (p. 48)` },
+        { term: "Reaction mechanism", definition: "How the section mechanism operates at the reported degrees and yield." },
+        { term: "First-order reaction", definition: "The reaction stays first-order while the catalyst surface is stable." },
+        { term: "Reported values", definition: "kPa, mol and duration values listed per section." },
+        { term: "Chapter summary", definition: "Revision pointers to tables and worked examples per section." },
+        { term: "Catalyst surface", definition: "The stable surface that keeps the reaction first-order." },
+      ],
+      formulas: [],
+      examQuestions: [
+        "Explain the mechanism described in the source and its reported yield. (p. 1)",
+        "State the half-life of dubnium-268 as given in the source. (p. 48)",
+        "Why does the reaction stay first-order in the source's model? (p. 1)",
+      ],
+      flashcards: [
+        { front: "What is the half-life of dubnium-268?", back: `${needleBare} (p. 48)` },
+        { front: "What keeps the reaction first-order?", back: "A stable catalyst surface." },
+        { front: "What values are reported per section?", back: "Pressure in kPa, amount in mol, duration in minutes." },
+        { front: "What should you revise per the chapter summaries?", back: "The pressure table and the worked example." },
+        { front: "At what temperature does the mechanism operate?", back: "At the degrees reported in the section text." },
+        { front: "What does the source say about the reaction order?", back: "It stays first-order while the catalyst surface is stable." },
+      ],
+      quiz: [
+        { type: "mcq", prompt: "What is the half-life of dubnium-268 according to the source?", options: ["28 hours", "29 hours", "48 hours", "7 hours"], answer: "28 hours", explanation: "The source states the half-life of dubnium-268 is 28 hours." },
+        { type: "mcq", prompt: "While the catalyst surface is stable, the reaction stays:", options: ["first-order", "second-order", "zero-order", "spontaneous"], answer: "first-order", explanation: "The source says the reaction stays first-order while the catalyst surface is stable." },
+        { type: "mcq", prompt: "Which values does the source report for each section?", options: ["kPa, mol, minutes", "volts, amps, hours", "grams, litres, days", "newtons, metres, seconds"], answer: "kPa, mol, minutes", explanation: "Reported values are pressure, amount and duration." },
+        { type: "mcq", prompt: "The chapter summaries point back to:", options: ["the pressure table and worked example", "the appendix", "the glossary", "the index"], answer: "the pressure table and worked example", explanation: "Each summary says to revise the table on pressure and the worked example." },
+        { type: "mcq", prompt: "The mechanism in the source operates at:", options: ["the degrees reported per section", "absolute zero", "room temperature only", "unspecified conditions"], answer: "the degrees reported per section", explanation: "Each section reports its own operating degrees." },
+      ],
+    },
+    user,
+  );
+}
+
+export function mockHandler({ system = "", user = "" }) {
+  if (system.startsWith("You extract structured study material")) return mockDigest(user);
+  if (system.startsWith("You merge structured study material")) return mockMerge(user, "Merged sections");
+  if (system.startsWith("You build a document-level overview")) return mockMerge(user, "Overview");
+  if (system.startsWith("You are Sua")) return mockStudySet(user);
+  throw new Error(`mock provider: unrecognised prompt family — ${system.slice(0, 60)}`);
+}
 
 const KIND_ALIASES = new Map([
   ["lecture_note", "lecture_note"],
@@ -322,7 +460,7 @@ export function syntheticPages({ sections, pagesPerSection, needlePage }) {
   return rows;
 }
 
-async function longEval(sectionsArg, courseContext) {
+async function longEval(sectionsArg, courseContext, mock = false) {
   const started = Date.now();
   const sections = Math.max(3, Number(sectionsArg) || 12);
   const pagesPerSection = 5;
@@ -436,8 +574,11 @@ async function longEval(sectionsArg, courseContext) {
     failureProblem = error?.message ?? String(error);
   }
 
-  const resumeClean = resumeCalls.length === 0;
+  const resumeRunFailed = resumeCalls.some((entry) => String(entry).startsWith("resume run failed"));
+  const resumeCallCount = resumeCalls.length - (resumeRunFailed ? 1 : 0);
+  const resumeClean = !resumeRunFailed && resumeCallCount === 0;
   const report = {
+    mode: mock ? "mock" : "live",
     sections: structure.length,
     groups: groups.length,
     digests: Object.keys(map?.digests ?? {}).length,
@@ -468,7 +609,9 @@ async function longEval(sectionsArg, courseContext) {
     if (!needleInSet) problems.push("needle lost in study set");
     if (setProblem) problems.push(`study set invalid: ${setProblem}`);
   }
-  if (!resumeClean) problems.push(`resume made ${resumeCalls.length} extra calls`);
+  if (!resumeClean) {
+    problems.push(resumeRunFailed ? "resume run failed" : `resume made ${resumeCallCount} extra calls`);
+  }
   if (!report.failureReported) problems.push("injected failure was silently swallowed");
 
   await writeOutput("long-doc", "study_set", report);
@@ -484,13 +627,17 @@ async function longEval(sectionsArg, courseContext) {
 
 async function main() {
   const args = process.argv.slice(2);
+  // --mock: answer every model call with the deterministic mock provider
+  // (offline, free, repeatable) instead of the live endpoint.
+  const mock = args.includes("--mock");
+  if (mock) setAiMock(mockHandler);
 
   // --long [N]: long-file pipeline tests (needle / resume / failure / cost)
   // over synthetic pages — no database needed, production prompts and models.
   if (args.includes("--long")) {
     await mkdir(outDir, { recursive: true });
     const courseContext = argValue(args, "--course") ?? "PHYS 201, Introductory Physics";
-    const result = await longEval(Number(argValue(args, "--sections")) || 0, courseContext);
+    const result = await longEval(Number(argValue(args, "--sections")) || 0, courseContext, mock);
     console.log(describe(result));
     await writeFile(
       path.join(outDir, "report.json"),
@@ -575,7 +722,11 @@ async function main() {
   process.exit(passed === results.length ? 0 : 1);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+// Only run the CLI when executed directly — importing this module (tests,
+// probes) must stay side-effect free.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
