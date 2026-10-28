@@ -29,6 +29,7 @@ npx prisma migrate deploy   # apply migrations to the Neon dev DB (uses DIRECT_U
 npx prisma generate         # after schema edits; client goes to gitignored src/generated/prisma
 npm run build               # esbuild bundle -> dist/index.js (Vercel build)
 npm run eval -- <sample> --kind lecture_note|reference   # prompt/validation harness
+npm run eval -- --long [--sections N] [--mock]   # long-file needle/resume/failure/cost eval; --mock = deterministic offline provider (live needs the xkiro quota)
 ```
 
 Web (`cd web`): `npm run dev`, `npm run build`, `npm run lint`.
