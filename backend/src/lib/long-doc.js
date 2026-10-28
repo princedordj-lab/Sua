@@ -176,6 +176,15 @@ function spanSectionsByRows(anchors, rows) {
  * no-split formula/table/example rule.
  */
 export function groupRowsIntoChunks({ rows, sections }) {
+  // Very large sources: widen the chunk target so the map lands near ~90
+  // groups (each group is one digest call) instead of spending the whole AI
+  // call budget on small chunks. Small sources keep the 10k default.
+  const totalChars = rows.reduce((sum, row) => sum + (row.text?.length ?? 0), 0);
+  const chunkChars = Math.min(
+    longDoc.maxChunkChars,
+    Math.max(longDoc.chunkChars, Math.ceil(totalChars / 90)),
+  );
+  const chunkHardMaxChars = Math.max(longDoc.chunkHardMaxChars, Math.ceil(chunkChars * 1.4));
   const assigned = rows.map((row, index) => ({
     row,
     section: sections.find(
@@ -194,10 +203,10 @@ export function groupRowsIntoChunks({ rows, sections }) {
     };
     for (const row of sectionRows) {
       const chars = row.text?.length ?? 0;
-      if (current.chars + chars > longDoc.chunkHardMaxChars && current.rows.length) push();
+      if (current.chars + chars > chunkHardMaxChars && current.rows.length) push();
       current.rows.push(row);
       current.chars += chars;
-      if (current.chars >= longDoc.chunkChars) push();
+      if (current.chars >= chunkChars) push();
     }
     push();
   }
@@ -215,10 +224,10 @@ export function groupRowsIntoChunks({ rows, sections }) {
     };
     for (const row of orphans) {
       const chars = row.text?.length ?? 0;
-      if (bucketChars + chars > longDoc.chunkHardMaxChars && bucket.length) pushBucket();
+      if (bucketChars + chars > chunkHardMaxChars && bucket.length) pushBucket();
       bucket.push(row);
       bucketChars += chars;
-      if (bucketChars >= longDoc.chunkChars) pushBucket();
+      if (bucketChars >= chunkChars) pushBucket();
     }
     pushBucket();
   }
@@ -269,6 +278,16 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   let calls = 0;
   let rateLimited = false;
 
+  // Refuse pathological sources before spending a single model call: the
+  // chunker already scales up to maxChunkChars, so more groups than the cap
+  // means the file genuinely needs splitting into chapters.
+  if (groups.length > longDoc.maxChunksPerJob) {
+    throw new UserFacingError(
+      `This file is too long for one pass (${groups.length} parts; the limit is ${longDoc.maxChunksPerJob}). ` +
+        "Upload it in chapters — for example pages 1-150, then the rest.",
+    );
+  }
+
   // Optional sink for harnesses/tests: captures the checkpoint state that
   // production persists via prisma.job.update (which the real job row does).
   const emitCheckpoint = async () => {
@@ -303,6 +322,9 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   }
 
   await mapWithLimit(todo, longDoc.aiConcurrency, async (group) => {
+    // The daily quota is gone — every further call is guaranteed to fail, so
+    // stop spending them. Unattempted groups stay unsaved and resume later.
+    if (rateLimited) return;
     const checkpoint = await prisma.job.findUnique({ where: { id: job.id }, select: { checkpoint: true } }).catch(() => null);
     const mapCalls = checkpoint?.checkpoint?.mapCalls ?? (job.checkpoint?.mapCalls ?? 0) + calls;
     if (Date.now() - new Date(job.startedAt ?? job.createdAt).getTime() > longDoc.maxJobRuntimeMs) {
@@ -352,9 +374,11 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   // sequentially, on purpose, because parallel bursts are usually what broke
   // them. Budget/runtime still bound the sweep; anything still failing is
   // judged by the failure-ratio guard below.
-  const retryList = groups.filter(
-    (group) => failures[group.hash] && failures[group.hash].code !== "RATE_LIMITED",
-  );
+  const retryList = rateLimited
+    ? []
+    : groups.filter(
+        (group) => failures[group.hash] && failures[group.hash].code !== "RATE_LIMITED",
+      );
   if (retryList.length) {
     await deps.setStage("digesting");
     for (const group of retryList) {
@@ -419,11 +443,71 @@ function mergeModel() {
 }
 
 /**
+ * Split merge inputs into waves whose serialised payload fits the merge
+ * prompt budget. Count-based slicing used to overflow REDUCE_MAX_CHARS on
+ * large sources and the payload was then sliced mid-JSON — invalid input.
+ * Waves are capped by both payload size and REDUCE_GROUP_SIZE.
+ */
+export function partitionWaves(items, maxChars) {
+  const budget = Math.max(1_000, Math.floor(maxChars * 0.85));
+  const waves = [];
+  let wave = [];
+  let chars = 0;
+  for (const item of items) {
+    const size = JSON.stringify(item).length + 1;
+    const full = wave.length && (chars + size > budget || wave.length >= longDoc.reduceGroupSize);
+    if (full) {
+      waves.push(wave);
+      wave = [];
+      chars = 0;
+    }
+    wave.push(item);
+    chars += size;
+  }
+  if (wave.length) waves.push(wave);
+  return waves;
+}
+
+/**
+ * Last-resort compaction for a single digest too big for any wave: drop the
+ * optional fields first, then shorten point lists. Output stays valid JSON —
+ * unlike slicing the serialised payload.
+ */
+function slimDigest(digest, budget) {
+  const copy = JSON.parse(JSON.stringify(digest));
+  const fits = () => JSON.stringify(copy).length <= budget;
+  if (fits()) return copy;
+  for (const topic of copy.topics ?? []) {
+    topic.examples = [];
+    topic.emphasised = [];
+    if (fits()) return copy;
+  }
+  for (const cut of [8, 5, 3]) {
+    for (const topic of copy.topics ?? []) {
+      topic.points = (topic.points ?? []).slice(0, cut);
+    }
+    if (fits()) return copy;
+  }
+  copy.unclear = [];
+  for (const topic of copy.topics ?? []) {
+    topic.terms = (topic.terms ?? []).slice(0, 5);
+    topic.formulas = (topic.formulas ?? []).slice(0, 5);
+  }
+  return copy;
+}
+
+/**
  * Merge several digests into one summary of the same shape. Retries once at
- * temperature 0. Inputs stay under REDUCE_MAX_CHARS.
+ * temperature 0. Inputs are wave-sized by partitionWaves; a lone oversized
+ * digest is compacted (slimDigest), never truncated.
  */
 async function mergeDigests({ digests, prompt, step, deps }) {
-  const payload = JSON.stringify(digests).slice(0, longDoc.reduceMaxChars);
+  const budget = Math.floor(longDoc.reduceMaxChars * 0.85);
+  let payload = JSON.stringify(digests);
+  if (payload.length > budget) {
+    const share = Math.floor(budget / Math.max(1, digests.length));
+    payload = JSON.stringify(digests.map((digest) => slimDigest(digest, share)));
+  }
   const attempt = async (stricter) => {
     const result = await chatCompletion({
       system:
@@ -489,10 +573,7 @@ export async function reduceDigests({ job, digests, groups, sections, sourceType
       .filter(Boolean);
     if (!entries.length) continue;
 
-    const waves = [];
-    for (let i = 0; i < entries.length; i += longDoc.reduceGroupSize) {
-      waves.push(entries.slice(i, i + longDoc.reduceGroupSize));
-    }
+    const waves = partitionWaves(entries, longDoc.reduceMaxChars);
     let merged = null;
     for (const [waveIndex, wave] of waves.entries()) {
       const cacheKey = reduceKey(section.id, waveIndex, mergeModel());
@@ -528,12 +609,12 @@ export async function reduceDigests({ job, digests, groups, sections, sourceType
   const overviewKey = `overview:${PROMPT_VERSION}:${mergeModel()}`;
   let overview = saved[`overview:${PROMPT_VERSION}:${mergeModel()}`];
   if (!overview && summaryList.length) {
-    // One wave over the section summaries; when those summaries are too big,
-    // another cascade level handles it.
-    const waves = [];
-    for (let i = 0; i < summaryList.length; i += longDoc.reduceGroupSize) {
-      waves.push(summaryList.slice(i, i + longDoc.reduceGroupSize).map((item) => item.summary));
-    }
+    // Capacity-based waves over the section summaries; oversized summaries
+    // cascade instead of overflowing the merge prompt.
+    const waves = partitionWaves(
+      summaryList.map((item) => item.summary),
+      longDoc.reduceMaxChars,
+    );
     let merged = null;
     for (const [waveIndex, wave] of waves.entries()) {
       const cacheKey = reduceKey("overview", waveIndex, mergeModel());

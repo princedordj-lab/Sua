@@ -43,8 +43,11 @@ export const longDoc = {
   ocrBatchPages: int("OCR_BATCH_PAGES", 4),
   ocrConcurrency: int("OCR_CONCURRENCY", 3),
   extractBudgetMs: int("EXTRACT_BUDGET_MS", 200_000),
-  // Chunking (chars, ~2,500 tokens at 4 chars/token).
+  // Chunking (chars, ~2,500 tokens at 4 chars/token). For very large sources
+  // the chunk target scales up (up to maxChunkChars) so the map stays around
+  // ~90 digest groups instead of burning the call budget on tiny chunks.
   chunkChars: int("CHUNK_CHARS", 10_000),
+  maxChunkChars: int("AI_MAX_CHUNK_CHARS", 24_000),
   chunkHardMaxChars: int("CHUNK_HARD_MAX_CHARS", 14_000),
   chunkOverlapChars: int("CHUNK_OVERLAP_CHARS", 200),
   // Map stage.
