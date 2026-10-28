@@ -109,16 +109,16 @@ async function reapIfStale(tx, job) {
 /**
  * Polls are the student's heartbeat, so they also drive the queue. A queued
  * job needs a worker; so does a running job whose lease expired — that means
- * the invocation that claimed it was killed (serverless timeout, deploy) and
- * without a kick it would sit until the nightly cron or the stale reaper.
+ * the invocation that claimed it was killed (serverless timeout, deploy, or an
+ * older early-return path) and without a kick it would sit until the nightly
+ * cron or the stale reaper. A missing lease is recovered too.
  */
 function needsWorker(job) {
   if (!job) return false;
   if (job.state === "queued") return true;
   return (
     job.state === "running" &&
-    Boolean(job.lockedUntil) &&
-    job.lockedUntil.getTime() <= Date.now()
+    (!job.lockedUntil || job.lockedUntil.getTime() <= Date.now())
   );
 }
 

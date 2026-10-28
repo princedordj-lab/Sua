@@ -952,10 +952,18 @@ async function withUserAliveCheck(job) {
   try {
     return await prisma.job.findUnique({
       where: { id: job.id },
-      select: { state: true, claimedAt: true },
+      select: { state: true },
     });
-  } catch {
-    return null;
+  } catch (error) {
+    // A database/query failure is not a cancellation. Converting it to a
+    // missing row leaves the claimed job running at its prior stage while the
+    // runner clears its lease, so surface it to the runner's normal retry and
+    // failure handling instead.
+    const name = String(error?.name ?? "Error").replace(/\s+/g, " ").slice(0, 64);
+    const code = error?.code ? ` code=${String(error.code).slice(0, 32)}` : "";
+    const message = String(error?.message ?? error).replace(/\s+/g, " ").slice(0, 240);
+    console.warn(`[long-doc-job-check] job=${job.id} stage=${job.stage ?? "-"} name=${name}${code} message=${message}`);
+    throw error;
   }
 }
 

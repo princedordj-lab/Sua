@@ -128,7 +128,10 @@ export async function claimJob({ leaseMs = DEFAULT_LEASE_MS, targetJobId = null 
   const leaseInterval = `${leaseSeconds} seconds`;
 
   return await prisma.$transaction(async (tx) => {
-    // 1. Mark dead any running jobs that expired and exhausted their retries
+    // 1. Mark dead only leased jobs that expired and exhausted their retries.
+    // A running row without a lease is an orphan (for example, an older
+    // runner released a job after an unexpected early return). It is safely
+    // reclaimable from its durable checkpoint and must not be failed here.
     await tx.$executeRaw`
       UPDATE "jobs"
       SET "state" = 'failed',
@@ -147,12 +150,18 @@ export async function claimJob({ leaseMs = DEFAULT_LEASE_MS, targetJobId = null 
     let rows;
     if (targetJobId) {
       rows = await tx.$queryRaw`
-        SELECT "id", "attempts", "maxAttempts", "kind", "noteId", "userId", "state"
+        SELECT "id", "attempts", "maxAttempts", "kind", "noteId", "userId", "state", "stage", "lockedUntil"
         FROM "jobs"
         WHERE "id" = ${targetJobId}
           AND (
             ("state" = 'queued' AND "runAfter" <= NOW())
-            OR ("state" = 'running' AND "lockedUntil" < NOW() AND "attempts" < "maxAttempts")
+            OR (
+              "state" = 'running'
+              AND (
+                "lockedUntil" IS NULL
+                OR ("lockedUntil" < NOW() AND "attempts" < "maxAttempts")
+              )
+            )
           )
         LIMIT 1
         FOR UPDATE SKIP LOCKED
@@ -161,10 +170,16 @@ export async function claimJob({ leaseMs = DEFAULT_LEASE_MS, targetJobId = null 
 
     if (!rows || rows.length === 0) {
       rows = await tx.$queryRaw`
-        SELECT "id", "attempts", "maxAttempts", "kind", "noteId", "userId", "state"
+        SELECT "id", "attempts", "maxAttempts", "kind", "noteId", "userId", "state", "stage", "lockedUntil"
         FROM "jobs"
         WHERE ("state" = 'queued' AND "runAfter" <= NOW())
-           OR ("state" = 'running' AND "lockedUntil" < NOW() AND "attempts" < "maxAttempts")
+           OR (
+             "state" = 'running'
+             AND (
+               "lockedUntil" IS NULL
+               OR ("lockedUntil" < NOW() AND "attempts" < "maxAttempts")
+             )
+           )
         ORDER BY "createdAt" ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
@@ -173,6 +188,12 @@ export async function claimJob({ leaseMs = DEFAULT_LEASE_MS, targetJobId = null 
 
     if (!rows || rows.length === 0) return null;
     const candidate = rows[0];
+
+    if (candidate.state === "running" && !candidate.lockedUntil) {
+      console.warn(
+        `[queue-recover] job=${candidate.id} stage=${candidate.stage ?? "-"} reason=missing_lease`,
+      );
+    }
 
     // 3. Lock candidate and set state to running
     await tx.$executeRaw`
