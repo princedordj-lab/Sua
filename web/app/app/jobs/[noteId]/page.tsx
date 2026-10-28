@@ -61,7 +61,7 @@ export default function JobStatusPage() {
       setLoadingJob(false);
       if (next && (next.state === "queued" || next.state === "running")) {
         timer = setTimeout(() => void poll(), 5000);
-      } else if (next && (next.state === "done" || next.state === "failed")) {
+      } else if (next && (next.state === "done" || next.state === "failed" || next.state === "cancelled")) {
         note.reload();
       }
     }

@@ -20,6 +20,10 @@ function shapeNote(note) {
     transcript: note.transcript,
     summary: note.summary,
     noteKind: note.noteKind ?? "note",
+    // Long-file provenance (additive): split-group display and page progress.
+    groupId: note.groupId ?? null,
+    partIndex: note.partIndex ?? null,
+    sourceAssetId: note.sourceAssetId ?? null,
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
     assets: note.assets?.map((asset) => ({
@@ -27,6 +31,10 @@ function shapeNote(note) {
       bytes: asset.bytes,
       format: asset.format,
       status: asset.status,
+      extractState: asset.extractState ?? "none",
+      pagesDone: asset.pagesDone ?? 0,
+      pagesTotal: asset.pagesTotal ?? 0,
+      truncated: asset.truncated ?? false,
     })),
   };
 }
@@ -40,7 +48,16 @@ notesRouter.get("/course/:courseId", async (req, res) => {
       orderBy: { updatedAt: "desc" },
       include: {
         assets: {
-          select: { id: true, bytes: true, format: true, status: true },
+          select: {
+            id: true,
+            bytes: true,
+            format: true,
+            status: true,
+            extractState: true,
+            pagesDone: true,
+            pagesTotal: true,
+            truncated: true,
+          },
           orderBy: { createdAt: "asc" },
         },
       },
@@ -59,7 +76,16 @@ notesRouter.get("/:noteId", async (req, res) => {
       where: { id: req.params.noteId, userId: user.id },
       include: {
         assets: {
-          select: { id: true, bytes: true, format: true, status: true },
+          select: {
+            id: true,
+            bytes: true,
+            format: true,
+            status: true,
+            extractState: true,
+            pagesDone: true,
+            pagesTotal: true,
+            truncated: true,
+          },
           orderBy: { createdAt: "asc" },
         },
       },

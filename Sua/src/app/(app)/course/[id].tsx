@@ -327,6 +327,11 @@ export default function CourseDetail() {
               <Text className="font-extrabold text-ink">{note.title || "Untitled note"}</Text>
               <Text numberOfLines={2} className="mt-1 text-sm leading-5 text-ink-soft">{stripMarkdown(note.body || note.transcript || "") || "Empty note"}</Text>
               <View className="mt-2 flex-row items-center gap-2">
+                {note.partIndex != null && note.groupId ? (
+                  <Text className="text-xs font-semibold text-brand">
+                    {note.partIndex === 0 ? "Overview" : `Part ${note.partIndex}`}
+                  </Text>
+                ) : null}
                 <Text className="text-xs text-success">{note.syncState === "pending" ? "Waiting to sync" : "Synced"}</Text>
                 {note.aiState !== "none" && note.aiState !== "ready" && note.aiState !== "failed" ? (
                   <Text className="text-xs font-semibold text-brand">AI working…</Text>

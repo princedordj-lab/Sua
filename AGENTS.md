@@ -5,7 +5,7 @@ Sua ("soo-ah") is an offline-first exam-prep app for African university students
 | Path | What it is |
 | :--- | :--- |
 | `Sua/` | Expo SDK 57 / React Native 0.86 / React 19 app (the product) |
-| `backend/` | Express 5 API (JS ESM) + BullMQ worker, Prisma 7 + Neon Postgres, Clerk auth |
+| `backend/` | Express 5 API (JS ESM) + Postgres-backed job runner, Prisma 7 + Neon Postgres, Clerk auth |
 | `web/` | Next.js 16.4 web app — marketing landing, `/health`, and the signed-in product under `/app/*` |
 
 Nested instruction files are authoritative for their directory: `Sua/AGENTS.md` (Expo rules — fetch the SDK 57 docs, do not trust memory) and `web/AGENTS.md` (Next.js 16 block, rewritten by `next dev`; commit it rather than reverting). `README.md` is a stale copy of an older AGENTS file — trust this file and the code over it.
@@ -24,7 +24,7 @@ npx expo prebuild        # after app.json/plugin changes; never hand-edit androi
 Backend (`cd backend`):
 ```bash
 npm run dev              # API on :4000 (tsx watch)
-npm run worker           # BullMQ worker — AI jobs never finish without this second process
+npm run dev              # API on :4000 (tsx watch); jobs drain via the tick route
 npx prisma migrate deploy   # apply migrations to the Neon dev DB (uses DIRECT_URL)
 npx prisma generate         # after schema edits; client goes to gitignored src/generated/prisma
 npm run build               # esbuild bundle -> dist/index.js (Vercel build)
@@ -37,14 +37,14 @@ There is **no test suite**. Verification is `npx tsc --noEmit` + `npx expo lint`
 
 ## Backend invariants
 
-- Every request-scoped query goes through `withUser(clerkId, tx => …)` (`src/lib/db.js`), which sets `app.current_user_id` inside a transaction for the RLS policies. Gotcha: the Neon role behind `DATABASE_URL` (`neondb_owner`) has **BYPASSRLS**, so the database does not enforce isolation today — the convention does. Use direct `prisma` only for cross-user/infra work (`lib/pipeline.js`, `worker.js`, usage counters). Keep external I/O outside `withUser`; its transaction times out after 15s.
-- Migrations are numbered `0_init` … `12_reference_usage`; **next is `13_…`**. No timestamps: Prisma replays directories lexicographically, so `2026…` sorts before `2_notes`. Never edit or rename an applied migration — append a new one.
+- Every request-scoped query goes through `withUser(clerkId, tx => …)` (`src/lib/db.js`), which sets `app.current_user_id` inside a transaction for the RLS policies. Gotcha: the Neon role behind `DATABASE_URL` (`neondb_owner`) has **BYPASSRLS**, so the database does not enforce isolation today — the convention does. Use direct `prisma` only for cross-user/infra work (`lib/pipeline.js`, `lib/runner.js`, `lib/extraction.js`, usage counters). Keep external I/O outside `withUser`; its transaction times out after 15s.
+- Migrations are numbered `0_init` … `15_pg_job_queue`; **next is `16_…`**. No timestamps: Prisma replays directories lexicographically, so `2026…` sorts before `2_notes`. Never edit or rename an applied migration — append a new one.
 - Prisma uses a custom ESM client output (`src/generated/prisma`, gitignored). CLI URLs come from `prisma7.config.ts` → `DIRECT_URL`; the running app uses pooled `DATABASE_URL` via `@prisma/adapter-pg`. The generator's `importFileExtension = "js"` is load-bearing for deploys: the files are generated as `.ts`, and both esbuild and Vercel's builder emit `.js` in place, so `.js` specifiers resolve. Setting it back to `"ts"` (which only `tsx` can chase) makes the deployed function die at import with `ERR_MODULE_NOT_FOUND: .../internal/class.ts`.
-- Plain JS ESM (`"type": "module"`) — no TS build step. API entry `src/index.js`, worker `src/worker.js`. Vercel serves that same file: it auto-detects the Express app from the default export at `src/index.js` and routes every path to it. Do **not** add a `backend/api/` directory — files there claim the `/api` prefix in Vercel's filesystem router, so `api/index.js` answers `/api` exactly and every real route (`/api/health`, `/api/notes/sync`, …) dies with a platform-level `404 NOT_FOUND` before Express runs.
+- Plain JS ESM (`"type": "module"`) — no TS build step. API entry `src/index.js`; jobs run inside the same app via `src/lib/runner.js` (there is no separate worker process). Vercel serves that same file: it auto-detects the Express app from the default export at `src/index.js` and routes every path to it. Do **not** add a `backend/api/` directory — files there claim the `/api` prefix in Vercel's filesystem router, so `api/index.js` answers `/api` exactly and every real route (`/api/health`, `/api/notes/sync`, …) dies with a platform-level `404 NOT_FOUND` before Express runs.
 - Public routes are `/`, `/api/health` and the Clerk webhook (mounted before `express.json()` because svix needs the raw body); every other router sits behind `authenticate`.
-- Uploads are sign → direct PUT to a short-lived Neon Object Storage URL → complete. `/complete` verifies the object and enforces size, then extracts document text inline (PDF/DOCX/PPTX/PPT/TXT/MD ≤ 25 MB, 100k-char cap). Extraction failure returns `null` and **must not fail the upload**. Cloudinary remains a compatibility fallback until its migration window closes. All 16 media formats are supported across ingestion: Documents (`pdf`, `docx`, `pptx`, `ppt`, `txt`, `md`), Images (`jpg`, `jpeg`, `png`, `webp`, `heic`, `heif`), and Audio (`m4a`, `mp3`, `wav`, `ogg`, `aac`).
+- Uploads are sign → direct PUT to a short-lived Neon Object Storage URL → complete. `/complete` verifies the object and enforces size, then does **fast intake only**: it marks documents `extractState=pending` and returns — page-wise, resumable extraction (`lib/extraction.js` → `SourceChunk` rows) runs in the background via `waitUntil`, the tick cron, or the client's next status poll. Extraction failure records `extractState=failed` + `extractErrorCode` and never fails the upload. Cloudinary remains a compatibility fallback until its migration window closes. All 16 media formats are supported across ingestion: Documents (`pdf`, `docx`, `pptx`, `ppt`, `txt`, `md`), Images (`jpg`, `jpeg`, `png`, `webp`, `heic`, `heif`), and Audio (`m4a`, `mp3`, `wav`, `ogg`, `aac`).
 - PDF extraction depends on `@napi-rs/canvas` being imported from `src/lib/extract.js` with a *literal* specifier before `pdf-parse` is loaded: pdfjs-dist evaluates `new DOMMatrix()` at module scope, and its own `createRequire` lookup is invisible to Vercel's file tracer (missing package → `ReferenceError: DOMMatrix is not defined` at boot). Both imports must stay lazy so a missing native binary degrades PDF text to `null` instead of crashing every route on import.
-- Long-running AI work belongs to BullMQ. Free-plan caps (`FREE_MONTHLY_*`) are warn-only until billing ships.
+- Long-running AI work runs through the Postgres queue (`src/lib/queue.js` + `src/lib/runner.js`, `FOR UPDATE SKIP LOCKED`) drained by `/api/internal/jobs/tick` (`CRON_SECRET`-authed, GET or POST; Vercel cron every 2 min) plus opportunistic kicks (`triggerRunner`/`triggerExtraction` via `@vercel/functions` `waitUntil`). Free-plan caps (`FREE_MONTHLY_*`) are warn-only until billing ships.
 - Never log or return `NEON_API_KEY`, Clerk secrets, or signed URLs beyond their TTL.
 
 ## AI generation contract (server owns it)
@@ -86,9 +86,9 @@ There is **no test suite**. Verification is `npx tsc --noEmit` + `npx expo lint`
 
 ## Environment & deploy
 
-- `backend/.env` (copy `backend/.env.example`): pooled `DATABASE_URL`, direct `DIRECT_URL`, Clerk keys + webhook secret, Neon storage (`NEON_API_KEY`, `NEON_PROJECT_ID`, `NEON_BRANCH_ID`, `NEON_STORAGE_BUCKET`), `REDIS_URL`, `GEMINI_API_KEY` (transcription/OCR), `XKIRO_API_KEY` (text generation via the OpenAI-compatible xkiro API; model from `AI_BULK_MODEL`/`AI_STRONG_MODEL`, default `qwen/qwen3.8-max:free`).
+- `backend/.env` (copy `backend/.env.example`): pooled `DATABASE_URL`, direct `DIRECT_URL`, Clerk keys + webhook secret, Neon storage (`NEON_API_KEY`, `NEON_PROJECT_ID`, `NEON_BRANCH_ID`, `NEON_STORAGE_BUCKET`), `GEMINI_API_KEY` (transcription/OCR), `XKIRO_API_KEY` (text generation via the OpenAI-compatible xkiro API; model from `AI_BULK_MODEL`/`AI_STRONG_MODEL`, default `qwen/qwen3.8-max:free`).
 - `Sua/.env.local` (copy `Sua/.env.example`): `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY`, `EXPO_PUBLIC_API_URL`. Android emulator needs `http://10.0.2.2:4000/api`; `api.ts` falls back to that when unset.
-- Backend deploys to Vercel from `backend/` (`vercel.json` → `npm run build`); the AI worker needs a long-running host with Redis, not a serverless function.
+- Backend deploys to Vercel from `backend/` (`vercel.json` → `npm run build`); jobs drain inside the same function via the `/api/internal/jobs/tick` cron (every 2 min) — there is no separate worker host and no Redis.
 
 ## References
 

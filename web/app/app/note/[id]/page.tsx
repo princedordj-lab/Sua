@@ -120,7 +120,7 @@ export default function NoteViewPage() {
         timer = setTimeout(() => void poll(true), 5000);
         return;
       }
-      if (shouldContinue && next && (next.state === "done" || next.state === "failed")) {
+      if (shouldContinue && next && (next.state === "done" || next.state === "failed" || next.state === "cancelled")) {
         noteResource.reload();
         studyResource.reload();
       }
@@ -282,7 +282,13 @@ export default function NoteViewPage() {
                 {aiStageLabel(
                   (job?.stage ?? note.aiState ?? "queued") as AiState,
                   kind,
-                  note,
+                  {
+                    sourceType: note.sourceType,
+                    progress:
+                      job?.progressTotal && job.progressTotal > 0
+                        ? { done: job.progressDone ?? 0, total: job.progressTotal }
+                        : null,
+                  },
                 )}
               </h2>
               <p>
@@ -292,7 +298,17 @@ export default function NoteViewPage() {
               </p>
             </div>
           </div>
-          <ProgressBar value={72} label="AI progress" />
+          <ProgressBar
+            value={
+              job?.progressTotal && job.progressTotal > 0
+                ? Math.min(
+                    100,
+                    Math.round(((job.progressDone ?? 0) / job.progressTotal) * 100),
+                  )
+                : 72
+            }
+            label="AI progress"
+          />
           <div className="ai-progress-foot">
             <span>Attempt {job?.attempts ?? 1}</span>
             <span>

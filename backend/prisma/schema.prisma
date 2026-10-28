@@ -41,6 +41,7 @@ model User {
   reviewLogs           ReviewLog[]
   quizAttempts         QuizAttempt[]
   noteTombstones       NoteTombstone[]
+  sourceChunks         SourceChunk[]
 
   @@map("users")
 }
@@ -87,8 +88,16 @@ model Note {
   quizzes    Quiz[]
   assets     Asset[]
 
+  // Split-mode provenance (long files): the asset this note was generated
+  // from, the group id linking overview + parts, and this note's 1-based part
+  // number (0 = overview). All nullable: short sources stay plain notes.
+  sourceAssetId String?
+  groupId       String?
+  partIndex     Int?
+
   @@index([userId, updatedAt])
   @@index([courseId, updatedAt])
+  @@index([groupId])
   @@map("notes")
 }
 
@@ -122,12 +131,60 @@ model Asset {
   // none = plain upload; lecture_note / course_reference = auto AI conversion
   task         String   @default("none")
   extractedText String?
+  // Resumable page-wise extraction (long-file pipeline).
+  // none = legacy asset / not a document; pending = /complete verified the
+  // object and queued extraction; running | done | partial | failed follow.
+  extractState   String   @default("none")
+  pagesDone      Int      @default(0)
+  pagesTotal     Int      @default(0)
+  nextPage       Int      @default(1)
+  truncated      Boolean  @default(false)
+  ocrPages       Int      @default(0)
+  extractErrorCode String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  chunks     SourceChunk[]
+
   @@index([userId])
   @@index([noteId])
+  @@index([extractState])
   @@map("assets")
+}
+
+// One extracted page/slide/segment of an asset. Written as extraction goes so
+// a long file can stop and resume without re-reading the whole document, and
+// digested one call per row so the map stage checkpoints. Cascade-deleted with
+// the asset: source text never outlives the file it belongs to.
+model SourceChunk {
+  id                  String   @id @default(cuid())
+  assetId             String
+  asset               Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  index               Int
+  // Outline section this chunk belongs to (structure stage); null until set.
+  sectionId           String?
+  // Human-readable place in the file, e.g. "p. 41-47", "Slide 4", "about 12:30".
+  label               String?
+  startPage           Int?
+  endPage             Int?
+  text                String   @db.Text
+  hash                String
+  digest              Json?
+  digestPromptVersion String?
+  digestModel         String?
+  // pending | done | failed
+  status              String   @default("pending")
+  errorCode           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([assetId, index])
+  @@index([assetId, status])
+  @@index([hash])
+  @@index([userId])
+  @@map("source_chunks")
 }
 
 model Job {
@@ -145,6 +202,9 @@ model Job {
   payload    String?   @db.Text
   attempts    Int       @default(0)
   maxAttempts Int       @default(3)
+  // Client progress: what stage fraction is done, e.g. "Reading pages 41 of 212".
+  progressDone  Int     @default(0)
+  progressTotal Int     @default(0)
   error       String?
   errorCode   String?
   errorStage  String?
@@ -196,6 +256,9 @@ model Flashcard {
   ease         Float    @default(2.5)
   intervalDays Float    @default(0)
   reps         Int      @default(0)
+  // Set when a regeneration no longer produces this card. Soft-retired cards
+  // keep review history in review_logs intact but are excluded from study.
+  retiredAt    DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   reviewLogs  ReviewLog[]

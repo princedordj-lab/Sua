@@ -46,6 +46,7 @@ export async function extractDocument(input, format, kind = "document") {
 
     const normalizedFormat = String(format ?? "").toLowerCase().replace(/^\./, "");
     let segments = [];
+    let headings = [];
     let pageCount = 0;
 
     if (normalizedFormat === "pdf") {
@@ -57,9 +58,12 @@ export async function extractDocument(input, format, kind = "document") {
       segments = [{ index: 1, label: null, text: buffer.toString("utf8") }];
       pageCount = 1;
     } else if (normalizedFormat === "docx") {
-      const docxText = await extractDocx(buffer);
-      if (!docxText) return null;
-      segments = [{ index: 1, label: null, text: docxText }];
+      const docx = await extractDocx(buffer);
+      if (!docx) return null;
+      segments = [{ index: 1, label: null, text: docx.text }];
+      headings = docx.blocks
+        .filter((block) => block.level)
+        .map((block) => ({ title: block.text, level: block.level }));
       pageCount = 1;
     } else if (normalizedFormat === "pptx") {
       segments = await extractPptxSlides(buffer);
@@ -103,6 +107,9 @@ export async function extractDocument(input, format, kind = "document") {
       text: normalized.map((segment) => segment.text).join("\n\n").slice(0, MAX_TEXT_CHARS).trim(),
       pageCount: pageCount || normalized.length,
       truncated,
+      // Structure hints (may be empty): DOCX heading blocks, PPTX slide
+      // titles stay on their segment. Additive; legacy callers ignore it.
+      headings,
     };
   } catch (error) {
     console.warn(
@@ -175,7 +182,10 @@ function copyOf(buffer) {
   return new Uint8Array(buffer);
 }
 
-async function extractPdfPages(buffer) {
+// One parse over the whole file returning every page's slot (kept even when
+// blank so page numbers stay true to the file). Exported for the resumable
+// extraction driver in lib/extraction.js.
+export async function extractPdfPages(buffer) {
   // pdfjs-dist (pulled in by pdf-parse) evaluates `new DOMMatrix()` at module
   // scope and expects the canvas globals to exist in Node. Importing canvas
   // here with a literal specifier also gets the prebuilt .node binary into the
@@ -195,6 +205,44 @@ async function extractPdfPages(buffer) {
     return { segments, pageCount: result.total || result.pages.length };
   } finally {
     await parser.destroy().catch(() => {});
+  }
+}
+
+/**
+ * Best-effort PDF outline/bookmarks for the structure stage. pdf-parse exposes
+ * table-of-contents data optionally; any shape mismatch, missing method or
+ * parse hiccup degrades to null and the outline falls back to headings/windows.
+ * Never throws — an outline is a nice-to-have, not a requirement.
+ */
+export async function pdfOutline(buffer) {
+  try {
+    await installCanvasGlobals();
+    const { PDFParse } = await import("pdf-parse");
+    const parser = new PDFParse({ data: copyOf(buffer) });
+    try {
+      const result = await parser.getToc?.();
+      const items = Array.isArray(result?.toc)
+        ? result.toc
+        : Array.isArray(result)
+          ? result
+          : null;
+      if (!items?.length) return null;
+      const outline = items
+        .map((item) => ({
+          title: String(item?.title ?? item?.text ?? "").trim(),
+          page: Number.isFinite(item?.page)
+            ? Math.round(item.page)
+            : Number.isFinite(item?.pageNumber)
+              ? Math.round(item.pageNumber)
+              : null,
+        }))
+        .filter((item) => item.title && item.page && item.page > 0);
+      return outline.length ? outline : null;
+    } finally {
+      await parser.destroy().catch(() => {});
+    }
+  } catch {
+    return null;
   }
 }
 
@@ -246,11 +294,39 @@ async function extractDocx(buffer) {
     .replace(/<\/w:p>/g, "\n")
     .replace(/<\/w:tc>/g, "\t")
     .replace(/<w:tab\b[^>]*\/>/g, "\t");
-  return decodeEntities(stripTags(withBreaks));
+  return { text: decodeEntities(stripTags(withBreaks)), blocks: docxBlocks(xml) };
+}
+
+/**
+ * DOCX paragraphs with heading levels for the structure stage. Heading level
+ * comes from `w:outlineLvl` (Word, LibreOffice and Google Docs all write it)
+ * with a fallback to English-style Heading style names. Returns
+ * `[{ text, level }]` where level is 1-6 or null for body text. Empty
+ * paragraphs are dropped — chunking re-adds blank lines between blocks.
+ */
+export function docxBlocks(xml) {
+  const blocks = [];
+  for (const raw of xml.split(/<\/w:p>/)) {
+    const outlineMatch = raw.match(/<w:outlineLvl\b[^>]*w:val="([0-5])"/);
+    const headingMatch = raw.match(/w:val="Heading(\d)"/);
+    const rawLevel = outlineMatch ? Number(outlineMatch[1]) + 1 : headingMatch ? Number(headingMatch[1]) : null;
+    const text = decodeEntities(stripTags(raw))
+      .replace(/<w:tab\b[^>]*\/>/g, "\t")
+      .trim();
+    if (!text) continue;
+    blocks.push({
+      text,
+      level: rawLevel && rawLevel >= 1 && rawLevel <= 6 ? rawLevel : null,
+    });
+  }
+  return blocks;
 }
 
 // One segment per slide, number kept from the file name so labels match the
 // deck the student is looking at even when slides are reordered in the XML.
+// The slide's title (if any) is carried separately in `title` — it feeds the
+// structure stage's outline — and speaker notes are appended when their text
+// adds anything beyond the slide body.
 async function extractPptxSlides(buffer) {
   const zip = await JSZip.loadAsync(buffer);
   const slides = Object.keys(zip.files)
@@ -264,11 +340,68 @@ async function extractPptxSlides(buffer) {
   for (const name of slides) {
     const number = Number.parseInt(name.match(/slide(\d+)\.xml/)[1], 10);
     const xml = await zip.files[name].async("string");
+    const title = slideTitle(xml);
     const withBreaks = xml
       .replace(/<\/a:p>/g, "\n")
       .replace(/<a:br\s*\/>/g, "\n");
-    const text = decodeEntities(stripTags(withBreaks)).trim();
-    if (text) segments.push({ index: number, label: `Slide ${number}`, text });
+    let text = decodeEntities(stripTags(withBreaks)).trim();
+    if (title) {
+      // The title is usually the first paragraph of the body text; keep it in
+      // `title` only, so the structure stage never double-reports it.
+      text = text
+        .split("\n")
+        .filter((line) => line.trim() !== title)
+        .join("\n")
+        .trim();
+    }
+    const notes = await slideNotes(zip, number, text);
+    if (notes) text = text ? `${text}\n\n[Speaker notes] ${notes}` : `[Speaker notes] ${notes}`;
+    if (text || title) {
+      segments.push({
+        index: number,
+        label: `Slide ${number}`,
+        text: text || title || "",
+        title: title || null,
+      });
+    }
   }
   return segments;
+}
+
+/** Title placeholder text of a slide, without the surrounding XML noise. */
+function slideTitle(slideXml) {
+  // Title placeholders carry `type="title"` (or "ctrTitle" on title slides) on
+  // their placeholder shape; layouts set the text inside <a:t> runs.
+  const shapeBlocks = slideXml.split(/<p:sp>/).slice(1);
+  for (const block of shapeBlocks) {
+    const shape = block.split("</p:sp>")[0];
+    if (!/<p:ph\b[^>]*type="(?:ctr)?title"/.test(shape)) continue;
+    const runs = [...shape.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)]
+      .map((run) => decodeEntities(run[1]).trim())
+      .filter(Boolean);
+    if (runs.length) return runs.join("").trim();
+  }
+  return null;
+}
+
+/** Speaker notes for slide N minus lines the slide body already repeats. */
+async function slideNotes(zip, slideNumber, slideText) {
+  const entry = zip.file(`ppt/notesSlides/notesSlide${slideNumber}.xml`);
+  if (!entry) return null;
+  try {
+    const xml = await entry.async("string");
+    const withBreaks = xml
+      .replace(/<\/a:p>/g, "\n")
+      .replace(/<a:br\s*\/>/g, "\n");
+    const lines = decodeEntities(stripTags(withBreaks))
+      .split("\n")
+      .map((line) => line.trim())
+      // The notes slide starts with a slide-number placeholder run; drop it.
+      .filter((line) => line && line !== String(slideNumber) && !/^ slidenum $/.test(line));
+    const body = slideText || "";
+    const fresh = lines.filter((line) => !body.includes(line));
+    return fresh.join(" ").trim() || null;
+  } catch {
+    return null;
+  }
 }

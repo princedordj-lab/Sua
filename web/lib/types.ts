@@ -94,7 +94,15 @@ export type ServerNote = {
     bytes: number;
     format: string | null;
     status: "pending" | "active";
+    extractState?: "none" | "pending" | "partial" | "running" | "done" | "failed";
+    pagesDone?: number;
+    pagesTotal?: number;
+    truncated?: boolean;
   }[];
+  // Long-file provenance: parts of one split group share groupId; the
+  // original note is partIndex 0 (the overview).
+  groupId?: string | null;
+  partIndex?: number | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -163,17 +171,34 @@ export type JobMeta = {
   unsupportedNumbers?: string[];
   unsupportedFormulas?: string[];
   modelCalls?: number;
+  // Long-file pipeline extras (chain "long-doc").
+  stageReached?: string;
+  fidelityFailed?: boolean;
+  structureProblems?: string[];
+  chain?: string;
+  mode?: "short" | "split" | "single" | null;
+  partsCount?: number;
+  sectionsCount?: number;
+  coverage?: number | null;
+  lostRanges?: string[];
+  notices?: string[];
+  groupId?: string | null;
+  durationMs?: number;
+  writeRetries?: number;
 };
 
 export type ServerJob = {
   id: string;
   noteId: string;
   kind: string;
-  state: "queued" | "running" | "done" | "failed";
+  state: "queued" | "running" | "done" | "failed" | "cancelled";
   stage: AiState;
   attempts: number;
   error: string | null;
   meta?: JobMeta | null;
+  // Long-file progress counter ("Reading pages 41 of 212"); 0/0 for short jobs.
+  progressDone?: number;
+  progressTotal?: number;
   startedAt: string | null;
   finishedAt: string | null;
   createdAt: string;

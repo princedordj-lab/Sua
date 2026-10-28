@@ -12,6 +12,12 @@ import {
 } from "../config/ai-pipeline.js";
 import { validateStudyPack } from "../config/study-pack-schema.js";
 import { prisma } from "../config/prisma.js";
+import {
+  loadChunkedSource,
+  runLongDocJob,
+  chunkedSourceHash,
+  persistStudySet as persistStudySetPreservingSrs,
+} from "./long-doc.js";
 
 // Free-plan monthly caps; warn-only until Milestone 5 flips ENFORCE_CAPS on.
 export const FREE_MONTHLY_LIMITS = {
@@ -50,14 +56,38 @@ async function fetchAssetBytes(asset) {
 /**
  * Stage updates run through withUser so row-level security applies with the
  * job owner's identity — every AI pipeline write happens as the student.
+ * The `progress` argument ({ done, total }) is the additive long-file counter
+ * the app renders ("Reading pages 41 of 212"); short jobs leave it untouched.
  */
-async function setStage(job, stage, state = "running") {
+async function setStage(job, stage, state = "running", progress = null) {
+  // Cancel check: the claim no-ops when the job is no longer queued/running
+  // (deleted or cancelled). A claim count of zero means "stop quietly".
+  const claim = await prisma.job.updateMany({
+    where: { id: job.id, state: { in: ["queued", "running"] } },
+    data: {
+      stage,
+      state,
+      ...(progress
+        ? {
+            progressDone: Math.max(0, Number(progress.done ?? 0)),
+            progressTotal: Math.max(0, Number(progress.total ?? 0)),
+          }
+        : {}),
+    },
+  }).catch(() => ({ count: 1 }));
+  if (!claim.count) throw new JobCancelledError();
   await withUser(job.user.clerkId, (tx) =>
-    tx.$transaction([
-      tx.job.update({ where: { id: job.id }, data: { stage, state } }),
-      tx.note.update({ where: { id: job.noteId }, data: { aiState: stage } }),
-    ]),
-  );
+    tx.note.update({ where: { id: job.noteId }, data: { aiState: stage } }),
+  ).catch(() => {});
+}
+
+/** A cancelled job closes without retries, without a failure UI, silently. */
+class JobCancelledError extends Error {
+  constructor() {
+    super("Job was cancelled");
+    this.name = "JobCancelledError";
+    this.cancelled = true;
+  }
 }
 
 async function recordAiCall(jobId, step, result) {
@@ -74,7 +104,7 @@ async function recordAiCall(jobId, step, result) {
 }
 
 /**
- * Runs one BullMQ attempt end to end. Throws on failure so BullMQ retries
+ * Runs one queue attempt end to end. Throws on failure so the runner retries
  * (3 attempts with exponential backoff); the Job row carries the stage/error
  * the app displays. Every persist is idempotent (replace) so reruns are clean.
  */
@@ -193,7 +223,7 @@ function noteDeps(job, documentExtraction) {
           data: { extractedText: value },
         }),
       ),
-    setStage: (stage) => setStage(job, stage),
+    setStage: (stage, progress) => setStage(job, stage, "running", progress),
     assertAlive: () => assertNoteAlive(job),
     ...documentExtraction,
   };
@@ -233,11 +263,22 @@ export async function processStudySet(job, documentExtraction) {
   try {
     // ---- 1-3. Read, clean, split + digest --------------------------------
     const courseContext = courseContextOf(note);
+    const deps = noteDeps(job, documentExtraction);
+
+    // Long-file path: lib/extraction.js already stored page/slide chunks for
+    // this note's documents. Structure -> map (checkpointed) -> reduce ->
+    // generate; untouched legacy notes keep the single-shot pipeline below.
+    const chunks = await loadChunkedSource(user.clerkId, note);
+    if (chunks && chunks.rows.length) {
+      await runLongFileJob(job, note, courseContext, deps, chunks);
+      return;
+    }
+
     const prepared = await prepareMaterial({
       note,
       kind: job.kind,
       courseContext,
-      deps: noteDeps(job, documentExtraction),
+      deps,
     });
 
     // The source hash is known before the expensive write, so a repeat run
@@ -290,6 +331,11 @@ export async function processStudySet(job, documentExtraction) {
     await finishJob(job, hash, prepared.meta);
     await notifyStudent(job, note);
   } catch (error) {
+    if (error?.cancelled) {
+      // Cancelled: the Job row is already closed; fail silently, no retry.
+      console.log(`Job ${job.id} cancelled before ${job.stage ?? "start"} finished`);
+      return;
+    }
     if (await jobTargetDeleted(job, error)) {
       await closeDeletedJob(job);
       return;
@@ -313,7 +359,7 @@ export async function processQuizMarking(job) {
   const attemptId = payload.attemptId;
   if (!attemptId) throw new Error("quiz_marking payload is missing attemptId");
 
-  // BullMQ owns the job retry counter; keep the Job row in step with it.
+  // The runner owns the job retry counter; keep the Job row in step with it.
   await prisma.job.update({
     where: { id: job.id },
     data: { state: "running", stage: "marking", startedAt: new Date(), attempts: { increment: 1 } },
@@ -460,11 +506,20 @@ export async function processReference(job, documentExtraction) {
 
   try {
     const courseContext = courseContextOf(note);
+    const deps = noteDeps(job, documentExtraction);
+
+    // Long-file path: same as study sets — chunked sources never re-read.
+    const chunks = await loadChunkedSource(user.clerkId, note);
+    if (chunks && chunks.rows.length) {
+      await runLongFileJob(job, note, courseContext, deps, chunks);
+      return;
+    }
+
     const prepared = await prepareMaterial({
       note,
       kind: job.kind,
       courseContext,
-      deps: noteDeps(job, documentExtraction),
+      deps,
     });
     const hash = sourceHashOf(prepared.sourceHashInput);
     if (await guardRerun(job, hash)) return;
@@ -477,11 +532,16 @@ export async function processReference(job, documentExtraction) {
         data: { body: written.body, transcript: written.transcript },
       }),
     );
-    await bumpUsage(job.userId, job.kind);
+    await bumpUsage(job.userId, job.kind, Math.max(1, result.meta.partsCount));
     await checkDailySpend();
     await finishJob(job, hash, written.meta);
     await notifyStudent(job, note);
   } catch (error) {
+    if (error?.cancelled) {
+      // Cancelled: the Job row is already closed; fail silently, no retry.
+      console.log(`Job ${job.id} cancelled before ${job.stage ?? "start"} finished`);
+      return;
+    }
     if (await jobTargetDeleted(job, error)) {
       await closeDeletedJob(job);
       return;
@@ -489,6 +549,30 @@ export async function processReference(job, documentExtraction) {
     await setFailed(job, error);
     throw error;
   }
+}
+
+/**
+ * Long-file persistence wrapper shared by processStudySet/processReference:
+ * rerun guard -> generate -> usage (once, per delivered part; the overview is
+ * free) -> finish + notify. The original note carries partIndex 0 (overview),
+ * parts get partIndex 1..N under the same groupId.
+ */
+async function runLongFileJob(job, note, courseContext, deps, chunks) {
+  const hash = chunkedSourceHash(chunks);
+  if (await guardRerun(job, hash)) return;
+  const result = await runLongDocJob({
+    job,
+    note,
+    kind: job.kind,
+    clerkId: job.user.clerkId,
+    deps,
+  });
+  // The note may be gone by the time the last part lands.
+  await assertNoteAlive(job);
+  await bumpUsage(job.userId, job.kind, Math.max(1, result.meta.partsCount));
+  await checkDailySpend();
+  await finishJob(job, hash, result.meta);
+  await notifyStudent(job, note);
 }
 
 /**
@@ -654,54 +738,12 @@ function summaryToMarkdown(pack) {
 }
 
 async function persistStudySet(job, note, set) {
-  await withUser(job.user.clerkId, (tx) =>
-    tx.$transaction(async (inner) => {
-      await inner.note.update({
-        where: { id: note.id },
-        data: { summary: set.summaryMarkdown },
-      });
-      // Regeneration replaces, never duplicates.
-      await inner.flashcard.deleteMany({ where: { noteId: note.id } });
-      await inner.flashcard.createMany({
-        data: (set.flashcards ?? []).map((card) => ({
-          userId: job.userId,
-          noteId: note.id,
-          courseId: note.courseId,
-          front: String(card.front).slice(0, 2000),
-          back: String(card.back).slice(0, 4000),
-        })),
-      });
-      const oldQuizzes = await inner.quiz.findMany({
-        where: { noteId: note.id },
-        select: { id: true },
-      });
-      if (oldQuizzes.length) {
-        await inner.quizQuestion.deleteMany({
-          where: { quizId: { in: oldQuizzes.map((quiz) => quiz.id) } },
-        });
-        await inner.quiz.deleteMany({ where: { noteId: note.id } });
-      }
-      const quiz = await inner.quiz.create({
-        data: {
-          userId: job.userId,
-          courseId: note.courseId,
-          noteId: note.id,
-          title: `${note.title || "Untitled note"} quiz`,
-        },
-      });
-      await inner.quizQuestion.createMany({
-        data: (set.quiz ?? []).map((question, index) => ({
-          quizId: quiz.id,
-          ordinal: index + 1,
-          type: question.type,
-          prompt: String(question.prompt).slice(0, 4000),
-          options: question.options ? question.options.map(String) : null,
-          answer: String(question.answer).slice(0, 2000),
-          explanation: String(question.explanation ?? "").slice(0, 4000),
-        })),
-      });
-    }),
-  );
+  // Shared with the long-file pipeline: matched cards keep their SM-2
+  // progress (matched by normalised front), vanished cards soft-retire so
+  // review_logs stay intact, and the quiz row keeps its id so attempt history
+  // survives — only the questions inside it are replaced. Legacy contract:
+  // the note body stays untouched, only the summary is replaced.
+  await persistStudySetPreservingSrs(job.user.clerkId, note, set, true);
 }
 
 
@@ -783,20 +825,22 @@ export async function maybeEnqueueGeneration(clerkId, noteId) {
 // Usage, cost, notifications
 // ---------------------------------------------------------------------------
 
-async function bumpUsage(userId, kind = "study_set") {
+/** Bumps per-product counters once, in one write, at the end of a job.
+ * Split-mode jobs pass the number of generated part notes (overview free). */
+async function bumpUsage(userId, kind = "study_set", count = 1) {
   const month = monthKey();
   if (kind === "course_reference") {
     await prisma.usage.upsert({
       where: { userId_month: { userId, month } },
-      update: { references: { increment: 1 } },
-      create: { userId, month, references: 1 },
+      update: { references: { increment: count } },
+      create: { userId, month, references: count },
     });
     return;
   }
   await prisma.usage.upsert({
     where: { userId_month: { userId, month } },
-    update: { summaries: { increment: 1 }, studySets: { increment: 1 } },
-    create: { userId, month, summaries: 1, studySets: 1 },
+    update: { summaries: { increment: count }, studySets: { increment: count } },
+    create: { userId, month, summaries: count, studySets: count },
   });
 }
 

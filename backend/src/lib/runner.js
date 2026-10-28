@@ -1,7 +1,8 @@
 import { prisma } from "../config/prisma.js";
 import { processJob } from "./pipeline.js";
 import { extractDocument, renderPdfPage } from "./extract.js";
-import { isUserFacing, USER_MESSAGES } from "../config/ai-pipeline.js";
+import { extractNext } from "./extraction.js";
+import { isUserFacing, USER_MESSAGES, longDoc } from "../config/ai-pipeline.js";
 
 export const ALLOWED_JOB_KINDS = [
   "study_set",
@@ -210,6 +211,36 @@ export async function releaseJob(jobId) {
   }).catch(() => {});
 }
 
+/** Extraction failed for a document the job depends on — permanent, honest, no retry. */
+function failJobExtraction(job, asset) {
+  const message =
+    asset.extractErrorCode === "UNREADABLE_PPT"
+      ? "This .ppt file can't be parsed. Save it as .pptx and upload again."
+      : "Couldn't read text from this file. Try a clearer PDF or re-upload.";
+  console.warn(`Job ${job.id} failed: asset extraction ${asset.extractErrorCode ?? "failed"}`);
+  return prisma.job
+    .updateMany({
+      where: { id: job.id },
+      data: {
+        state: "failed",
+        stage: "failed",
+        lockedUntil: null,
+        finishedAt: new Date(),
+        error: message,
+        errorCode: "EXTRACTION_FAILED",
+        errorStage: "extract",
+      },
+    })
+    .then(() =>
+      job.kind !== "quiz_marking" && job.noteId
+        ? prisma.note.updateMany({
+            where: { id: job.noteId },
+            data: { aiState: "failed" },
+          }).catch(() => {})
+        : undefined,
+    );
+}
+
 async function handleJobFailure(job, error) {
   const current = await prisma.job.findUnique({
     where: { id: job.id },
@@ -360,6 +391,49 @@ async function processClaimedJob(claimed) {
           where: { id: job.note.id },
           data: { aiState: "failed" },
         }).catch(() => {});
+        return;
+      }
+    }
+  }
+
+  // 3.5 Long-file extraction gate. A generation job never runs against a
+  // source still being read: one bounded extraction pass runs inline here
+  // (this invocation owns its budget); if the file needs more passes, the
+  // job is released WITHOUT spending an attempt — the tick cron or the next
+  // status poll re-queues it the moment extraction finishes.
+  if (job.kind !== "quiz_marking") {
+    const documents = (job.note.assets ?? []).filter(
+      (asset) => asset.kind === "document" && asset.status === "active",
+    );
+    const failedAsset = documents.find((asset) => asset.extractState === "failed");
+    if (failedAsset) {
+      return failJobExtraction(job, failedAsset);
+    }
+    const unfinished = documents.filter((asset) =>
+      ["pending", "partial", "running"].includes(asset.extractState ?? "none"),
+    );
+    if (unfinished.length) {
+      for (const asset of unfinished) {
+        await extractNext({
+          targetAssetId: asset.id,
+          budgetMs: Math.min(120_000, longDoc.extractBudgetMs),
+        }).catch((error) => {
+          console.warn(`Extraction pass failed for asset ${asset.id}: ${error?.message ?? error}`);
+        });
+      }
+      const states = await prisma.asset.findMany({
+        where: { id: { in: unfinished.map((asset) => asset.id) } },
+        select: { extractState: true },
+      }).catch(() => []);
+      const failedNow = states.find((asset) => asset.extractState === "failed");
+      if (failedNow) return failJobExtraction(job, { extractErrorCode: null, ...failedNow });
+      if (states.some((asset) => asset.extractState !== "done")) {
+        await releaseJob(job.id);
+        await prisma.job.updateMany({
+          where: { id: job.id, state: "queued" },
+          data: { runAfter: new Date(Date.now() + 60_000) },
+        }).catch(() => {});
+        console.log(`Job ${job.id} released: extraction still in progress (${states.map((s) => s.extractState).join(",")})`);
         return;
       }
     }

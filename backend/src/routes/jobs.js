@@ -10,6 +10,7 @@ import {
   STALE_RUNNING_MS,
 } from "../lib/queue.js";
 import { warnIfOverCaps } from "../lib/pipeline.js";
+import { triggerExtraction } from "../lib/extraction.js";
 import { USER_MESSAGES } from "../config/ai-pipeline.js";
 
 export const jobsRouter = Router();
@@ -42,6 +43,9 @@ function shapeJob(job) {
     attempts: job.attempts,
     error: job.error,
     meta: jobMeta(job),
+    // Long-file progress (additive): "Reading pages 41 of 212".
+    progressDone: job.progressDone ?? 0,
+    progressTotal: job.progressTotal ?? 0,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     createdAt: job.createdAt,
@@ -222,6 +226,18 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
       where: { noteId: req.params.noteId },
       orderBy: { createdAt: "desc" },
     });
+    // Opportunistic extraction resume: a failed load may have interrupted a
+    // long file's pass halfway. Fire-and-forget; the cron is the guaranteed
+    // path, this just shortens the wait while the student is watching.
+    const stuck = await tx.asset.findFirst({
+      where: {
+        noteId: req.params.noteId,
+        status: "active",
+        extractState: { in: ["pending", "partial"] },
+      },
+      select: { id: true },
+    });
+    if (stuck) triggerExtraction(stuck.id);
     return reapIfStale(tx, found);
   });
   if (!job) return res.json(null);
@@ -230,6 +246,38 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
 
 // Report a mistake on any AI output, saved with its source text (PRD 10).
 const TARGET_TYPES = new Set(["summary", "flashcard", "quiz_question", "transcript"]);
+
+// Cancel a queued or running job (stage-boundary safe: workers check the Job
+// row between stages and stop quietly; finished work stays checkpointed).
+jobsRouter.post("/:id/cancel", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const cancelled = await withUser(identity.clerkId, async (tx) => {
+    await requireUser(tx, identity);
+    const job = await tx.job.findFirst({
+      where: { id: req.params.id },
+      select: { id: true, state: true, noteId: true },
+    });
+    if (!job) return null;
+    const claim = await tx.job.updateMany({
+      where: { id: job.id, state: { in: ["queued", "running"] } },
+      data: {
+        state: "cancelled",
+        stage: "cancelled",
+        finishedAt: new Date(),
+        lockedUntil: null,
+      },
+    });
+    // Keep aiState "failed" so the app's retry affordance stays available;
+    // the cancelled state itself only stops the worker at the next boundary.
+    await tx.note.updateMany({
+      where: { id: job.noteId },
+      data: { aiState: "failed" },
+    });
+    return { id: job.id, cancelled: claim.count > 0 };
+  });
+  if (!cancelled) return res.status(404).json({ error: "Job not found" });
+  res.json(cancelled);
+});
 
 jobsRouter.post("/feedback", async (req, res) => {
   const identity = await identityFromRequest(req);

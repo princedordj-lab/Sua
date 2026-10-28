@@ -36,6 +36,10 @@ export type Note = {
   aiState: AiState;
   summary: string | null;
   noteKind: NoteKind;
+  // Long-file provenance (server-owned, read-only): parts of one split group
+  // share groupId; the original note is partIndex 0 (the overview).
+  groupId: string | null;
+  partIndex: number | null;
   createdAt: string;
   updatedAt: string;
   syncState: NoteSyncState;
@@ -386,6 +390,17 @@ const MIGRATIONS: ((db: SQLiteDatabase) => Promise<void>)[] = [
       );
     `);
   },
+  // 14 — long-file provenance: which split group a note belongs to and its
+  // position inside it (server-owned; the local copy never writes these).
+  async (db) => {
+    const columns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(notes)");
+    if (!columns.some((column) => column.name === "group_id")) {
+      await db.execAsync("ALTER TABLE notes ADD COLUMN group_id TEXT");
+    }
+    if (!columns.some((column) => column.name === "part_index")) {
+      await db.execAsync("ALTER TABLE notes ADD COLUMN part_index INTEGER");
+    }
+  },
 ];
 
 export async function migrateDb(db: SQLiteDatabase) {
@@ -415,6 +430,8 @@ function rowToNote(row: Record<string, unknown>): Note {
     aiState: (row.ai_state as AiState) ?? "none",
     summary: row.summary == null ? null : String(row.summary),
     noteKind: (row.note_kind as NoteKind) ?? "note",
+    groupId: row.group_id == null ? null : String(row.group_id),
+    partIndex: row.part_index == null ? null : Number(row.part_index),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     syncState: row.sync_state as NoteSyncState,
@@ -789,13 +806,16 @@ export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
     await db.runAsync(
       `UPDATE notes SET body = ?, transcript = COALESCE(?, transcript),
          summary = COALESCE(?, summary), ai_state = ?,
-         note_kind = COALESCE(?, note_kind)
+         note_kind = COALESCE(?, note_kind),
+         group_id = COALESCE(?, group_id), part_index = COALESCE(?, part_index)
        WHERE id = ?`,
       adoptBody ? note.body : local.body,
       note.transcript ?? null,
       note.summary ?? null,
       note.aiState ?? local.aiState,
       note.noteKind ?? null,
+      note.groupId ?? null,
+      note.partIndex ?? null,
       note.id,
     );
     return;
@@ -809,13 +829,14 @@ export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
   // Anything left in the queue is a real unsent change; keep the badge honest.
   const stillPending = await isNotePendingSync(db, note.id);
   await db.runAsync(
-    `INSERT INTO notes (id, course_id, title, body, source_type, transcript, ai_state, summary, note_kind, created_at, updated_at, sync_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO notes (id, course_id, title, body, source_type, transcript, ai_state, summary, note_kind, group_id, part_index, created_at, updated_at, sync_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET course_id = excluded.course_id,
        title = excluded.title, body = excluded.body, source_type = excluded.source_type,
        transcript = excluded.transcript,
        ai_state = excluded.ai_state, summary = COALESCE(excluded.summary, notes.summary),
        note_kind = excluded.note_kind,
+       group_id = excluded.group_id, part_index = excluded.part_index,
        updated_at = excluded.updated_at, sync_state = excluded.sync_state`,
     note.id,
     note.courseId,
@@ -827,6 +848,8 @@ export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
     note.aiState ?? "none",
     note.summary ?? local?.summary ?? null,
     note.noteKind ?? local?.noteKind ?? "note",
+    note.groupId ?? null,
+    note.partIndex ?? null,
     note.createdAt,
     note.updatedAt,
     stillPending ? "pending" : "synced",

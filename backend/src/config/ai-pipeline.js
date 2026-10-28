@@ -19,6 +19,52 @@ function ratio(name, fallback) {
 
 export const PROMPT_VERSION = "notes-v2";
 
+/**
+ * Long-source (many-page / many-segment) knobs. Extraction and AI cost caps
+ * are HARD safety limits — over the limit the pipeline processes what fits and
+ * tells the student exactly what was skipped (never silently clamps). These
+ * are per-file caps, not per-plan: plan-enforced billing is a later milestone.
+ */
+const minutesToMs = (min) => min * 60_000;
+export const longDoc = {
+  // Above this page/slide count a document goes to split mode (one note per
+  // section group plus an overview) unless LONG_DOC_MODE=short would keep it
+  // as a single note below LONG_DOC_SPLIT_PAGES.
+  splitPages: int("LONG_DOC_SPLIT_PAGES", 40),
+  // split | single | short. split = parts generated, single = one layered
+  // note with scaled limits, short = below the split threshold.
+  mode: process.env.LONG_DOC_MODE === "single" ? "single" : "split",
+  // Hard extraction caps. The extractor stops at these bounds and records the
+  // skipped range so the student is told.
+  maxPages: int("MAX_PAGES", 300),
+  maxSourceChars: int("MAX_SOURCE_CHARS", 1_500_000),
+  ocrMaxPages: int("OCR_MAX_PAGES", 150),
+  ocrMinChars: int("OCR_MIN_CHARS", 40),
+  ocrBatchPages: int("OCR_BATCH_PAGES", 4),
+  ocrConcurrency: int("OCR_CONCURRENCY", 3),
+  extractBudgetMs: int("EXTRACT_BUDGET_MS", 200_000),
+  // Chunking (chars, ~2,500 tokens at 4 chars/token).
+  chunkChars: int("CHUNK_CHARS", 10_000),
+  chunkHardMaxChars: int("CHUNK_HARD_MAX_CHARS", 14_000),
+  chunkOverlapChars: int("CHUNK_OVERLAP_CHARS", 200),
+  // Map stage.
+  aiConcurrency: int("AI_CONCURRENCY", 2),
+  maxChunksPerJob: int("MAX_CHUNKS_PER_JOB", 120),
+  maxFailedChunkRatio: ratio("MAX_FAILED_CHUNK_RATIO", 0.1),
+  maxAiCallsPerJob: int("MAX_AI_CALLS_PER_JOB", 150),
+  maxJobRuntimeMin: int("MAX_JOB_RUNTIME_MIN", 45),
+  get maxJobRuntimeMs() {
+    return minutesToMs(this.maxJobRuntimeMin);
+  },
+  // Reduce stage.
+  reduceMaxChars: int("REDUCE_MAX_CHARS", 40_000),
+  reduceGroupSize: int("REDUCE_GROUP_SIZE", 10),
+  // Coverage and verification.
+  minCoverage: ratio("MIN_COVERAGE", 0.85),
+  // Generate-stage word caps for long outputs.
+  noteBodyMaxWords: int("NOTE_BODY_MAX_WORDS", 12_000),
+};
+
 export const notePipeline = {
   // A source smaller than this skips the Split/Digest map-reduce entirely.
   shortSourcePages: int("SHORT_SOURCE_PAGES", 15),

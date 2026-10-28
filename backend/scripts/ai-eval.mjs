@@ -17,13 +17,20 @@
  */
 import "../src/config/env.js";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { geminiTranscribe } from "../src/lib/ai.js";
 import { assembleSource, prepareMaterial, sourceFromText, writeNote } from "../src/lib/note-pipeline.js";
 import { generateStudySet, validateStudySet } from "../src/lib/pipeline.js";
-import { notePipeline } from "../src/config/ai-pipeline.js";
+import { notePipeline, longDoc } from "../src/config/ai-pipeline.js";
+import {
+  buildSections,
+  groupRowsIntoChunks,
+  mapDigests,
+  reduceDigests,
+} from "../src/lib/long-doc.js";
+import { digestToText } from "../src/lib/note-pipeline.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const samplesDir = path.join(dirname, "eval-samples");
@@ -268,8 +275,213 @@ function describe(result) {
   return details.length ? `${head} (${details.join(", ")})` : head;
 }
 
+// ---------------------------------------------------------------------------
+// --long: needle / resume / failure / cost tests over the real long-file
+// pipeline pieces (structure → map → reduce → generate) with a stub job row,
+// so the eval never touches the database but still runs production code.
+// ---------------------------------------------------------------------------
+
+const NEEDLE_TEXT = "NEEDLE-KX7: the half-life of dubnium-268 is 28 hours.";
+
+function syntheticPages({ sections, pagesPerSection, needlePage }) {
+  const rows = [];
+  let page = 0;
+  for (let s = 1; s <= sections; s += 1) {
+    for (let p = 1; p <= pagesPerSection; p += 1) {
+      page += 1;
+      const lines = [
+        `SECTION ${s} TOPIC`,
+        `The mechanism in section ${s} operates at ${40 + s * 3} degrees with a yield of ${70 + s}.`,
+        `Values reported: ${s * 11} kPa, ${s * 2}.5 mol, duration ${10 + s} minutes.`,
+        "Key concept: the reaction stays first-order while the catalyst surface is stable.",
+        `Chapter summary ${s}.${p}: revise the table on pressure and the worked example.`,
+      ];
+      if (page === needlePage) lines.push(NEEDLE_TEXT);
+      rows.push({
+        index: page,
+        startPage: page,
+        endPage: page,
+        label: `p. ${page}`,
+        text: lines.join("\n"),
+        hash: `syn-${page}`,
+        status: "done",
+      });
+    }
+  }
+  return rows;
+}
+
+async function longEval(sectionsArg, courseContext) {
+  const started = Date.now();
+  const sections = Math.max(3, Number(sectionsArg) || 12);
+  const pagesPerSection = 5;
+  const needlePage = Math.round(sections * pagesPerSection * 0.8);
+  const rows = syntheticPages({ sections, pagesPerSection, needlePage });
+
+  const structure = buildSections({ rows, structureHints: {}, pageCount: rows.length });
+  const groups = groupRowsIntoChunks({ rows, sections: structure });
+
+  // record() doubles as the cost meter: every model call lands here.
+  const calls = [];
+  const deps = {
+    ...evalDeps,
+    record: async (step, result) => {
+      calls.push({ step, promptTokens: result?.promptTokens ?? 0, completionTokens: result?.completionTokens ?? 0 });
+    },
+  };
+  const job = {
+    id: "eval-long",
+    kind: "study_set",
+    userId: "eval",
+    createdAt: new Date(),
+    startedAt: new Date(),
+    checkpoint: {},
+  };
+
+  // 1. Needle + cost: map and reduce the whole source. A provider outage
+  // (500s on every model call) surfaces as a reported problem, not a crash.
+  let map = null;
+  let reduce = null;
+  let mainFailure = null;
+  try {
+    map = await mapDigests({ job, groups, courseContext, sourceType: "file", deps });
+    reduce = await reduceDigests({
+      job,
+      digests: map.digests,
+      groups,
+      sections: structure,
+      sourceType: "file",
+      courseContext,
+      deps,
+    });
+  } catch (error) {
+    mainFailure = error?.message ?? String(error);
+  }
+  const summariesText = reduce
+    ? (reduce.summaryList ?? []).map((item) => digestToText(item.summary)).join("\n")
+    : "";
+  const overviewText = reduce?.overview ? digestToText(reduce.overview) : "";
+  const needleInSummaries = /28 hours|dubnium/i.test(summariesText);
+  const needleInOverview = /28 hours|dubnium/i.test(overviewText);
+
+  // 2. Generation from the reduced material (single-mode simulation, scaled).
+  let set = null;
+  let setProblem = null;
+  let needleInSet = false;
+  if (reduce) {
+    try {
+      const material = `${overviewText}\n\n${summariesText}`.slice(0, longDoc.reduceMaxChars);
+      set = await generateStudySet({
+        cleaned: material,
+        courseContext,
+        durationMinutes: 90,
+        jobId: "eval-long",
+        record: async () => {},
+      });
+      setProblem = validateStudySet(set);
+      needleInSet = /28 hours|dubnium/i.test(JSON.stringify(set));
+    } catch (error) {
+      setProblem = error?.message ?? String(error);
+    }
+  }
+
+  // 3. Resume: a second map run over the checkpoint must make ZERO new calls.
+  const resumeCalls = [];
+  try {
+    await mapDigests({
+      job: { ...job, checkpoint: job.checkpoint },
+      groups,
+      courseContext,
+      sourceType: "file",
+      deps: { ...deps, record: async (step) => resumeCalls.push(step) },
+    });
+  } catch (error) {
+    resumeCalls.push(`resume run failed: ${error?.message ?? String(error)}`);
+  }
+
+  // 4. Failure injection: one group is unreadable garbage — the map must
+  // survive it (lost range reported) as long as the ratio stays under cap.
+  const broken = [...groups];
+  broken[broken.length - 1] = { ...broken[broken.length - 1], text: "\u0000\u0001\u0002".repeat(500) };
+  const failureJob = { id: "eval-long-failure", kind: "study_set", userId: "eval", createdAt: new Date(), startedAt: new Date(), checkpoint: {} };
+  let failureLost = null;
+  let failureProblem = null;
+  try {
+    const failureMap = await mapDigests({
+      job: failureJob,
+      groups: broken,
+      courseContext,
+      sourceType: "file",
+      deps,
+    });
+    failureLost = failureMap.lost;
+  } catch (error) {
+    failureProblem = error?.message ?? String(error);
+  }
+
+  const resumeClean = resumeCalls.length === 0;
+  const report = {
+    sections: structure.length,
+    groups: groups.length,
+    digests: Object.keys(map.digests ?? {}).length,
+    lost: map.lost ?? [],
+    needleInSummaries,
+    needleInOverview,
+    needleInSet,
+    setProblem,
+    resumeClean,
+    resumeCalls,
+    modelCalls: calls.length,
+    promptTokens: calls.reduce((sum, call) => sum + call.promptTokens, 0),
+    completionTokens: calls.reduce((sum, call) => sum + call.completionTokens, 0),
+    failureReported: Boolean(failureLost?.length) || Boolean(failureProblem),
+    failureLost,
+    failureProblem,
+    mainFailure,
+    cards: set?.flashcards?.length ?? 0,
+    quiz: set?.quiz?.length ?? 0,
+  };
+  const problems = [];
+  if (mainFailure) {
+    // Provider/model outage or a pipeline error — report the cause verbatim
+    // instead of pretending the needle checks ran.
+    problems.push(`map/reduce failed: ${mainFailure}`);
+  } else {
+    if (!needleInSummaries) problems.push("needle lost in summaries");
+    if (!needleInSet) problems.push("needle lost in study set");
+    if (setProblem) problems.push(`study set invalid: ${setProblem}`);
+  }
+  if (!resumeClean) problems.push(`resume made ${resumeCalls.length} extra calls`);
+  if (!report.failureReported) problems.push("injected failure was silently swallowed");
+
+  await writeOutput("long-doc", "study_set", report);
+  return {
+    name: `long-doc (${sections} sections / ${rows.length} pages)`,
+    kind: "long",
+    ok: problems.length === 0,
+    problem: problems.join(", ") || undefined,
+    ms: Date.now() - started,
+    ...report,
+  };
+}
+
 async function main() {
   const args = process.argv.slice(2);
+
+  // --long [N]: long-file pipeline tests (needle / resume / failure / cost)
+  // over synthetic pages — no database needed, production prompts and models.
+  if (args.includes("--long")) {
+    await mkdir(outDir, { recursive: true });
+    const courseContext = argValue(args, "--course") ?? "PHYS 201, Introductory Physics";
+    const result = await longEval(Number(argValue(args, "--sections")) || 0, courseContext);
+    console.log(describe(result));
+    await writeFile(
+      path.join(outDir, "report.json"),
+      JSON.stringify({ kind: "long", results: [result] }, null, 2),
+    );
+    process.exit(result.ok ? 0 : 1);
+  }
+
   const kindFlag = argValue(args, "--kind") ?? "lecture_note";
   const kind = KIND_ALIASES.get(kindFlag);
   if (!kind) {
@@ -291,7 +503,7 @@ async function main() {
   const single = args.find(
     (arg, index) =>
       !arg.startsWith("--") &&
-      !["--kind", "--source", "--course", "--doc", "--audio", "--pages", "--minutes"].includes(
+      !["--kind", "--source", "--course", "--doc", "--audio", "--pages", "--minutes", "--sections"].includes(
         args[index - 1],
       ),
   );

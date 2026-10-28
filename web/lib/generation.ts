@@ -29,29 +29,45 @@ export function isAiActive(state: AiState | null | undefined): boolean {
   return state ? AI_ACTIVE_STATES.has(state) : false;
 }
 
-/** One sentence per pipeline stage, shared by the note, create and job screens. */
+/** One sentence per pipeline stage, shared by the note, create and job screens.
+ * `progress` ({ done, total }) is the server's long-file page counter and
+ * renders as "Reading pages 41 of 212…" for big documents. */
 export function aiStageLabel(
   state: AiState,
   kind: GenerationKind,
-  { sourceType }: { sourceType?: ServerNote["sourceType"] } = {},
+  {
+    sourceType,
+    progress,
+  }: {
+    sourceType?: ServerNote["sourceType"];
+    progress?: { done: number; total: number } | null;
+  } = {},
 ): string {
+  const progressSuffix =
+    progress && progress.total > 1 && progress.done > 0
+      ? ` (${Math.min(progress.done, progress.total)} of ${progress.total})`
+      : "";
   switch (state) {
     case "queued":
       return sourceType && sourceType !== "typed"
         ? "Waiting for your upload to finish…"
         : "Waiting to start…";
     case "reading":
-      return kind === "course_reference"
-        ? "Reading your material…"
-        : "Reading and taking in your material…";
+      return (
+        (kind === "course_reference"
+          ? "Reading your material…"
+          : "Reading and taking in your material…") + progressSuffix
+      );
     case "reading_scans":
-      return "Reading pages from the scan…";
+      return "Reading pages from the scan…" + progressSuffix;
     case "digesting":
-      return "Pulling out the important parts…";
+      return "Pulling out the important parts…" + progressSuffix;
     case "writing":
-      return kind === "course_reference"
-        ? "Writing your reference sheet…"
-        : "Writing your study notes…";
+      return (
+        (kind === "course_reference"
+          ? "Writing your reference sheet…"
+          : "Writing your study notes…") + progressSuffix
+      );
     case "checking":
       return "Checking every number against your source…";
     case "summarising":

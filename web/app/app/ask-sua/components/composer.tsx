@@ -38,7 +38,13 @@ export function Composer({
   disabled = false,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const [isCoarsePointer, setIsCoarsePointer] = useState(false);
+  // Lazy init keeps the first render correct without a sync setState in the
+  // layout effect (SSR renders false; the change listener keeps it current).
+  const [isCoarsePointer, setIsCoarsePointer] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(pointer: coarse)").matches,
+  );
 
   const selectedCourse = courses.find((c) => c.id === selectedCourseId);
   const placeholder = selectedCourse
@@ -49,7 +55,6 @@ export function Composer({
   useLayoutEffect(() => {
     if (typeof window === "undefined") return;
     const media = window.matchMedia("(pointer: coarse)");
-    setIsCoarsePointer(media.matches);
 
     const handler = (e: MediaQueryListEvent) => setIsCoarsePointer(e.matches);
     if (media.addEventListener) {

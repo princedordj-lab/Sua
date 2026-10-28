@@ -43,16 +43,10 @@ export function AskSuaClient() {
 
   const [courseId, setCourseId] = useState(initialCourseId);
 
-  // Sync state if initialCourseId changes from URL / data
-  useEffect(() => {
-    if (paramCourseId && courses.some((c) => c.id === paramCourseId)) {
-      setCourseId(paramCourseId);
-    } else if (!courseId && initialCourseId) {
-      setCourseId(initialCourseId);
-    }
-  }, [paramCourseId, initialCourseId, courses, courseId]);
-
+  // URL param wins while present (no sync effect: derive it at render time);
+  // otherwise the user's explicit pick, then the shared defaults.
   const effectiveCourseId =
+    (paramCourseId && courses.some((c) => c.id === paramCourseId) ? paramCourseId : null) ??
     courses.find((c) => c.id === courseId)?.id ??
     activeCourses[0]?.id ??
     courses[0]?.id ??
@@ -90,7 +84,11 @@ export function AskSuaClient() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastQuestion, setLastQuestion] = useState<{ text: string; action?: ChatQuickAction } | null>(null);
-  const [offline, setOffline] = useState(false);
+  // Track online/offline status. Lazy init keeps the first client render
+  // correct without a synchronous setState inside the effect.
+  const [offline, setOffline] = useState(
+    () => (typeof window !== "undefined" ? !navigator.onLine : false),
+  );
   const [dividerNotice, setDividerNotice] = useState<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -99,7 +97,6 @@ export function AskSuaClient() {
   // Track online/offline status
   useEffect(() => {
     if (typeof window === "undefined") return;
-    setOffline(!navigator.onLine);
     const onOnline = () => setOffline(false);
     const onOffline = () => setOffline(true);
     window.addEventListener("online", onOnline);

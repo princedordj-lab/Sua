@@ -6,12 +6,11 @@ import {
   MAX_AUDIO_BYTES,
   assetDownloadUrl,
   deleteAssetObject,
-  readAssetBytes,
   storageProviderOf,
   verifyNeonObject,
 } from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
-import { extractDocumentText } from "../lib/extract.js";
+import { triggerExtraction } from "../lib/extraction.js";
 import { maybeEnqueueGeneration } from "../lib/pipeline.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
@@ -44,9 +43,6 @@ const MAX_BYTES = {
 // Where the student wants a document/photo converted once it lands.
 const TASKS = new Set(["lecture_note", "course_reference"]);
 
-// Upper bound for files we attempt to parse on upload-complete.
-const MAX_EXTRACT_BYTES = MAX_UPLOAD_BYTES;
-
 const ALLOWED_FORMATS = {
   document: ["pdf", "pptx", "ppt", "txt", "docx", "md"],
   image: ["jpg", "jpeg", "png", "webp", "heic", "heif"],
@@ -74,34 +70,15 @@ function shapeAsset(asset) {
     noteId: asset.noteId,
     task: asset.task ?? "none",
     extractedText: asset.extractedText ?? null,
+    // Long-file extraction progress (additive): clients show pages/skips.
+    extractState: asset.extractState ?? "none",
+    pagesDone: asset.pagesDone ?? 0,
+    pagesTotal: asset.pagesTotal ?? 0,
+    truncated: asset.truncated ?? false,
+    ocrPages: asset.ocrPages ?? 0,
+    extractErrorCode: asset.extractErrorCode ?? null,
     createdAt: asset.createdAt,
   };
-}
-
-function matchesFileSignature(buffer, format) {
-  if (!buffer || buffer.length < 4) return true;
-  if (format === "pdf") {
-    return buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46;
-  }
-  if (format === "docx" || format === "pptx") {
-    return (
-      buffer[0] === 0x50 &&
-      buffer[1] === 0x4b &&
-      (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07) &&
-      (buffer[3] === 0x04 || buffer[3] === 0x06 || buffer[3] === 0x08)
-    );
-  }
-  if (format === "ppt") {
-    return buffer[0] === 0xd0 && buffer[1] === 0xcf && buffer[2] === 0x11 && buffer[3] === 0xe0;
-  }
-  return true;
-}
-
-// Downloads the confirmed bytes through a signed URL (the media itself never
-// travels through the API) and parses any text the format supports.
-async function extractFromStorage(asset) {
-  const buffer = await readAssetBytes(asset);
-  return extractDocumentText(buffer, asset.format, asset.kind);
 }
 
 // Cloudinary's Admin API index can lag behind a direct upload by a few
@@ -326,38 +303,23 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
       return res.status(410).json({ error: "Note was deleted" });
     }
   }
-  // Parse the document synchronously once its bytes are confirmed — outside
-  // the transaction so external parsing never blocks database locks.
-  // Re-runs only if a previous attempt failed (extractedText still null).
-  if (
-    asset.kind === "document" &&
-    !asset.extractedText &&
-    asset.bytes > 0 &&
-    asset.bytes <= MAX_EXTRACT_BYTES
-  ) {
-    try {
-      const buffer = remote?.buffer ?? (await readAssetBytes(asset));
-      if (!matchesFileSignature(buffer, asset.format)) {
-        console.warn(
-          `File signature check skipped/failed for asset ${asset.id} (format ${asset.format})`,
-        );
-      }
-      const text = await extractDocumentText(buffer, asset.format, asset.kind);
-      if (text) {
-        const targetId = asset.id;
-        asset = await withUser(identity.clerkId, (tx) =>
-          tx.asset.update({
-            where: { id: targetId },
-            data: { extractedText: text },
-          }),
-        );
-      }
-    } catch (error) {
-      console.warn(
-        `Extraction failed for asset ${asset.id} (format ${asset.format}; ${error?.name ?? "Error"}: ${error?.message ?? String(error)})`,
-      );
-    }
+  // Fast intake: never parse the file inside the request. The document was
+  // verified above; its page-wise extraction runs in a background invocation
+  // (waitUntil here, or the jobs/tick cron if this response dies with it).
+  // Legacy assets keep their extractedText as the compat field.
+  if (asset.kind === "document") {
+    const markedPending = await withUser(identity.clerkId, async (tx) => {
+      const current = await tx.asset.findFirst({ where: { id: asset.id } });
+      if (!current || current.extractedText || (current.extractState ?? "none") !== "none") return false;
+      await tx.asset.update({
+        where: { id: asset.id },
+        data: { extractState: "pending" },
+      });
+      return true;
+    }).catch(() => false);
+    if (markedPending) triggerExtraction(asset.id);
   }
+
   // A conversion-marked upload starts its AI job as soon as both halves are
   // on the server (extraction may offset the note-sync race either way; the
   // sync route triggers the other direction).

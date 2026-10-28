@@ -101,7 +101,8 @@ export type AiState =
   | "failed";
 
 // Diagnostics the server stores on the job for a finished generation. Optional
-// everywhere: older jobs and offline notes have none.
+// everywhere: older jobs and offline notes have none. The long-file fields
+// (chain "long-doc") come from the chunked pipeline for large documents.
 export type JobMeta = {
   promptVersion?: string;
   sourceType?: "file" | "recording" | "typed" | null;
@@ -115,6 +116,20 @@ export type JobMeta = {
   unsupportedNumbers?: string[];
   unsupportedFormulas?: string[];
   modelCalls?: number;
+  // Long-file pipeline extras.
+  stageReached?: string;
+  fidelityFailed?: boolean;
+  structureProblems?: string[];
+  chain?: string;
+  mode?: "short" | "split" | "single" | null;
+  partsCount?: number;
+  sectionsCount?: number;
+  coverage?: number | null;
+  lostRanges?: string[];
+  notices?: string[];
+  groupId?: string | null;
+  durationMs?: number;
+  writeRetries?: number;
 };
 
 export type NoteKind = "note" | "reference";
@@ -138,6 +153,11 @@ export type ServerNote = {
   transcript?: string | null;
   summary?: string | null;
   noteKind?: NoteKind;
+  // Long-file provenance: parts of one split group share groupId; the
+  // original note is partIndex 0 (the overview).
+  groupId?: string | null;
+  partIndex?: number | null;
+  sourceAssetId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -179,6 +199,12 @@ export type ServerAsset = {
   noteId: string | null;
   task?: UploadTask | "none";
   extractedText?: string | null;
+  // Background extraction state (documents). "none" = not extracted (audio,
+  // legacy rows); "pending"/"partial"/"running" = still being read.
+  extractState?: "none" | "pending" | "partial" | "running" | "done" | "failed";
+  pagesDone?: number;
+  pagesTotal?: number;
+  truncated?: boolean;
   createdAt: string;
 };
 
@@ -201,12 +227,15 @@ export type ServerJob = {
   id: string;
   noteId: string;
   kind: string;
-  state: "queued" | "running" | "done" | "failed";
+  state: "queued" | "running" | "done" | "failed" | "cancelled";
   stage: AiState;
   attempts: number;
   error: string | null;
   // Generation diagnostics (pages read, truncation, fidelity check).
   meta?: JobMeta | null;
+  // Long-file progress counter ("Reading pages 41 of 212"); 0/0 for short jobs.
+  progressDone?: number;
+  progressTotal?: number;
   startedAt: string | null;
   finishedAt: string | null;
   createdAt: string;

@@ -25,6 +25,7 @@ import {
   launchCameraAsync,
   launchImageLibraryAsync,
 } from "expo-image-picker";
+import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
 import { Directory, File, Paths } from "expo-file-system";
 import { EnrichedMarkdownTextInput } from "react-native-enriched-markdown";
 import type {
@@ -110,7 +111,7 @@ import {
   userFacingMessage,
 } from "../../../lib/generate";
 import { jobsApi } from "../../../lib/api";
-import { flushUploads } from "../../../lib/uploads";
+import { flushUploads, formatBytes, validateUpload } from "../../../lib/uploads";
 import {
   ensureCameraPermission,
   ensureMicPermission,
@@ -127,7 +128,10 @@ const RECORDING_LIMIT_MS = 60 * 60 * 1000;
 // A crash, call, or dead battery loses at most this much audio: the recorder
 // stops and restarts on every boundary, finalising each chunk's file.
 const SEGMENT_MS = 2 * 60 * 1000;
-const MAX_FILE_BYTES = 25 * 1024 * 1024;
+// Photos beyond this long edge (or this weight) are re-encoded once on the way
+// in — smaller uploads, and the server's OCR sees a predictable JPEG.
+const MAX_IMAGE_EDGE = 2560;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const AUTOSAVE_DELAY_MS = 1500;
 
 // The pipeline's wording for failures it did not classify (imported above as
@@ -338,6 +342,34 @@ function deleteQuietly(path: string) {
   } catch {
     // Already gone — nothing to clean up.
   }
+}
+
+function alertUploadError(cause: unknown) {
+  Alert.alert(
+    "Could not use that file",
+    cause instanceof Error ? cause.message : "That file cannot be uploaded.",
+  );
+}
+
+/**
+ * Heavy photos and HEIC library picks are re-encoded once on the way in: the
+ * long edge is capped and the result is a plain JPEG, so the upload stays
+ * small and the server's OCR reads a format it knows. Anything else passes
+ * through untouched — the picker already compressed it.
+ */
+async function normalizeImagePick(
+  sourceUri: string,
+  width: number,
+  height: number,
+): Promise<string> {
+  const context = ImageManipulator.manipulate(sourceUri);
+  const longEdge = Math.max(width, height);
+  if (longEdge > MAX_IMAGE_EDGE) {
+    context.resize(width >= height ? { width: MAX_IMAGE_EDGE } : { height: MAX_IMAGE_EDGE });
+  }
+  const rendered = await context.renderAsync();
+  const saved = await rendered.saveAsync({ format: SaveFormat.JPEG, compress: 0.8 });
+  return saved.uri;
 }
 
 // Fire-and-forget save for drafts that must not be lost outside an explicit
@@ -1253,6 +1285,36 @@ export default function Create() {
     return () => clearInterval(timer);
   }, [aiActive, db, getAuthToken, refreshAiState]);
 
+  // Long-file progress: the stage poll above reads the local row, which never
+  // carries the page counter — ask the server job for it while active so the
+  // card can say "Reading pages 41 of 212".
+  const [serverProgress, setServerProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!aiActive || !typedNoteId) return;
+    let cancelled = false;
+    const poll = async () => {
+      const token = await getAuthToken().catch(() => null);
+      if (!token) return;
+      const job = await jobsApi.latestForNote(token, typedNoteId).catch(() => null);
+      if (!cancelled) {
+        setServerProgress(
+          job?.progressTotal && job.progressTotal > 0
+            ? { done: job.progressDone ?? 0, total: job.progressTotal }
+            : null,
+        );
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [aiActive, getAuthToken, typedNoteId]);
+
   // Shared session reset for Done and Delete. Runs in an event handler, so
   // generating the fresh draft id here keeps render pure. The ref is marked
   // clean immediately so a blur firing mid-navigation can't re-save (or
@@ -1360,19 +1422,23 @@ export default function Create() {
       Alert.alert("Pick a course first", "Choose which course this file belongs to.");
       return;
     }
-    if (input.size > MAX_FILE_BYTES) {
-      Alert.alert("File too large", "Uploads are limited to 25 MB per file.");
-      return;
-    }
     const fallbackFormat =
       input.kind === "image" ? "jpg" : input.kind === "audio" ? "m4a" : "pdf";
     const format = extensionOf(input.name, input.uri, fallbackFormat);
+    // Last-line gate in case a path ever skips the pick-time check — the
+    // queue row must never hold a file the server would reject.
+    try {
+      validateUpload({ format, size: input.size, kind: input.kind });
+    } catch (cause) {
+      alertUploadError(cause);
+      return;
+    }
     try {
       const noteId = newId();
       await saveNote(db, {
         id: noteId,
         courseId: course.id,
-        title: input.name.replace(/\.[^.]+$/, "").trim() || "Untitled file",
+        title: input.name.replace(/\.[^.]+$/, "").trim().slice(0, 120) || "Uploaded material",
         body: "",
         sourceType: input.kind === "audio" ? "audio" : "file",
         noteKind: noteKindForTarget(input.target),
@@ -1392,6 +1458,9 @@ export default function Create() {
       void rememberLastCourse(course.id);
       refreshUploads();
       runUploadFlush();
+      // Same destination the web upload panel uses: land on the note's AI
+      // progress instead of making the student hunt for it.
+      router.push({ pathname: "/(app)/note/[id]", params: { id: noteId } });
     } catch {
       Alert.alert(
         "Couldn’t queue the upload",
@@ -1441,12 +1510,19 @@ export default function Create() {
       const asset = result.assets[0];
       const ext = extensionOf(asset.name, asset.uri, "pdf");
       const kind = detectUploadKind(ext, asset.mimeType);
+      const size = asset.size ?? fileSizeOf(asset.uri);
+      try {
+        validateUpload({ format: ext, size, kind });
+      } catch (cause) {
+        alertUploadError(cause);
+        return;
+      }
       const safeUri = copyToPersistentStorage(asset.uri, asset.name);
       setPendingPrompt({
         mode: "file",
         uri: safeUri,
         name: asset.name,
-        size: asset.size ?? fileSizeOf(safeUri),
+        size,
         kind,
         target: targetForFile(kind, ext),
       });
@@ -1474,13 +1550,46 @@ export default function Create() {
           : await launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.8 });
       if (result.canceled) return;
       const asset = result.assets[0];
-      const fileName = asset.fileName ?? `photo-${Date.now()}.jpg`;
-      const safeUri = copyToPersistentStorage(asset.uri, fileName);
+      const originalName = asset.fileName ?? `photo-${Date.now()}.jpg`;
+      const originalExt = extensionOf(originalName, asset.uri, "jpg");
+      try {
+        validateUpload({
+          format: originalExt,
+          size: asset.fileSize ?? fileSizeOf(asset.uri),
+          kind: "image",
+        });
+      } catch (cause) {
+        alertUploadError(cause);
+        return;
+      }
+      // HEIC picks and heavy photos are re-encoded to JPEG before they are
+      // copied into the persistent upload dir; everything else uploads the
+      // picker's own file. The queue row always points at the final bytes.
+      let uploadName = originalName;
+      let uploadUri = asset.uri;
+      const needsNormalization =
+        ["heic", "heif"].includes(originalExt) ||
+        Math.max(asset.width, asset.height) > MAX_IMAGE_EDGE ||
+        (asset.fileSize ?? 0) > MAX_IMAGE_BYTES;
+      if (needsNormalization) {
+        try {
+          uploadUri = await normalizeImagePick(asset.uri, asset.width, asset.height);
+          uploadName = `${originalName.replace(/\.[^.]+$/, "")}.jpg`;
+        } catch {
+          // Manipulation failed — upload the picker's own file instead.
+        }
+      }
+      const safeUri = copyToPersistentStorage(uploadUri, uploadName);
+      // The persistent copy is what the queue uploads; drop the manipulator's
+      // cache temp once it exists (never if the copy fell back to it).
+      if (uploadUri !== asset.uri && safeUri !== uploadUri) deleteQuietly(uploadUri);
+      const size =
+        uploadUri === asset.uri ? asset.fileSize ?? fileSizeOf(safeUri) : fileSizeOf(safeUri);
       setPendingPrompt({
         mode: "file",
         uri: safeUri,
-        name: fileName,
-        size: asset.fileSize ?? fileSizeOf(safeUri),
+        name: uploadName,
+        size,
         kind: "image",
         target: "lecture_note",
       });
@@ -2089,7 +2198,7 @@ export default function Create() {
                         (openedNoteKind === "reference"
                           ? "course_reference"
                           : "lecture_note"),
-                      { sourceType: noteSourceType ?? "typed" },
+                      { sourceType: noteSourceType ?? "typed", progress: serverProgress },
                     )}
                   />
                 ) : null}
@@ -2184,7 +2293,9 @@ export default function Create() {
         subtitle={
           pendingPrompt
             ? pendingPrompt.mode === "file"
-              ? `${pendingPrompt.name} → ${course?.name ?? "your course"}`
+              ? `${pendingPrompt.name} · ${formatBytes(pendingPrompt.size ?? 0)} → ${
+                  course?.name ?? "your course"
+                }`
               : `${pendingPrompt.mode === "typing" ? "Note" : "Recording"} → ${
                   course?.name ?? "your course"
                 }`

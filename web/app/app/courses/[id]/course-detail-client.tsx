@@ -436,6 +436,9 @@ export function CourseDetailClient() {
                             <MarkdownPreview text={note.summary || note.body || note.transcript || ""} lines={2} />
                             <div className="note-tile-meta">
                               <span>{relativeDate(note.updatedAt)}</span>
+                              {note.partIndex != null && note.groupId ? (
+                                <span>{note.partIndex === 0 ? "Overview" : `Part ${note.partIndex}`}</span>
+                              ) : null}
                               {note.aiState === "ready" ? <span>Study set ready</span> : null}
                               {isAiActive(note.aiState) ? (
                                 <span className="note-tile-live">

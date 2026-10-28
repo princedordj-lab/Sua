@@ -57,6 +57,10 @@ export const GENERIC_FAILURE =
 const USER_FACING_MESSAGES = [
   GENERIC_FAILURE,
   "Couldn't read this file. Try a clearer photo or a text PDF.",
+  "Couldn't read text from this file. Try a clearer PDF or re-upload.",
+  "This .ppt file can't be parsed. Save it as .pptx and upload again.",
+  "This file took too long to process. Tap Try again — finished pages are kept.",
+  "Too many parts of this file could not be processed. Tap Try again, or upload it by chapter.",
   "This file is too long for one reference sheet. Upload it by chapter.",
   "There isn't enough text here to study yet. Add a bit more and try again.",
   "Could not connect to Sua. Check your internet connection.",
@@ -168,6 +172,8 @@ export function isAiActive(state: AiState | null | undefined): boolean {
 /**
  * One sentence for every pipeline stage. Shared by the note screen and the
  * capture screen so the two never disagree about what Sua is doing.
+ * `progress` ({ done, total }) comes from the server's long-file counter and
+ * renders as "Reading pages 41 of 212…" for big documents.
  */
 export function aiStageLabel(
   state: AiState,
@@ -175,25 +181,34 @@ export function aiStageLabel(
   {
     pendingUploads = 0,
     sourceType,
-  }: { pendingUploads?: number; sourceType?: NoteRow["sourceType"] } = {},
+    progress,
+  }: {
+    pendingUploads?: number;
+    sourceType?: NoteRow["sourceType"];
+    progress?: { done: number; total: number } | null;
+  } = {},
 ): string {
+  const progressSuffix =
+    progress && progress.total > 1 && progress.done > 0
+      ? ` (${Math.min(progress.done, progress.total)} of ${progress.total})`
+      : "";
   switch (state) {
     case "queued":
       return pendingUploads > 0 && sourceType !== "typed"
         ? "Waiting for your upload to finish…"
         : "Waiting to start…";
     case "reading":
-      return kind === "course_reference"
+      return (kind === "course_reference"
         ? "Reading your material…"
-        : "Reading and taking in your material…";
+        : "Reading and taking in your material…") + progressSuffix;
     case "reading_scans":
-      return "Reading pages from the scan…";
+      return "Reading pages from the scan…" + progressSuffix;
     case "digesting":
-      return "Pulling out the important parts…";
+      return "Pulling out the important parts…" + progressSuffix;
     case "writing":
-      return kind === "course_reference"
+      return (kind === "course_reference"
         ? "Writing your reference sheet…"
-        : "Writing your study notes…";
+        : "Writing your study notes…") + progressSuffix;
     case "checking":
       return "Checking every number against your source…";
     case "summarising":
@@ -317,7 +332,7 @@ async function runOne(
       }
       return;
     }
-    if (job.state === "failed") {
+    if (job.state === "failed" || job.state === "cancelled") {
       throw new Error(userFacingMessage(job.error));
     }
     // Mirror the pipeline stage into the note so the UI updates live.
@@ -457,7 +472,7 @@ export async function refreshNoteFromServer(
       }
     }
     await setNoteAiState(db, noteId, "ready");
-  } else if (job.state === "failed") {
+  } else if (job.state === "failed" || job.state === "cancelled") {
     await setNoteAiState(db, noteId, "failed");
   } else if (job.stage) {
     await setNoteAiState(db, noteId, job.stage);

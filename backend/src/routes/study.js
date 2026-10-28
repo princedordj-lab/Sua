@@ -365,7 +365,7 @@ studyRouter.get("/quizzes/:quizId", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // Quiz attempt submission. Details carry client-graded MCQ verdicts; short
-// answers without verdicts trigger the quiz_marking job (BullMQ). Idempotent
+// answers without verdicts trigger the quiz_marking job (Postgres queue). Idempotent
 // by client-generated attempt id; the marking job dedupes while active.
 // ---------------------------------------------------------------------------
 

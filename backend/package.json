@@ -6,7 +6,6 @@
   "scripts": {
     "start": "tsx src/index.js",
     "dev": "tsx watch src/index.js",
-    "worker": "tsx src/worker.js",
     "eval": "tsx scripts/ai-eval.mjs",
     "migrate:cloudinary-assets": "tsx scripts/migrate-cloudinary-assets.js",
     "check:neon-storage": "tsx scripts/check-neon-storage.js",

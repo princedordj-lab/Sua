@@ -207,7 +207,7 @@ async function documentSegments(asset, deps, onScan) {
       pageCount: 1,
     };
   }
-  // The Node/BullMQ worker supplies these native-PDF helpers. They are omitted
+  // The tick runner supplies these native-PDF helpers. They are omitted
   // from the Cloudflare Worker dependency graph because Workers cannot load a
   // platform-specific `.node` addon such as @napi-rs/canvas.
   if (!deps.extractDocument) {
@@ -632,6 +632,10 @@ export function validateDigest(digest) {
   }
   return null;
 }
+
+// Exported for the long-file pipeline (lib/long-doc.js), which shares the
+// digest call, its validation and its concurrency pool verbatim.
+export { digestChunk, digestToText, rangeLabel, mapWithLimit, parseJsonObject };
 
 async function digestChunk(chunk, context, deps) {
   const attempt = async (suffix) => {

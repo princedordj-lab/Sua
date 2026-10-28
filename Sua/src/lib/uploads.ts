@@ -13,8 +13,49 @@ import {
   updateUploadProgress,
   updateUploadState,
 } from "./notes";
-import type { UploadQueueItem } from "./notes";
+import type { UploadKind, UploadQueueItem } from "./notes";
 import { drainGenerationQueue } from "./generate";
+
+// The upload allowlist, mirroring web/lib/uploads.ts and the server's
+// ALLOWED_FORMATS (backend/src/routes/uploads.js). Keep the three lists in sync.
+export const DOCUMENT_FORMATS = ["pdf", "pptx", "ppt", "txt", "docx", "md"] as const;
+export const IMAGE_FORMATS = ["jpg", "jpeg", "png", "webp", "heic", "heif"] as const;
+export const AUDIO_FORMATS = ["m4a", "mp3", "wav", "ogg", "aac"] as const;
+
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+export function formatBytes(bytes: number) {
+  if (!bytes) return "0 KB";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Pick-time gate mirroring the web app's validateFile(): a file outside the
+ * allowlist, over the cap, or empty is rejected before a note or a queue row
+ * exists, so nothing has to be cleaned up afterwards. Throws the same
+ * user-facing copy the web upload panel shows.
+ */
+export function validateUpload(input: { format: string; size: number; kind: UploadKind }) {
+  const format = input.format.toLowerCase().replace(/^\./, "");
+  const allowed =
+    input.kind === "image"
+      ? IMAGE_FORMATS
+      : input.kind === "audio"
+        ? AUDIO_FORMATS
+        : DOCUMENT_FORMATS;
+  if (!(allowed as readonly string[]).includes(format)) {
+    throw new Error(
+      `That file type is not supported. Use ${DOCUMENT_FORMATS.join(", ")} for documents, ${IMAGE_FORMATS.join(", ")} for images, or ${AUDIO_FORMATS.join(", ")} for audio.`,
+    );
+  }
+  if (input.size > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      `That file is ${formatBytes(input.size)}. The limit is 25 MB — try a clearer photo or splitting the document.`,
+    );
+  }
+  if (input.size === 0) throw new Error("That file is empty.");
+}
 
 // Map accepted extensions to canonical MIME types for Neon signed PUTs.
 const MIME_BY_FORMAT: Record<string, string> = {

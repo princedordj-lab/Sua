@@ -101,6 +101,10 @@ export default function NoteView() {
   // message for a failed run. Best effort — offline notes simply have none.
   const [jobMeta, setJobMeta] = useState<JobMeta | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
+  // Long-file progress counter ("Reading pages 41 of 212"), live-polled.
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(
+    null,
+  );
   const [tab, setTab] = useState<ReaderTab>("notes");
   const [showOriginal, setShowOriginal] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -139,6 +143,7 @@ export default function NoteView() {
         setLastGeneration(null);
         setJobMeta(null);
         setJobError(null);
+        setProgress(null);
         setSyncPending(false);
         return;
       }
@@ -229,11 +234,17 @@ export default function NoteView() {
 
   // Mirror pipeline stages live while a generation is in flight. Upload
   // conversions have no local queue row, so the server job is the source.
+  // The returned job also carries the long-file progress counter.
   useEffect(() => {
     if (!aiActive) return;
     const timer = setInterval(() => {
       if (deletedRef.current) return;
       void refreshNoteFromServer({ db, getAuthToken }, id)
+        .then((job) => {
+          if (job?.progressTotal && job.progressTotal > 0) {
+            setProgress({ done: job.progressDone ?? 0, total: job.progressTotal });
+          }
+        })
         .catch(() => {})
         .finally(() => {
           if (screenActiveRef.current && !deletedRef.current) void load();
@@ -508,6 +519,7 @@ export default function NoteView() {
                 label={aiStageLabel(note.aiState, generationKind, {
                   pendingUploads,
                   sourceType: note.sourceType,
+                  progress,
                 })}
                 pendingUploads={pendingUploads}
                 onViewUploads={() => router.push("/uploads")}

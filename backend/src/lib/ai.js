@@ -135,6 +135,68 @@ async function geminiTranscribeOnce({ bytes, mimeType, languageHint, model }) {
  * OCR an image (photo of the board, scanned handout) with Gemini vision.
  * Returns { text, model, promptTokens, completionTokens }.
  */
+/**
+ * OCR several scanned pages in one call. `pages` is [{ index, image: Buffer }]
+ * in source order; each image's text comes back positionally separated by
+ * "===== IMAGE n =====" markers. When the model's output cannot be aligned
+ * (marker count mismatch), every page resolves to null and the caller falls
+ * back to single-image calls, so a batch never silently swaps page texts.
+ */
+export async function geminiOcrBatch({ pages, mimeType = "image/png" }) {
+  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not set");
+  if (!pages?.length) return [];
+  const model = models.transcriptionFallback();
+  const prompt =
+    `You will receive ${pages.length} images of lecture material (scanned pages, slides, handouts), ` +
+    "in order. Extract all visible text from each image separately. Preserve line breaks and " +
+    "ordering. Keep technical terms, numbers and formulas exactly as written. Output ONLY the " +
+    "extracted texts in order, each preceded on its own line by a marker of the form " +
+    "===== IMAGE 1 =====, ===== IMAGE 2 ===== and so on. Nothing else outside the markers.";
+  const contents = [
+    {
+      parts: [
+        { text: prompt },
+        ...pages.map((page) => ({
+          inlineData: { data: Buffer.from(page.image).toString("base64"), mimeType },
+        })),
+      ],
+    },
+  ];
+  const { signal, done } = withTimeout(120_000);
+  try {
+    const response = await fetch(
+      `${GEMINI_BASE}/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents }), signal },
+    );
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Gemini batch OCR failed (${response.status}): ${detail.slice(0, 300)}`);
+    }
+    const data = await response.json();
+    const text = data?.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text ?? "")
+      .join("")
+      .trim();
+    const usage = data?.usageMetadata ?? {};
+    const usageInfo = {
+      model,
+      promptTokens: usage.promptTokenCount ?? 0,
+      completionTokens: usage.candidatesTokenCount ?? 0,
+    };
+    if (!text) return pages.map(() => ({ text: null, ...usageInfo }));
+    const results = pages.map(() => ({ text: null, ...usageInfo }));
+    const parts = text.split(/^=====\s*IMAGE\s+\d+\s*=====\s*$/m).map((part) => part.trim());
+    if (parts.length === pages.length + 1) {
+      parts.slice(1).forEach((part, slot) => {
+        if (part) results[slot].text = part;
+      });
+    }
+    return results;
+  } finally {
+    done();
+  }
+}
+
 export async function geminiImageText({ bytes, mimeType }) {
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not set");
   const model = models.transcriptionFallback();

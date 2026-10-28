@@ -12,6 +12,7 @@ import { jobsRouter } from "./routes/jobs.js";
 import { chatRouter } from "./routes/chat.js";
 import { timingSafeEqual } from "node:crypto";
 import { runJobs } from "./lib/runner.js";
+import { extractNext } from "./lib/extraction.js";
 import { studyRouter } from "./routes/study.js";
 
 const app = express();
@@ -82,8 +83,11 @@ function checkCronAuth(req) {
 }
 
 // Background cron tick for scheduled job draining in serverless environments.
-// Mounted before clerkMiddleware so it does not require student session auth.
-app.post("/api/internal/jobs/tick", async (req, res) => {
+// Also drives long-file extraction passes: assets stuck in pending/partial
+// get another bounded pass here even when no client is polling. Mounted
+// before clerkMiddleware so it does not require student session auth.
+// Accepts both GET and POST: Vercel cron always sends GET.
+async function handleTick(req, res) {
   if (!checkCronAuth(req)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
@@ -92,12 +96,23 @@ app.post("/api/internal/jobs/tick", async (req, res) => {
     const maxJobs = Math.min(10, Math.max(1, Number(req.query?.maxJobs ?? 5)));
     const budgetMs = Math.min(270_000, Math.max(10_000, Number(req.query?.budgetMs ?? 240_000)));
     const result = await runJobs({ maxJobs, budgetMs });
-    res.json({ ok: true, ...result });
+    // Extraction is separate from generation jobs: pending/partial assets
+    // resume here with their own (smaller) time budget per pass.
+    const maxAssets = Math.min(5, Math.max(1, Number(req.query?.maxAssets ?? 2)));
+    const extractBudgetMs = Math.min(
+      200_000,
+      Math.max(15_000, Number(req.query?.extractBudgetMs ?? 120_000)),
+    );
+    const extraction = await extractNext({ maxAssets, budgetMs: extractBudgetMs });
+    res.json({ ok: true, ...result, extraction });
   } catch (err) {
     console.error("Tick error:", err);
     res.status(500).json({ error: "Tick failed", message: err?.message ?? String(err) });
   }
-});
+}
+
+app.post("/api/internal/jobs/tick", handleTick);
+app.get("/api/internal/jobs/tick", handleTick);
 
 app.use(
   clerkMiddleware({

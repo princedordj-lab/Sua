@@ -50,10 +50,12 @@ export function CourseSelect({
     });
   }, [courses, query]);
 
-  // Keep active index in bounds when list changes
-  useEffect(() => {
+  // Keep the highlighted row in bounds without an effect: query changes reset
+  // it explicitly, list changes just clamp at use.
+  const changeQuery = (value: string) => {
+    setQuery(value);
     setActiveIndex(0);
-  }, [filteredCourses.length, query]);
+  };
 
   // Handle focus when opened: autofocus on desktop, avoid auto-popping keyboard on touch
   useEffect(() => {
@@ -87,7 +89,7 @@ export function CourseSelect({
   const handleSelect = (courseId: string) => {
     onSelect(courseId);
     setOpen(false);
-    setQuery("");
+    changeQuery("");
     pillRef.current?.focus();
   };
 
@@ -115,7 +117,7 @@ export function CourseSelect({
       setActiveIndex((prev) => (prev - 1 >= 0 ? prev - 1 : filteredCourses.length - 1));
     } else if (event.key === "Enter") {
       event.preventDefault();
-      const target = filteredCourses[activeIndex];
+      const target = filteredCourses[Math.min(activeIndex, Math.max(0, filteredCourses.length - 1))];
       if (target) {
         handleSelect(target.id);
       }
@@ -176,7 +178,7 @@ export function CourseSelect({
                   ref={searchInputRef}
                   type="text"
                   value={query}
-                  onChange={(e) => setQuery(e.target.value)}
+                  onChange={(e) => changeQuery(e.target.value)}
                   placeholder="Search courses…"
                   className="ask-course-search-input"
                   aria-label="Search courses"
@@ -184,7 +186,7 @@ export function CourseSelect({
                 {query ? (
                   <button
                     type="button"
-                    onClick={() => setQuery("")}
+                    onClick={() => changeQuery("")}
                     className="ask-course-clear-btn"
                     aria-label="Clear search"
                   >
