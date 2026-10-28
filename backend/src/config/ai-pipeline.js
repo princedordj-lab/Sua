@@ -135,3 +135,22 @@ export class UserFacingError extends Error {
 export function isUserFacing(error) {
   return Boolean(error?.userFacing);
 }
+
+/**
+ * The invocation ran out of its time budget mid-pipeline. Not a failure: all
+ * finished work is checkpointed, so the runner re-queues the job without
+ * spending an attempt and the next invocation resumes where this one stopped.
+ * Kept out of the student-facing vocabulary on purpose.
+ */
+export class JobYieldError extends Error {
+  constructor(stage = "run") {
+    super(`Job yielded at ${stage}`);
+    this.name = "JobYieldError";
+    this.yield = true;
+    this.stage = stage;
+  }
+}
+
+export function isJobYield(error) {
+  return Boolean(error?.yield);
+}

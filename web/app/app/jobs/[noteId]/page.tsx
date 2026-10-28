@@ -24,6 +24,7 @@ const STAGES: { key: AiState; label: string }[] = [
   { key: "reading", label: "Reading your material" },
   { key: "reading_scans", label: "Reading scans" },
   { key: "digesting", label: "Pulling out the important parts" },
+  { key: "merging", label: "Combining the important parts" },
   { key: "writing", label: "Writing your notes" },
   { key: "checking", label: "Checking numbers" },
   { key: "summarising", label: "Summarising" },

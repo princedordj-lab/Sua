@@ -93,6 +93,7 @@ export type AiState =
   | "reading"
   | "reading_scans"
   | "digesting"
+  | "merging"
   | "writing"
   | "checking"
   | "summarising"

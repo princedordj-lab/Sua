@@ -106,6 +106,22 @@ async function reapIfStale(tx, job) {
   }
 }
 
+/**
+ * Polls are the student's heartbeat, so they also drive the queue. A queued
+ * job needs a worker; so does a running job whose lease expired — that means
+ * the invocation that claimed it was killed (serverless timeout, deploy) and
+ * without a kick it would sit until the nightly cron or the stale reaper.
+ */
+function needsWorker(job) {
+  if (!job) return false;
+  if (job.state === "queued") return true;
+  return (
+    job.state === "running" &&
+    Boolean(job.lockedUntil) &&
+    job.lockedUntil.getTime() <= Date.now()
+  );
+}
+
 /** A failed enqueue must not leave a phantom "queued" job the app will poll. */
 async function failUnqueuedJob(clerkId, job) {
   const data = {
@@ -214,7 +230,7 @@ jobsRouter.get("/:id", async (req, res) => {
     const found = await tx.job.findFirst({ where: { id: req.params.id } });
     // Hobby-plan compensation for the daily-only cron: the watching student's
     // own polls drive the queue instead of waiting for the nightly sweep.
-    if (found?.state === "queued") triggerRunner(found.id);
+    if (needsWorker(found)) triggerRunner(found.id);
     return reapIfStale(tx, found);
   });
   if (!job) return res.status(404).json({ error: "Job not found" });
@@ -244,8 +260,9 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
     });
     if (stuck) triggerExtraction(stuck.id);
     // Same idea for the queue: a queued job's polls run runner passes
-    // (release → extraction resume → next pass) without any cron.
-    if (found?.state === "queued") triggerRunner(found.id);
+    // (release → extraction resume → next pass) without any cron, and a job
+    // whose worker died mid-run is reclaimed once its lease expires.
+    if (needsWorker(found)) triggerRunner(found.id);
     return reapIfStale(tx, found);
   });
   if (!job) return res.json(null);

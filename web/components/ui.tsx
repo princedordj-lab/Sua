@@ -515,6 +515,8 @@ export function stageLabel(stage?: string) {
       return "Reading scans";
     case "digesting":
       return "Digesting";
+    case "merging":
+      return "Combining";
     case "writing":
       return "Writing";
     case "checking":

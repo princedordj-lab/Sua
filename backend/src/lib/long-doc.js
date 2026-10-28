@@ -33,7 +33,7 @@ import {
   lectureNotePrompt,
   referencePrompt,
 } from "./prompts.js";
-import { longDoc, notePipeline, UserFacingError } from "../config/ai-pipeline.js";
+import { longDoc, notePipeline, UserFacingError, JobYieldError } from "../config/ai-pipeline.js";
 import { validateStudyPack } from "../config/study-pack-schema.js";
 import { checkSourceFidelity, normaliseForCompare } from "./numbers.js";
 import { MAX_TEXT_CHARS } from "./extract.js";
@@ -259,6 +259,40 @@ function rangeLabel(labels) {
 }
 
 // ---------------------------------------------------------------------------
+// Checkpoint (shared JSON column, one writer per stage)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every stage shares the single `Job.checkpoint` JSON column, so a write must
+ * only replace the keys it owns. Writing the whole object from an in-memory
+ * copy made stages clobber each other: the first reduce write dropped the
+ * digest map, so an interrupted run redid the entire map and could never get
+ * past "Pulling out important parts". Postgres `||` merges one level deep,
+ * atomically, without a read-modify-write race between map workers.
+ */
+export function mergeCheckpoint(current, patch) {
+  // Mirrors Postgres `||` exactly: top-level keys are replaced wholesale, so a
+  // stage must pass the complete value for each key it owns (its in-memory map
+  // is seeded from the row and grows), and other stages' keys survive untouched.
+  const base = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+  return { ...base, ...(patch ?? {}) };
+}
+
+async function patchCheckpoint(jobId, patch, { progressIncrement = 0 } = {}) {
+  await prisma
+    .$executeRaw`
+      UPDATE "jobs"
+      SET "checkpoint" = COALESCE("checkpoint", '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb,
+          "progressDone" = "progressDone" + ${Math.max(0, Math.round(progressIncrement))},
+          "updatedAt" = NOW()
+      WHERE "id" = ${jobId}
+    `
+    .catch((error) => {
+      console.warn(`checkpoint write failed for job ${jobId}: ${error?.message ?? error}`);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Map (3.5)
 // ---------------------------------------------------------------------------
 
@@ -277,6 +311,7 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   const failures = { ...(job.checkpoint?.digestFailures ?? {}) };
   let calls = 0;
   let rateLimited = false;
+  let yielded = false;
 
   // Refuse pathological sources before spending a single model call: the
   // chunker already scales up to maxChunkChars, so more groups than the cap
@@ -299,18 +334,11 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   };
 
   const persistMapState = async () => {
-    await prisma.job
-      .update({
-        where: { id: job.id },
-        data: {
-          checkpoint: {
-            digests: saved,
-            digestFailures: failures,
-            mapCalls: (job.checkpoint?.mapCalls ?? 0) + calls,
-          },
-        },
-      })
-      .catch(() => {});
+    await patchCheckpoint(job.id, {
+      digests: saved,
+      digestFailures: failures,
+      mapCalls: (job.checkpoint?.mapCalls ?? 0) + calls,
+    });
     await emitCheckpoint();
   };
 
@@ -325,6 +353,12 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
     // The daily quota is gone — every further call is guaranteed to fail, so
     // stop spending them. Unattempted groups stay unsaved and resume later.
     if (rateLimited) return;
+    // Out of invocation time: stop starting calls. Groups already in flight
+    // still finish and checkpoint; the job is re-queued after the loop.
+    if (deps.deadline && Date.now() > deps.deadline) {
+      yielded = true;
+      return;
+    }
     const checkpoint = await prisma.job.findUnique({ where: { id: job.id }, select: { checkpoint: true } }).catch(() => null);
     const mapCalls = checkpoint?.checkpoint?.mapCalls ?? (job.checkpoint?.mapCalls ?? 0) + calls;
     if (Date.now() - new Date(job.startedAt ?? job.createdAt).getTime() > longDoc.maxJobRuntimeMs) {
@@ -345,15 +379,11 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
       );
       saved[digestCacheKey(group, model)] = digest;
       delete failures[group.hash];
-      await prisma.job
-        .update({
-          where: { id: job.id },
-          data: {
-            checkpoint: { digests: saved, digestFailures: failures, mapCalls },
-            progressDone: { increment: 1 },
-          },
-        })
-        .catch(() => {});
+      await patchCheckpoint(
+        job.id,
+        { digests: saved, digestFailures: failures, mapCalls },
+        { progressIncrement: 1 },
+      );
       await emitCheckpoint();
     } catch (error) {
       if (error instanceof UserFacingError) throw error;
@@ -368,6 +398,10 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   });
 
   await persistMapState();
+
+  // Out of invocation time is not a failure: every finished digest is already
+  // checkpointed, so hand the job back and let the next pass continue the map.
+  if (yielded) throw new JobYieldError("map");
 
   // Second-chance sweep: transient provider errors (rate bursts, 5xx flaps)
   // often clear within seconds, so give failed groups one more try —
@@ -394,15 +428,11 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
         );
         saved[digestCacheKey(group, model)] = digest;
         delete failures[group.hash];
-        await prisma.job
-          .update({
-            where: { id: job.id },
-            data: {
-              checkpoint: { digests: saved, digestFailures: failures, mapCalls },
-              progressDone: { increment: 1 },
-            },
-          })
-          .catch(() => {});
+        await patchCheckpoint(
+          job.id,
+          { digests: saved, digestFailures: failures, mapCalls },
+          { progressIncrement: 1 },
+        );
         await emitCheckpoint();
       } catch (error) {
         if (RATE_LIMIT_RE.test(error?.message ?? "")) {
@@ -578,6 +608,9 @@ export async function reduceDigests({ job, digests, groups, sections, sourceType
     for (const [waveIndex, wave] of waves.entries()) {
       const cacheKey = reduceKey(section.id, waveIndex, mergeModel());
       const cached = saved[cacheKey];
+      if (!cached && deps.deadline && Date.now() > deps.deadline) {
+        throw new JobYieldError("merging");
+      }
       const waveResult = cached ?? (await withStage(deps, "merging", () =>
         mergeDigests({
           digests: wave,
@@ -587,18 +620,9 @@ export async function reduceDigests({ job, digests, groups, sections, sourceType
         })));
       if (!cached) {
         saved[cacheKey] = waveResult;
-        await prisma.job
-          .update({
-            where: { id: job.id },
-            data: {
-              checkpoint: {
-                digests: job.checkpoint?.digests ?? {},
-                digestFailures: job.checkpoint?.digestFailures ?? {},
-                reduce: saved,
-              },
-            },
-          })
-          .catch(() => {});
+        // Reduce owns only `reduce`: merging the patch keeps the digest map
+        // (and every other stage's keys) that earlier writes put on the row.
+        await patchCheckpoint(job.id, { reduce: saved });
       }
       merged = merged ? mergeSummaries(merged, waveResult) : waveResult;
     }
@@ -618,6 +642,9 @@ export async function reduceDigests({ job, digests, groups, sections, sourceType
     let merged = null;
     for (const [waveIndex, wave] of waves.entries()) {
       const cacheKey = reduceKey("overview", waveIndex, mergeModel());
+      if (!saved[cacheKey] && deps.deadline && Date.now() > deps.deadline) {
+        throw new JobYieldError("overview");
+      }
       const waveResult = saved[cacheKey] ?? (await withStage(deps, "merging", () =>
         mergeDigests({
           digests: wave,
@@ -627,23 +654,13 @@ export async function reduceDigests({ job, digests, groups, sections, sourceType
         })));
       if (!saved[cacheKey]) {
         saved[cacheKey] = waveResult;
-        await prisma.job
-          .update({
-            where: { id: job.id },
-            data: {
-              checkpoint: {
-                digests: job.checkpoint?.digests ?? {},
-                digestFailures: job.checkpoint?.digestFailures ?? {},
-                reduce: saved,
-              },
-            },
-          })
-          .catch(() => {});
+        await patchCheckpoint(job.id, { reduce: saved });
       }
       merged = merged ? mergeSummaries(merged, waveResult) : waveResult;
     }
     overview = merged;
     saved[overviewKey] = overview;
+    await patchCheckpoint(job.id, { reduce: saved });
   }
 
   return { summariesFor, summaryList, overview };
@@ -1043,6 +1060,7 @@ export async function runLongDocJob({ job, note, kind, clerkId, deps }) {
 
     for (const [index, part] of parts.entries()) {
       await assertJobActive(job);
+      if (deps.deadline && Date.now() > deps.deadline) throw new JobYieldError("writing");
       await deps.setStage("writing", { done: index + 1, total: parts.length + 1 });
       const rawText = clampChars(part.rawRows.map((row) => row.text ?? "").join("\n\n"), WRITE_MAX_CHARS);
       const perPartNotices = notices.slice();
@@ -1100,6 +1118,7 @@ export async function runLongDocJob({ job, note, kind, clerkId, deps }) {
   }
 
   // ---- short + single modes: the job's own note ---------------------------
+  if (deps.deadline && Date.now() > deps.deadline) throw new JobYieldError("writing");
   await deps.setStage("writing");
   const spec = buildStudyPackSchema(scaledSpec(sections.length || 3));
   const material = clampChars(

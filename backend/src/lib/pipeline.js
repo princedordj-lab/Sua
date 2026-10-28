@@ -8,6 +8,7 @@ import {
   USER_MESSAGES,
   UserFacingError,
   isUserFacing,
+  isJobYield,
   notePipeline,
 } from "../config/ai-pipeline.js";
 import { validateStudyPack } from "../config/study-pack-schema.js";
@@ -108,7 +109,7 @@ async function recordAiCall(jobId, step, result) {
  * (3 attempts with exponential backoff); the Job row carries the stage/error
  * the app displays. Every persist is idempotent (replace) so reruns are clean.
  */
-export async function processJob(jobId, documentExtraction) {
+export async function processJob(jobId, documentExtraction, deadline = null) {
   const job = await prisma.job.findUnique({
     where: { id: jobId },
     include: {
@@ -123,14 +124,14 @@ export async function processJob(jobId, documentExtraction) {
   }
   if (job.state === "done") return;
   if (job.kind === "course_reference") {
-    await processReference(job, documentExtraction);
+    await processReference(job, documentExtraction, deadline);
     return;
   }
   if (job.kind === "quiz_marking") {
     await processQuizMarking(job);
     return;
   }
-  await processStudySet(job, documentExtraction);
+  await processStudySet(job, documentExtraction, deadline);
 }
 
 // A note deleted mid-run surfaces as a missing row (P2025) from any later
@@ -212,7 +213,7 @@ function courseContextOf(note) {
  * outside withUser — the pipeline only calls back into the database for short,
  * idempotent writes.
  */
-function noteDeps(job, documentExtraction) {
+function noteDeps(job, documentExtraction, deadline = null) {
   return {
     record: (step, result) => recordAiCall(job.id, step, result),
     readBytes: (asset) => fetchAssetBytes(asset),
@@ -225,6 +226,9 @@ function noteDeps(job, documentExtraction) {
       ),
     setStage: (stage, progress) => setStage(job, stage, "running", progress),
     assertAlive: () => assertNoteAlive(job),
+    // Wall-clock the invocation may spend on model calls. Stages stop starting
+    // new work past it and yield the job back to the queue (checkpointed).
+    deadline,
     ...documentExtraction,
   };
 }
@@ -256,14 +260,14 @@ async function guardRerun(job, hash) {
   return false;
 }
 
-export async function processStudySet(job, documentExtraction) {
+export async function processStudySet(job, documentExtraction, deadline = null) {
   const { note, user } = job;
   await startAttempt(job);
 
   try {
     // ---- 1-3. Read, clean, split + digest --------------------------------
     const courseContext = courseContextOf(note);
-    const deps = noteDeps(job, documentExtraction);
+    const deps = noteDeps(job, documentExtraction, deadline);
 
     // Long-file path: lib/extraction.js already stored page/slide chunks for
     // this note's documents. Structure -> map (checkpointed) -> reduce ->
@@ -335,6 +339,11 @@ export async function processStudySet(job, documentExtraction) {
       // Cancelled: the Job row is already closed; fail silently, no retry.
       console.log(`Job ${job.id} cancelled before ${job.stage ?? "start"} finished`);
       return;
+    }
+    if (isJobYield(error)) {
+      // Out of invocation time, not a failure: hand it to the runner, which
+      // re-queues the job so the next pass resumes from the checkpoint.
+      throw error;
     }
     if (await jobTargetDeleted(job, error)) {
       await closeDeletedJob(job);
@@ -500,13 +509,13 @@ async function finishMarkingJob(job) {
   });
 }
 
-export async function processReference(job, documentExtraction) {
+export async function processReference(job, documentExtraction, deadline = null) {
   const { note, user } = job;
   await startAttempt(job);
 
   try {
     const courseContext = courseContextOf(note);
-    const deps = noteDeps(job, documentExtraction);
+    const deps = noteDeps(job, documentExtraction, deadline);
 
     // Long-file path: same as study sets — chunked sources never re-read.
     const chunks = await loadChunkedSource(user.clerkId, note);
@@ -541,6 +550,11 @@ export async function processReference(job, documentExtraction) {
       // Cancelled: the Job row is already closed; fail silently, no retry.
       console.log(`Job ${job.id} cancelled before ${job.stage ?? "start"} finished`);
       return;
+    }
+    if (isJobYield(error)) {
+      // Out of invocation time, not a failure: hand it to the runner, which
+      // re-queues the job so the next pass resumes from the checkpoint.
+      throw error;
     }
     if (await jobTargetDeleted(job, error)) {
       await closeDeletedJob(job);

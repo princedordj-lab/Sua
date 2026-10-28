@@ -159,6 +159,7 @@ export const AI_ACTIVE_STATES: ReadonlySet<AiState> = new Set<AiState>([
   "reading",
   "reading_scans",
   "digesting",
+  "merging",
   "writing",
   "checking",
   "summarising",
@@ -205,6 +206,10 @@ export function aiStageLabel(
       return "Reading pages from the scan…" + progressSuffix;
     case "digesting":
       return "Pulling out the important parts…" + progressSuffix;
+    case "merging":
+      // Long-file reduce stage. The server's counter still counts digest
+      // groups, so no "(x of y)" here — it would describe a different unit.
+      return "Combining the important parts…";
     case "writing":
       return (kind === "course_reference"
         ? "Writing your reference sheet…"

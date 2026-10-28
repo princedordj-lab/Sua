@@ -23,12 +23,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { geminiTranscribe, setAiMock } from "../src/lib/ai.js";
 import { assembleSource, prepareMaterial, sourceFromText, writeNote } from "../src/lib/note-pipeline.js";
 import { generateStudySet, validateStudySet } from "../src/lib/pipeline.js";
-import { notePipeline, longDoc } from "../src/config/ai-pipeline.js";
+import { notePipeline, longDoc, isJobYield } from "../src/config/ai-pipeline.js";
 import {
   buildSections,
   groupRowsIntoChunks,
   mapDigests,
   reduceDigests,
+  mergeCheckpoint,
 } from "../src/lib/long-doc.js";
 import { digestToText } from "../src/lib/note-pipeline.js";
 
@@ -577,6 +578,111 @@ async function longEval(sectionsArg, courseContext, mock = false) {
   const resumeRunFailed = resumeCalls.some((entry) => String(entry).startsWith("resume run failed"));
   const resumeCallCount = resumeCalls.length - (resumeRunFailed ? 1 : 0);
   const resumeClean = !resumeRunFailed && resumeCallCount === 0;
+
+  // 5. Checkpoint ownership: stages share one JSON column, so each must merge
+  // only its own keys. Reduce used to write the whole column from a stale
+  // snapshot and dropped the digest map — an interrupted run then redid the
+  // entire map and could never get past the digest stage.
+  const afterMap = mergeCheckpoint({}, { digests: { a: "x" }, digestFailures: {}, mapCalls: 1 });
+  const afterReduce = mergeCheckpoint(afterMap, { reduce: { wave: "y" } });
+  const checkpointKeepsStages =
+    Object.keys(afterReduce.digests ?? {}).length === 1 &&
+    Object.keys(afterReduce.reduce ?? {}).length === 1 &&
+    afterReduce.mapCalls === 1;
+  // A later map patch (complete digest map) must still leave reduce in place.
+  const afterNextMap = mergeCheckpoint(afterReduce, {
+    digests: { ...afterReduce.digests, b: "z" },
+  });
+  const checkpointMergesDigests =
+    Object.keys(afterNextMap.digests).length === 2 &&
+    Object.keys(afterNextMap.reduce).length === 1;
+
+  // 6. Invocation budget: past the deadline no new model call starts and the
+  // stage reports a yield (re-queued, never a student-visible failure).
+  const mapYieldCalls = [];
+  let mapYield = false;
+  let mapYieldUserFacing = true;
+  try {
+    await mapDigests({
+      job: { ...job, id: "eval-long-yield-map", checkpoint: {} },
+      groups,
+      courseContext,
+      sourceType: "file",
+      deps: { ...deps, deadline: Date.now() - 1, record: async (step) => mapYieldCalls.push(step) },
+    });
+  } catch (error) {
+    mapYield = isJobYield(error);
+    mapYieldUserFacing = !isJobYield(error) && Boolean(error?.userFacing);
+  }
+  const reduceYieldCalls = [];
+  let reduceYield = false;
+  if (map) {
+    try {
+      await reduceDigests({
+        job: { ...job, id: "eval-long-yield-reduce", checkpoint: {} },
+        digests: map.digests,
+        groups,
+        sections: structure,
+        sourceType: "file",
+        courseContext,
+        deps: { ...deps, deadline: Date.now() - 1, record: async (step) => reduceYieldCalls.push(step) },
+      });
+    } catch (error) {
+      reduceYield = isJobYield(error);
+    }
+  }
+
+  // 7. Partial map + resume: the budget runs out after three digests, the
+  // stage yields, and the next pass continues from the emitted checkpoint.
+  // Across both passes every group is attempted exactly once — finished
+  // digests are never paid for twice.
+  const budget = { deadline: Date.now() + 60_000 };
+  const partialCalls = [];
+  let partialCheckpoint = {};
+  let partialYielded = false;
+  try {
+    await mapDigests({
+      job: { ...job, id: "eval-long-partial", checkpoint: {} },
+      groups,
+      courseContext,
+      sourceType: "file",
+      deps: {
+        ...deps,
+        get deadline() {
+          return budget.deadline;
+        },
+        record: async (step) => {
+          partialCalls.push(step);
+          if (partialCalls.length === 3) budget.deadline = Date.now() - 1;
+        },
+        onCheckpoint: async (checkpoint) => {
+          partialCheckpoint = checkpoint;
+        },
+      },
+    });
+  } catch (error) {
+    partialYielded = isJobYield(error);
+  }
+  let resumeAfterYieldCalls = 0;
+  if (partialYielded) {
+    await mapDigests({
+      job: { ...job, id: "eval-long-partial-resume", checkpoint: partialCheckpoint },
+      groups,
+      courseContext,
+      sourceType: "file",
+      deps: {
+        ...deps,
+        record: async () => {
+          resumeAfterYieldCalls += 1;
+        },
+      },
+    }).catch(() => {
+      resumeAfterYieldCalls = -1;
+    });
+  }
+  const resumeAfterYieldClean =
+    partialYielded && resumeAfterYieldCalls >= 0 && partialCalls.length + resumeAfterYieldCalls === groups.length;
+
   const report = {
     mode: mock ? "mock" : "live",
     sections: structure.length,
@@ -589,6 +695,17 @@ async function longEval(sectionsArg, courseContext, mock = false) {
     setProblem,
     resumeClean,
     resumeCalls,
+    checkpointKeepsStages,
+    checkpointMergesDigests,
+    mapYield,
+    mapYieldCalls: mapYieldCalls.length,
+    mapYieldUserFacing,
+    reduceYield,
+    reduceYieldCalls: reduceYieldCalls.length,
+    partialYielded,
+    partialCalls: partialCalls.length,
+    resumeAfterYieldCalls,
+    resumeAfterYieldClean,
     modelCalls: calls.length,
     promptTokens: calls.reduce((sum, call) => sum + call.promptTokens, 0),
     completionTokens: calls.reduce((sum, call) => sum + call.completionTokens, 0),
@@ -613,6 +730,19 @@ async function longEval(sectionsArg, courseContext, mock = false) {
     problems.push(resumeRunFailed ? "resume run failed" : `resume made ${resumeCallCount} extra calls`);
   }
   if (!report.failureReported) problems.push("injected failure was silently swallowed");
+  if (!checkpointKeepsStages || !checkpointMergesDigests) {
+    problems.push("checkpoint stages clobber each other's keys");
+  }
+  if (!mapYield || mapYieldCalls.length !== 0) problems.push("map ignored the invocation deadline");
+  if (!reduceYield || reduceYieldCalls.length !== 0) problems.push("reduce ignored the invocation deadline");
+  if (mapYieldUserFacing) problems.push("a yield was reported as a student-visible failure");
+  if (!partialYielded) {
+    problems.push("a partial map did not yield");
+  } else if (!resumeAfterYieldClean) {
+    problems.push(
+      `yield/resume repeated work: ${partialCalls.length}+${resumeAfterYieldCalls} calls for ${groups.length} groups`,
+    );
+  }
 
   await writeOutput("long-doc", "study_set", report);
   return {

@@ -2,7 +2,7 @@ import { prisma } from "../config/prisma.js";
 import { processJob } from "./pipeline.js";
 import { extractDocument, renderPdfPage } from "./extract.js";
 import { extractNext } from "./extraction.js";
-import { isUserFacing, USER_MESSAGES, longDoc } from "../config/ai-pipeline.js";
+import { isUserFacing, isJobYield, USER_MESSAGES, longDoc } from "../config/ai-pipeline.js";
 
 export const ALLOWED_JOB_KINDS = [
   "study_set",
@@ -211,6 +211,27 @@ export async function releaseJob(jobId) {
   }).catch(() => {});
 }
 
+/**
+ * A yield is not a failure. Finished stages live on the checkpoint, so the
+ * attempt is returned (a big file may legitimately need many invocations) and
+ * the job is queued again for the next poll/tick to continue.
+ */
+export async function releaseJobForResume(jobId) {
+  await prisma
+    .$executeRaw`
+      UPDATE "jobs"
+      SET "state" = 'queued',
+          "lockedUntil" = NULL,
+          "runAfter" = NOW() + interval '2 seconds',
+          "attempts" = GREATEST("attempts" - 1, 0),
+          "updatedAt" = NOW()
+      WHERE "id" = ${jobId} AND "state" = 'running'
+    `
+    .catch((error) => {
+      console.warn(`could not re-queue yielded job ${jobId}: ${error?.message ?? error}`);
+    });
+}
+
 /** Extraction failed for a document the job depends on — permanent, honest, no retry. */
 function failJobExtraction(job, asset) {
   const message =
@@ -296,7 +317,7 @@ async function handleJobFailure(job, error) {
   }
 }
 
-async function processClaimedJob(claimed) {
+async function processClaimedJob(claimed, deadline = null) {
   const jobId = claimed.id;
   const job = await prisma.job.findUnique({
     where: { id: jobId },
@@ -442,7 +463,7 @@ async function processClaimedJob(claimed) {
   // 4. Run pipeline
   const started = Date.now();
   try {
-    await processJob(jobId, { extractDocument, renderPdfPage });
+    await processJob(jobId, { extractDocument, renderPdfPage }, deadline);
     console.log(`Job ${jobId} completed in ${Date.now() - started}ms`);
     // Release lock upon success
     await prisma.job.updateMany({
@@ -450,6 +471,13 @@ async function processClaimedJob(claimed) {
       data: { lockedUntil: null },
     }).catch(() => {});
   } catch (error) {
+    if (isJobYield(error)) {
+      await releaseJobForResume(jobId);
+      console.log(
+        `Job ${jobId} yielded at ${error?.stage ?? "stage"} after ${Date.now() - started}ms; re-queued to resume from checkpoint`,
+      );
+      return;
+    }
     console.warn(`Job ${jobId} failed: ${error?.message ?? error}`);
     await handleJobFailure(job, error);
   }
@@ -465,6 +493,9 @@ export async function runJobs({
   targetJobId = null,
 } = {}) {
   const startTime = Date.now();
+  // Leave headroom under the platform function limit for the final writes and
+  // the release/complete update after a stage boundary.
+  const deadline = startTime + Math.max(30_000, budgetMs - 15_000);
   let processed = 0;
   let errors = 0;
 
@@ -486,7 +517,9 @@ export async function runJobs({
     if (!claimed) break;
 
     try {
-      await processClaimedJob(claimed);
+      // The invocation's own budget, not just a job budget: stages stop
+      // starting calls past this point and yield the job back to the queue.
+      await processClaimedJob(claimed, deadline);
       processed++;
     } catch (err) {
       errors++;
