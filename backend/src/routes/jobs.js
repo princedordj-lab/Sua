@@ -6,6 +6,7 @@ import { aiConfigured } from "../lib/ai.js";
 import {
   studyQueueConfigured,
   enqueueStudyJob,
+  triggerRunner,
   STALE_QUEUED_MS,
   STALE_RUNNING_MS,
 } from "../lib/queue.js";
@@ -211,6 +212,9 @@ jobsRouter.get("/:id", async (req, res) => {
   const job = await withUser(identity.clerkId, async (tx) => {
     await requireUser(tx, identity);
     const found = await tx.job.findFirst({ where: { id: req.params.id } });
+    // Hobby-plan compensation for the daily-only cron: the watching student's
+    // own polls drive the queue instead of waiting for the nightly sweep.
+    if (found?.state === "queued") triggerRunner(found.id);
     return reapIfStale(tx, found);
   });
   if (!job) return res.status(404).json({ error: "Job not found" });
@@ -227,8 +231,9 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
       orderBy: { createdAt: "desc" },
     });
     // Opportunistic extraction resume: a failed load may have interrupted a
-    // long file's pass halfway. Fire-and-forget; the cron is the guaranteed
-    // path, this just shortens the wait while the student is watching.
+    // long file's pass halfway. Fire-and-forget; the nightly cron is the
+    // guaranteed path, these kicks just shorten the wait while the student
+    // is watching (the cron runs once a day on the Hobby plan).
     const stuck = await tx.asset.findFirst({
       where: {
         noteId: req.params.noteId,
@@ -238,6 +243,9 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
       select: { id: true },
     });
     if (stuck) triggerExtraction(stuck.id);
+    // Same idea for the queue: a queued job's polls run runner passes
+    // (release → extraction resume → next pass) without any cron.
+    if (found?.state === "queued") triggerRunner(found.id);
     return reapIfStale(tx, found);
   });
   if (!job) return res.json(null);

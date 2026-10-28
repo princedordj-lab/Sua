@@ -20,7 +20,7 @@ export function studyQueueConfigured() {
  * In Vercel serverless environments, uses waitUntil so the execution extends beyond response delivery.
  * In local dev or standalone scripts, invokes runJobs asynchronously.
  */
-async function triggerRunner(targetJobId) {
+export async function triggerRunner(targetJobId) {
   try {
     const { runJobs } = await import("./runner.js");
 
