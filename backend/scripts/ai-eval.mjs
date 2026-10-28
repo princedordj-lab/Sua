@@ -283,19 +283,30 @@ function describe(result) {
 
 const NEEDLE_TEXT = "NEEDLE-KX7: the half-life of dubnium-268 is 28 hours.";
 
-function syntheticPages({ sections, pagesPerSection, needlePage }) {
+export function syntheticPages({ sections, pagesPerSection, needlePage }) {
   const rows = [];
   let page = 0;
   for (let s = 1; s <= sections; s += 1) {
     for (let p = 1; p <= pagesPerSection; p += 1) {
       page += 1;
-      const lines = [
-        `SECTION ${s} TOPIC`,
-        `The mechanism in section ${s} operates at ${40 + s * 3} degrees with a yield of ${70 + s}.`,
-        `Values reported: ${s * 11} kPa, ${s * 2}.5 mol, duration ${10 + s} minutes.`,
-        "Key concept: the reaction stays first-order while the catalyst surface is stable.",
-        `Chapter summary ${s}.${p}: revise the table on pressure and the worked example.`,
-      ];
+      const lines =
+        p === 1
+          ? [
+              // Only the section's first page carries an ALL-CAPS heading, the
+              // way a real textbook does — otherwise every page anchors a
+              // "section" and the run balloons (12 sections became 60).
+              `SECTION ${s} TOPIC`,
+              `The mechanism in section ${s} operates at ${40 + s * 3} degrees with a yield of ${70 + s}.`,
+              `Values reported: ${s * 11} kPa, ${s * 2}.5 mol, duration ${10 + s} minutes.`,
+              "Key concept: the reaction stays first-order while the catalyst surface is stable.",
+              `Chapter summary ${s}.${p}: revise the table on pressure and the worked example.`,
+            ]
+          : [
+              `The mechanism in section ${s} continues at ${40 + s * 3} degrees with a yield of ${70 + s}.`,
+              `Values reported: ${s * 11} kPa, ${s * 2}.5 mol, duration ${10 + s} minutes.`,
+              "Key concept: the reaction stays first-order while the catalyst surface is stable.",
+              `Chapter summary ${s}.${p}: revise the table on pressure and the worked example.`,
+            ];
       if (page === needlePage) lines.push(NEEDLE_TEXT);
       rows.push({
         index: page,
@@ -322,11 +333,17 @@ async function longEval(sectionsArg, courseContext) {
   const groups = groupRowsIntoChunks({ rows, sections: structure });
 
   // record() doubles as the cost meter: every model call lands here.
+  // onCheckpoint captures the state production would persist, so the resume
+  // test can seed a second run the way a retried job really resumes.
+  let capturedCheckpoint = {};
   const calls = [];
   const deps = {
     ...evalDeps,
     record: async (step, result) => {
       calls.push({ step, promptTokens: result?.promptTokens ?? 0, completionTokens: result?.completionTokens ?? 0 });
+    },
+    onCheckpoint: async (checkpoint) => {
+      capturedCheckpoint = checkpoint;
     },
   };
   const job = {
@@ -389,7 +406,7 @@ async function longEval(sectionsArg, courseContext) {
   const resumeCalls = [];
   try {
     await mapDigests({
-      job: { ...job, checkpoint: job.checkpoint },
+      job: { ...job, checkpoint: { ...job.checkpoint, ...capturedCheckpoint } },
       groups,
       courseContext,
       sourceType: "file",
@@ -423,8 +440,8 @@ async function longEval(sectionsArg, courseContext) {
   const report = {
     sections: structure.length,
     groups: groups.length,
-    digests: Object.keys(map.digests ?? {}).length,
-    lost: map.lost ?? [],
+    digests: Object.keys(map?.digests ?? {}).length,
+    lost: map?.lost ?? [],
     needleInSummaries,
     needleInOverview,
     needleInSet,

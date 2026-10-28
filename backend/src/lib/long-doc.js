@@ -79,7 +79,7 @@ export async function loadChunkedSource(clerkId, note) {
 // ---------------------------------------------------------------------------
 
 const NUMBERED_HEADING =
-  /^(?:chapter|unit|module|section|part|appendix)\s+([a-z0-9ivx]+)\b|^(\d+(?:\.\d+){0,3})[).:]?\s+\S/i;
+  /^(?:chapter|unit|module|section|part|appendix)\s+(?:\d+|[ivxlIVXL]{1,8}|[A-Za-z])\b|^(\d+(?:\.\d+){0,3})[).:]?\s+\S/i;
 const ALL_CAPS = /^[A-Z][A-Z0-9 \-':,&]{7,63}$/;
 
 /** Stable over the file's content: the rerun-guard hash of a chunked source. */
@@ -264,6 +264,16 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   const failures = { ...(job.checkpoint?.digestFailures ?? {}) };
   let calls = 0;
 
+  // Optional sink for harnesses/tests: captures the checkpoint state that
+  // production persists via prisma.job.update (which the real job row does).
+  const emitCheckpoint = async () => {
+    await deps.onCheckpoint?.({
+      digests: saved,
+      digestFailures: failures,
+      mapCalls: (job.checkpoint?.mapCalls ?? 0) + calls,
+    });
+  };
+
   const persistMapState = async () => {
     await prisma.job
       .update({
@@ -277,6 +287,7 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
         },
       })
       .catch(() => {});
+    await emitCheckpoint();
   };
 
   if (todo.length) {
@@ -316,6 +327,7 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
           },
         })
         .catch(() => {});
+      await emitCheckpoint();
     } catch (error) {
       if (error instanceof UserFacingError) throw error;
       failures[group.hash] = { label: group.labelRange, code: "DIGEST_FAILED" };
@@ -324,6 +336,44 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   });
 
   await persistMapState();
+
+  // Second-chance sweep: transient provider errors (rate bursts, 5xx flaps)
+  // often clear within seconds, so give failed groups one more try —
+  // sequentially, on purpose, because parallel bursts are usually what broke
+  // them. Budget/runtime still bound the sweep; anything still failing is
+  // judged by the failure-ratio guard below.
+  const retryList = groups.filter((group) => failures[group.hash]);
+  if (retryList.length) {
+    await deps.setStage("digesting");
+    for (const group of retryList) {
+      const mapCalls = (job.checkpoint?.mapCalls ?? 0) + calls;
+      if (mapCalls >= longDoc.maxAiCallsPerJob) break;
+      if (Date.now() - new Date(job.startedAt ?? job.createdAt).getTime() > longDoc.maxJobRuntimeMs) break;
+      calls += 1;
+      try {
+        const digest = await digestChunk(
+          { index: group.index, labels: group.labels, text: group.text },
+          { courseContext, sourceType, chunkCount: groups.length },
+          deps,
+        );
+        saved[digestCacheKey(group, model)] = digest;
+        delete failures[group.hash];
+        await prisma.job
+          .update({
+            where: { id: job.id },
+            data: {
+              checkpoint: { digests: saved, digestFailures: failures, mapCalls },
+              progressDone: { increment: 1 },
+            },
+          })
+          .catch(() => {});
+        await emitCheckpoint();
+      } catch {
+        await persistMapState();
+      }
+    }
+    await persistMapState();
+  }
 
   const failedRatio = groups.length ? Object.keys(failures).length / groups.length : 0;
   if (failedRatio > longDoc.maxFailedChunkRatio) {
