@@ -1,0 +1,80 @@
+# Files excluded from the EAS Build archive (expo.fyi/eas-build-archive).
+#
+# IMPORTANT: when this file exists at the git repo root, EAS CLI ignores EVERY
+# .gitignore in the repo and uses only this file. Keep it in sync when adding
+# generated, cached, or sensitive paths to any project.
+#
+# The archive starts at the git repo root (this directory), covering Sua/,
+# backend/ and web/ — but the mobile build only needs Sua/. Patterns without a
+# leading slash match at any depth, same as .gitignore.
+
+# dependencies (EAS ignores node_modules by default; listed explicitly since
+# this file replaces the per-project .gitignore rules)
+node_modules/
+
+# local env files — secrets never leave the machine (use EAS Secrets instead)
+.env
+.env*.local
+!.env.example
+
+# caches and tool state
+.npm-cache/
+.agents/
+.claude/
+.windsurf/
+.tmp/
+.kotlin/
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# local design/reference material — never part of a build
+design_tokens/
+/images/
+Sua — Product Requirements Document (PRD).md
+Sua — Project Overview.md
+todo.md
+milestone.md
+buildstep.md
+debug.log
+
+# OS / editor noise
+.DS_Store
+*.pem
+*.tsbuildinfo
+
+# signing and provisioning material — never upload
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# ---- Sua (Expo app) ----
+Sua/.expo/
+Sua/dist/
+Sua/web-build/
+Sua/expo-env.d.ts
+Sua/.neon/
+Sua/example/
+# generated native folders — the EAS worker runs `expo prebuild` itself, so
+# shipping this machine's android/ios (local.properties, caches) only bloats
+# the archive and can pin stale native state
+Sua/android/
+Sua/ios/
+
+# ---- backend ----
+backend/src/generated/
+backend/dist/
+backend/skills-lock.json
+
+# ---- web ----
+web/.next/
+web/out/
+web/build/
+web/coverage/
+web/.vercel/
+web/next-env.d.ts
+web/.pnp.*
+web/.yarn/
