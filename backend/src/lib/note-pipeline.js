@@ -25,6 +25,7 @@ import {
 // CF Workers environments where the extract path is never reached.
 // import { extractDocument, renderPdfPage } from "./extract.js"; // lazy — see below
 import { checkSourceFidelity } from "./numbers.js";
+import { readImageNatively } from "./native-read.js";
 import {
   PROMPT_VERSION,
   cleanupPrompt,
@@ -116,6 +117,22 @@ export function buildTranscript(segments) {
   return segments.map(labelOf).join("\n\n");
 }
 
+/**
+ * Page-marked text, as written by a native read or a page-wise extraction
+ * (`## p. 12`, `## Slide 4`). A document's own Markdown headings must never be
+ * mistaken for page markers, so every `## ` line has to be one of ours.
+ */
+function pageMarkedSegments(value) {
+  const input = String(value ?? "").trim();
+  if (!input) return null;
+  const headings = [...input.matchAll(/^##\s+(.+)$/gm)].map((match) => match[1].trim());
+  if (!headings.length) return null;
+  const isPageMarker = (label) =>
+    /^p\.\s*\d+$/i.test(label) || /^Slide\s+\d+$/i.test(label);
+  if (!headings.every(isPageMarker)) return null;
+  return parseTranscript(input);
+}
+
 /** Parse a previously persisted labelled transcript back into segments. */
 export function parseTranscript(value) {
   const input = String(value ?? "").trim();
@@ -186,7 +203,22 @@ async function audioText(asset, deps) {
 async function imageText(asset, deps) {
   if (text(asset.extractedText)) return text(asset.extractedText);
   const bytes = await deps.readBytes(asset);
-  const result = await geminiImageText({ bytes, mimeType: mimeFor(asset) });
+  // The picture itself is the input: the model transcribes it and adds a line
+  // about any diagram or figure it shows. Plain OCR stays as the fallback for
+  // when native reading is switched off, out of quota, or comes back empty.
+  const native = await readImageNatively({
+    bytes,
+    format: String(asset.format ?? "").toLowerCase(),
+  });
+  const result =
+    native.ok && text(native.text)
+      ? {
+          text: native.text,
+          model: native.model,
+          promptTokens: native.promptTokens,
+          completionTokens: native.completionTokens,
+        }
+      : await geminiImageText({ bytes, mimeType: mimeFor(asset) });
   await deps.record("ocr", result);
   const ocr = text(result.text);
   if (ocr) await deps.saveAssetText(asset, ocr);
@@ -200,11 +232,16 @@ async function documentSegments(asset, deps, onScan) {
   // Upload completion has already extracted document text in the Node API. Reuse
   // it for every format (including PDFs) so a Cloudflare Worker never needs to
   // load the native canvas/PDF stack merely to process an ordinary upload.
+  // Native reads store page-marked text ("## p. 12"), so page labels survive.
   if (text(asset.extractedText)) {
+    const stored = text(asset.extractedText);
+    const segments = pageMarkedSegments(stored) ?? [
+      { index: 1, label: null, text: stored },
+    ];
     return {
-      segments: [{ index: 1, label: null, text: text(asset.extractedText) }],
+      segments,
       truncated: false,
-      pageCount: 1,
+      pageCount: asset.pagesTotal || Math.max(segments.length, 1),
     };
   }
   // The tick runner supplies these native-PDF helpers. They are omitted
@@ -900,13 +937,14 @@ export async function prepareMaterial({ note, kind, courseContext, deps, source:
 
   const short =
     (source.sourceType === "file" &&
-      source.pageCount <= notePipeline.shortSourcePages) ||
+      (source.pageCount <= notePipeline.shortSourcePages ||
+        source.rawText.length <= notePipeline.shortSourceChars)) ||
     (source.sourceType === "recording" &&
       source.minutes <= notePipeline.shortSourceMinutes) ||
     source.sourceType === "typed";
   const chunks = short ? [] : splitChunks(cleaned);
 
-  await countedDeps.setStage("digesting");
+  if (chunks.length) await countedDeps.setStage("digesting");
   const digests = chunks.length
     ? await mapWithLimit(chunks, notePipeline.digestConcurrency, (chunk) =>
         digestChunk(

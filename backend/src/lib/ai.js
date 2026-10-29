@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { documentRead as documentReadConfig } from "../config/ai-pipeline.js";
 
 /**
  * Model routing lives here, never in call sites. Every model name reads from
@@ -18,11 +19,18 @@ export const models = {
   transcription: () => process.env.TRANSCRIPTION_MODEL ?? "gemini-2.5-pro",
   transcriptionFallback: () =>
     process.env.TRANSCRIPTION_FALLBACK_MODEL ?? "gemini-2.5-flash",
+  // Native document reading (PDFs/images read as files, not OCR'd page by
+  // page). Model names live in config/ai-pipeline.js with every other knob; the
+  // fallback covers "model overloaded or retired" (404/503), which was observed
+  // live — it never covers quota, which is per project.
+  documentRead: () => documentReadConfig.model,
+  documentReadFallback: () => documentReadConfig.fallbackModel,
   bulk: () => process.env.AI_BULK_MODEL ?? DEFAULT_CHAT_MODEL,
   strong: () => process.env.AI_STRONG_MODEL ?? DEFAULT_CHAT_MODEL,
 };
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_FILES_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 // xkiro speaks the OpenAI chat-completions dialect under /v1.
 const XKIRO_BASE_URL = (
@@ -244,6 +252,264 @@ export async function geminiImageText({ bytes, mimeType }) {
     };
   } finally {
     done();
+  }
+}
+
+/**
+ * One Gemini `generateContent` request over arbitrary parts (documents, images,
+ * text). Model routing and the fallback hop live here: the read model is the
+ * documented one, but a 404/503 means "this model is gone or overloaded", not
+ * "this file cannot be read", so one retry on the fallback model is worth it.
+ * A 429 is never retried — the quota is per project, so a second model would
+ * fail the same way and only burn time.
+ */
+async function geminiPartsRequest({
+  parts,
+  schema = null,
+  maxOutputTokens,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  temperature = 0,
+  thinkingBudget = 0,
+  label = "Gemini document read",
+}) {
+  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not set");
+  const body = {
+    contents: [{ role: "user", parts }],
+    generationConfig: {
+      temperature,
+      ...(schema
+        ? { responseMimeType: "application/json", responseSchema: schema }
+        : {}),
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
+      ...(thinkingBudget != null
+        ? { thinkingConfig: { thinkingBudget } }
+        : {}),
+    },
+  };
+
+  const primary = models.documentRead();
+  const candidates = [primary, models.documentReadFallback()].filter(
+    (model, index, all) => model && all.indexOf(model) === index,
+  );
+
+  let lastError = null;
+  const deadline = Date.now() + timeoutMs;
+  for (const model of candidates) {
+    // A fallback hop must not double the caller's budget: the retry gets what
+    // is left, and a hop with no time left is skipped.
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const { signal, done } = withTimeout(remaining);
+    try {
+      const response = await fetch(
+        `${GEMINI_BASE}/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal,
+        },
+      );
+      const payload = await response.text();
+      if (!response.ok) {
+        const error = new Error(
+          `${label} failed (${response.status}): ${payload.slice(0, 300)}`,
+        );
+        error.status = response.status;
+        lastError = error;
+        // Overloaded / unknown model: try the next candidate. Anything else
+        // (quota, bad request) is final.
+        if (response.status === 404 || response.status === 503) {
+          const next = candidates[candidates.indexOf(model) + 1];
+          if (next) {
+            console.warn(
+              `[ai] ${label}: ${model} unavailable (${response.status}); retrying with ${next}`,
+            );
+          }
+          continue;
+        }
+        throw error;
+      }
+      let data;
+      try {
+        data = JSON.parse(payload);
+      } catch {
+        throw new Error(`${label} returned an unreadable response`);
+      }
+      const text = (data?.candidates?.[0]?.content?.parts ?? [])
+        .map((part) => part.text ?? "")
+        .join("")
+        .trim();
+      if (!text) throw new Error(`${label} returned an empty response`);
+      const usage = data?.usageMetadata ?? {};
+      return {
+        text,
+        model,
+        promptTokens: usage.promptTokenCount ?? 0,
+        completionTokens: usage.candidatesTokenCount ?? 0,
+      };
+    } finally {
+      done();
+    }
+  }
+  throw lastError ?? new Error(`${label} is unavailable`);
+}
+
+/**
+ * Read a PDF natively with Gemini — the document itself is the input, so
+ * charts, tables and scanned pages are read by the model instead of being
+ * OCR'd page by page. `fileUri` comes from geminiUploadFile for large files;
+ * otherwise the bytes go inline. Returns the JSON text plus usage.
+ */
+export async function geminiReadDocument({
+  bytes,
+  fileUri = null,
+  mimeType,
+  prompt,
+  schema = null,
+  maxOutputTokens,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  temperature = 0,
+  thinkingBudget = 0,
+}) {
+  if (!fileUri && !bytes?.length) throw new Error("Gemini document read got no document");
+  const documentPart = fileUri
+    ? { fileData: { fileUri, mimeType } }
+    : { inlineData: { data: Buffer.from(bytes).toString("base64"), mimeType } };
+  return geminiPartsRequest({
+    parts: [{ text: prompt }, documentPart],
+    schema,
+    maxOutputTokens,
+    timeoutMs,
+    temperature,
+    thinkingBudget,
+    label: "Gemini document read",
+  });
+}
+
+/**
+ * Read several images in one request (a deck's slides, a document's figures).
+ * Each image is prefixed with its id so the response can be mapped back
+ * without relying on order alone. Returns the JSON text plus usage.
+ */
+export async function geminiReadImages({
+  images,
+  prompt,
+  schema = null,
+  maxOutputTokens,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  temperature = 0,
+  thinkingBudget = 0,
+}) {
+  if (!images?.length) throw new Error("Gemini image read got no images");
+  const parts = [{ text: prompt }];
+  for (const image of images) {
+    parts.push({ text: `Image id: ${image.id}` });
+    parts.push({
+      inlineData: {
+        data: Buffer.from(image.bytes).toString("base64"),
+        mimeType: image.mimeType,
+      },
+    });
+  }
+  return geminiPartsRequest({
+    parts,
+    schema,
+    maxOutputTokens,
+    timeoutMs,
+    temperature,
+    thinkingBudget,
+    label: "Gemini image read",
+  });
+}
+
+
+/**
+ * Upload a file to Gemini's Files API (resumable protocol). Used when the
+ * base64-inline request would exceed the request size limit. Files are free to
+ * store and are deleted by Google after 48h; the caller deletes them sooner.
+ */
+export async function geminiUploadFile({
+  bytes,
+  mimeType,
+  displayName = "document",
+}) {
+  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not set");
+  if (!bytes?.length) throw new Error("Gemini file upload got no bytes");
+  const key = process.env.GEMINI_API_KEY;
+  const start = await fetch(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${key}`,
+    {
+      method: "POST",
+      headers: {
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": String(bytes.length),
+        "X-Goog-Upload-Header-Content-Type": mimeType,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ file: { display_name: displayName } }),
+    },
+  );
+  if (!start.ok) {
+    const detail = await start.text();
+    throw new Error(
+      `Gemini file upload failed (${start.status}): ${detail.slice(0, 300)}`,
+    );
+  }
+  const uploadUrl = start.headers.get("x-goog-upload-url");
+  if (!uploadUrl) throw new Error("Gemini file upload returned no upload URL");
+
+  const finalize = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      "Content-Length": String(bytes.length),
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+    },
+    body: bytes,
+  });
+  const payload = await finalize.text();
+  if (!finalize.ok) {
+    throw new Error(
+      `Gemini file upload finalize failed (${finalize.status}): ${payload.slice(0, 300)}`,
+    );
+  }
+  let file = null;
+  try {
+    file = JSON.parse(payload)?.file ?? null;
+  } catch {
+    file = null;
+  }
+  if (!file?.name || !file?.uri) {
+    throw new Error("Gemini file upload returned no file reference");
+  }
+  // Ingestion is asynchronous: a large PDF can stay PROCESSING for a few
+  // seconds, and reading it too early fails.
+  for (let attempt = 0; attempt < 15 && file.state === "PROCESSING"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    try {
+      const status = await fetch(`${GEMINI_FILES_BASE}/${file.name}?key=${key}`);
+      if (status.ok) file = { ...file, ...(await status.json()) };
+    } catch {
+      // One failed poll must not abort an upload that is probably fine.
+    }
+  }
+  if (file.state === "FAILED") {
+    throw new Error("Gemini could not process the uploaded file");
+  }
+  return { name: file.name, uri: file.uri, mimeType: file.mimeType ?? mimeType };
+}
+
+/** Best-effort cleanup; Google also removes uploaded files after 48h. */
+export async function geminiDeleteFile(name) {
+  if (!name || !process.env.GEMINI_API_KEY) return;
+  try {
+    await fetch(`${GEMINI_FILES_BASE}/${name}?key=${process.env.GEMINI_API_KEY}`, {
+      method: "DELETE",
+    });
+  } catch {
+    // Cleanup is best-effort.
   }
 }
 

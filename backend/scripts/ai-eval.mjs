@@ -200,6 +200,16 @@ const evalDeps = {
   readBytes: async () => {
     throw new Error("readBytes was not provided for this sample");
   },
+  // documentSegments only parses a file itself when the runner supplied these;
+  // without them a --doc sample has no text and every kind reports "unreadable".
+  extractDocument: async (bytes, format, kind) => {
+    const { extractDocument } = await import("../src/lib/extract.js");
+    return extractDocument(bytes, format, kind);
+  },
+  renderPdfPage: async (bytes, page, scale) => {
+    const { renderPdfPage } = await import("../src/lib/extract.js");
+    return renderPdfPage(bytes, page, scale);
+  },
 };
 
 function depsFor(bytes) {

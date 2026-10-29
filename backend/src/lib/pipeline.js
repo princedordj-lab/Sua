@@ -3,7 +3,7 @@ import { readAssetBytes } from "./storage.js";
 import { withUser } from "./db.js";
 import { bulkModel, chatCompletion, aiConfigured } from "./ai.js";
 import { enqueueStudyJob, studyQueueConfigured, STALE_QUEUED_MS } from "./queue.js";
-import { prepareMaterial, writeNote } from "./note-pipeline.js";
+import { prepareMaterial, assembleSource, sourceFromSegments, writeNote } from "./note-pipeline.js";
 import {
   USER_MESSAGES,
   UserFacingError,
@@ -260,6 +260,85 @@ async function guardRerun(job, hash) {
   return false;
 }
 
+/**
+ * A file whose whole stored text fits one generation call skips the map/reduce
+ * machinery: the stored page rows become the source directly, so the writer
+ * (and the study set) see the entire document in one pass. Only pure-document
+ * notes qualify — recordings and photos still need source assembly.
+ *
+ * Returns the prepared `source`, or null when the long-file path must run.
+ */
+function singlePassSource(note, chunks) {
+  if (!chunks?.rows?.length) return null;
+  if (!(notePipeline.shortSourceChars > 0)) return null;
+  const assets = (note.assets ?? []).filter(
+    (asset) => asset.status === "active" && asset.publicId !== "pending",
+  );
+  if (!assets.length) return null;
+  if (assets.some((asset) => asset.kind !== "document")) return null;
+
+  const rows = chunks.rows.filter((row) => String(row.text ?? "").trim());
+  if (!rows.length) return null;
+  const chars = rows.reduce((sum, row) => sum + row.text.length, 0);
+  if (chars > notePipeline.shortSourceChars) return null;
+
+  const pageCount = Math.max(
+    ...rows.map((row) => row.endPage ?? row.startPage ?? row.index),
+    rows.length,
+  );
+  return sourceFromSegments(
+    rows.map((row) => ({
+      index: row.index,
+      label: row.label ?? (row.startPage ? `p. ${row.startPage}` : null),
+      text: row.text,
+    })),
+    {
+      sourceType: "file",
+      pageCount,
+      truncated: assets.some((asset) => asset.truncated),
+    },
+  );
+}
+
+/**
+ * A note that mixes documents with photos has no chunk rows for the pictures,
+ * so the long-file path would silently drop them. Assembling the full source
+ * settles whether the note fits one generation call; the photos are read once
+ * here and would be read anyway on the way to generation.
+ *
+ * Returns the prepared `source`, or null when the note is too big (or is not
+ * this kind of note), in which case the caller keeps the long-file path.
+ */
+async function assembledShortSource(note, deps, chunks) {
+  if (!(notePipeline.shortSourceChars > 0)) return null;
+  const assets = (note.assets ?? []).filter(
+    (asset) => asset.status === "active" && asset.publicId !== "pending",
+  );
+  if (!assets.some((asset) => asset.kind === "image")) return null;
+  if (assets.some((asset) => asset.kind !== "document" && asset.kind !== "image")) {
+    return null;
+  }
+  // The document text alone already exceeds one call: assembling would read
+  // every photo only for the long-file path to run anyway.
+  const documentChars = (chunks?.rows ?? []).reduce(
+    (sum, row) => sum + String(row.text ?? "").length,
+    0,
+  );
+  if (documentChars > notePipeline.shortSourceChars) return null;
+
+  let source;
+  try {
+    source = await assembleSource(note, deps);
+  } catch (error) {
+    console.warn(`Mixed source assembly skipped: ${error?.message ?? error}`);
+    return null;
+  }
+  if (!source?.rawText || source.rawText.length > notePipeline.shortSourceChars) {
+    return null;
+  }
+  return source;
+}
+
 export async function processStudySet(job, documentExtraction, deadline = null) {
   const { note, user } = job;
   await startAttempt(job);
@@ -270,12 +349,19 @@ export async function processStudySet(job, documentExtraction, deadline = null) 
     const deps = noteDeps(job, documentExtraction, deadline);
 
     // Long-file path: lib/extraction.js already stored page/slide chunks for
-    // this note's documents. Structure -> map (checkpointed) -> reduce ->
-    // generate; untouched legacy notes keep the single-shot pipeline below.
+    // this note's documents. A source that fits one generation call takes the
+    // single-pass path below; the rest go through structure -> map -> reduce.
     const chunks = await loadChunkedSource(user.clerkId, note);
+    let presetSource = null;
     if (chunks && chunks.rows.length) {
-      await runLongFileJob(job, note, courseContext, deps, chunks);
-      return;
+      presetSource = singlePassSource(note, chunks);
+      // Documents plus photos: the rows alone would drop the pictures and the
+      // map/reduce path never sees them, so try the full assembled source.
+      if (!presetSource) presetSource = await assembledShortSource(note, deps, chunks);
+      if (!presetSource) {
+        await runLongFileJob(job, note, courseContext, deps, chunks);
+        return;
+      }
     }
 
     const prepared = await prepareMaterial({
@@ -283,6 +369,7 @@ export async function processStudySet(job, documentExtraction, deadline = null) 
       kind: job.kind,
       courseContext,
       deps,
+      source: presetSource ?? undefined,
     });
 
     // The source hash is known before the expensive write, so a repeat run
@@ -517,11 +604,17 @@ export async function processReference(job, documentExtraction, deadline = null)
     const courseContext = courseContextOf(note);
     const deps = noteDeps(job, documentExtraction, deadline);
 
-    // Long-file path: same as study sets — chunked sources never re-read.
+    // Long-file path: same as study sets — chunked sources never re-read. A
+    // source that fits one generation call takes the single-pass path below.
     const chunks = await loadChunkedSource(user.clerkId, note);
+    let presetSource = null;
     if (chunks && chunks.rows.length) {
-      await runLongFileJob(job, note, courseContext, deps, chunks);
-      return;
+      presetSource = singlePassSource(note, chunks);
+      if (!presetSource) presetSource = await assembledShortSource(note, deps, chunks);
+      if (!presetSource) {
+        await runLongFileJob(job, note, courseContext, deps, chunks);
+        return;
+      }
     }
 
     const prepared = await prepareMaterial({
@@ -529,6 +622,7 @@ export async function processReference(job, documentExtraction, deadline = null)
       kind: job.kind,
       courseContext,
       deps,
+      source: presetSource ?? undefined,
     });
     const hash = sourceHashOf(prepared.sourceHashInput);
     if (await guardRerun(job, hash)) return;
@@ -541,7 +635,7 @@ export async function processReference(job, documentExtraction, deadline = null)
         data: { body: written.body, transcript: written.transcript },
       }),
     );
-    await bumpUsage(job.userId, job.kind, Math.max(1, result.meta.partsCount));
+    await bumpUsage(job.userId, job.kind, Math.max(1, written.meta.partsCount));
     await checkDailySpend();
     await finishJob(job, hash, written.meta);
     await notifyStudent(job, note);

@@ -23,17 +23,29 @@ import { readAssetBytes } from "./storage.js";
 import {
   extractPdfPages,
   extractDocument,
+  extractEmbeddedImages,
   pdfOutline,
   renderPdfPage,
   MAX_TEXT_CHARS,
 } from "./extract.js";
 import { geminiImageText, geminiOcrBatch } from "./ai.js";
-import { longDoc, notePipeline } from "../config/ai-pipeline.js";
+import { longDoc, notePipeline, documentRead } from "../config/ai-pipeline.js";
+import {
+  nativeReadBlocked,
+  nativeReadEligible,
+  nativeReadEnabled,
+  readDocumentNatively,
+  readEmbeddedVisuals,
+} from "./native-read.js";
 
 const OCR_PAGE_SCALE = notePipeline.ocrScale ?? 2;
 
 // A claim that died mid-pass is retried after this stale window.
 const RUNNING_STALE_MS = 8 * 60_000;
+
+// Below this much remaining pass budget, a native read is not attempted: the
+// request would be cut off, and the resumable extractor can still make progress.
+const NATIVE_MIN_BUDGET_MS = 25_000;
 
 function sha1(value) {
   return createHash("sha1").update(value).digest("hex");
@@ -191,11 +203,213 @@ export async function runExtractionPass(assetId, budgetMs = longDoc.extractBudge
     warn("SIGNATURE", `asset ${assetId} format=${format} content does not match its extension; trying anyway`);
   }
 
+  // Native read first: the model reads the document itself. Any failure or
+  // ineligibility falls through to the deterministic page-wise extractor below.
+  const native = await tryNativeRead(asset, bytes, format, started + budgetMs);
+  if (native) return native;
+
   const outcome = await extractIntoChunks(asset, bytes, format, started + budgetMs);
   console.log(
     `[extract] stage=extract asset=${assetId} format=${format} pages=${outcome.pagesDone ?? 0}/${outcome.pagesTotal ?? 0} ocr=${outcome.ocrPages ?? 0} state=${outcome.state ?? "failed"} code=${outcome.errorCode ?? "-"}`,
   );
   return outcome;
+}
+
+/**
+ * Native read attempt. Returns the same outcome shape as extractIntoChunks when
+ * the model read the document, or null when the caller should run the legacy
+ * extractor. Persistence is skipped on any failure: an upload must never die
+ * because the model or its quota did.
+ */
+async function tryNativeRead(asset, bytes, format, deadline) {
+  if (!nativeReadEnabled() || !nativeReadEligible(format)) return null;
+
+  // The read is one request, but a slow 60-page document can outlive a pass
+  // that is nearly out of budget. Keep enough of it for the request, otherwise
+  // hand the file to the resumable extractor instead of timing out mid-read.
+  const remaining = deadline ? deadline - Date.now() : documentRead.timeoutMs;
+  if (remaining < NATIVE_MIN_BUDGET_MS) {
+    warn("NATIVE_READ_SKIPPED", `asset ${asset.id} code=BUDGET remaining=${remaining}ms`);
+    return null;
+  }
+  const timeoutMs = Math.min(documentRead.timeoutMs, remaining);
+
+  let result;
+  try {
+    result = await readDocumentNatively({ bytes, format, timeoutMs });
+  } catch (error) {
+    warn("NATIVE_READ", `asset ${asset.id}: ${error?.message ?? error}`);
+    return null;
+  }
+  if (!result?.ok) {
+    if (result?.code && result.code !== "DISABLED") {
+      warn(
+        "NATIVE_READ_SKIPPED",
+        `asset ${asset.id} code=${result.code}${result.pageCount ? ` pages=${result.pageCount}` : ""}`,
+      );
+    }
+    return null;
+  }
+
+  const compat = result.pages
+    .map((page) => (page.label ? `## ${page.label}\n\n${page.text}` : page.text))
+    .join("\n\n");
+  const truncated = compat.length > MAX_TEXT_CHARS;
+  const rows = result.pages.map((page) => ({
+    assetId: asset.id,
+    userId: asset.userId,
+    index: page.page,
+    label: page.label,
+    startPage: page.page,
+    endPage: page.page,
+    text: page.text,
+    hash: sha1(page.text),
+    status: "done",
+  }));
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.sourceChunk.deleteMany({ where: { assetId: asset.id } });
+      // Bookkeeping row: a page-less hint row the structure stage ignores when
+      // it has no `headings` (native reads are already page-aligned).
+      if (result.digest) {
+        await tx.sourceChunk.create({
+          data: {
+            assetId: asset.id,
+            userId: asset.userId,
+            index: -1,
+            text: "",
+            hash: sha1(JSON.stringify(result.digest)),
+            status: "done",
+            digest: {
+              nativeRead: {
+                title: result.title,
+                language: result.language,
+                topics: result.digest.topics ?? [],
+              },
+            },
+          },
+        });
+      }
+      await tx.sourceChunk.createMany({ data: rows });
+      await tx.asset.update({
+        where: { id: asset.id },
+        data: {
+          extractState: "done",
+          extractedText: compat.slice(0, MAX_TEXT_CHARS).trim() || null,
+          pagesDone: result.pageCount,
+          pagesTotal: result.pageCount,
+          nextPage: result.pageCount + 1,
+          truncated,
+          ocrPages: 0,
+          extractErrorCode: null,
+        },
+      });
+    });
+  } catch (error) {
+    warn("NATIVE_READ_PERSIST", `asset ${asset.id}: ${error?.message ?? error}`);
+    return null;
+  }
+
+  console.log(
+    `[extract] stage=native_read asset=${asset.id} pages=${result.pageCount} aligned=${result.aligned} model=${result.model} ms=${result.ms} chars=${compat.length}`,
+  );
+  return {
+    state: "done",
+    pagesDone: result.pageCount,
+    pagesTotal: result.pageCount,
+    ocrPages: 0,
+    truncated,
+    native: true,
+  };
+}
+
+/**
+ * DOCX/PPTX: Gemini cannot open OOXML, so the text stays with the local
+ * extractor — but the pictures inside the file (slide screenshots, pasted
+ * scans, figures, charts) are readable. Each picture's transcription is merged
+ * into the slide/section it belongs to, which is what makes an image-only deck
+ * produce a source instead of "unreadable".
+ *
+ * Returns the same `{ segments, pageCount, truncated, headings }` shape as
+ * extractDocument, or the input unchanged when there is nothing to add.
+ */
+export async function withEmbeddedVisuals(bytes, format, extracted, deadline) {
+  if (!nativeReadEnabled() || !documentRead.embeddedImages) return extracted;
+  if (nativeReadBlocked()) return extracted;
+
+  const remaining = deadline ? deadline - Date.now() : documentRead.timeoutMs;
+  if (remaining < NATIVE_MIN_BUDGET_MS) return extracted;
+
+  const images = await extractEmbeddedImages(bytes, format, {
+    minBytes: documentRead.minImageBytes,
+    limit: documentRead.maxEmbeddedImages,
+  });
+  if (!images.length) return extracted;
+
+  const visuals = await readEmbeddedVisuals({
+    images,
+    timeoutMs: Math.min(documentRead.timeoutMs, remaining),
+  });
+  if (!visuals.ok) {
+    warn(
+      "NATIVE_IMAGES_SKIPPED",
+      `format=${format} code=${visuals.code} images=${images.length}`,
+    );
+    return extracted;
+  }
+
+  const merged = (extracted?.segments ?? []).map((segment) => ({ ...segment }));
+  const bySlide = new Map();
+  const loose = [];
+  for (const image of images) {
+    const text = visuals.text.get(image.id);
+    if (!text) continue;
+    if (format === "pptx" && image.page) {
+      const list = bySlide.get(image.page) ?? [];
+      list.push(text);
+      bySlide.set(image.page, list);
+    } else {
+      loose.push(text);
+    }
+  }
+
+  for (const [page, texts] of bySlide) {
+    const block = texts.join("\n\n");
+    const segment = merged.find((entry) => entry.index === page);
+    if (segment) {
+      segment.text = [segment.text, block].filter(Boolean).join("\n\n");
+    } else {
+      merged.push({ index: page, label: `Slide ${page}`, text: block });
+    }
+  }
+  if (loose.length) {
+    const block = `[Figures]\n\n${loose.join("\n\n")}`;
+    // DOCX has no page structure: figures go at the end of the document.
+    if (merged.length) merged[0].text = [merged[0].text, block].filter(Boolean).join("\n\n");
+    else merged.push({ index: 1, label: null, text: block });
+  }
+  if (!merged.length) return extracted;
+
+  merged.sort((a, b) => a.index - b.index);
+  const segments = merged.map((segment) => ({
+    ...segment,
+    text: String(segment.text ?? "").trim(),
+  }));
+  const pageCount = Math.max(
+    extracted?.pageCount ?? 0,
+    segments[segments.length - 1]?.index ?? 0,
+    segments.length,
+  );
+  console.log(
+    `[extract] stage=native_images format=${format} images=${images.length} read=${visuals.text.size} calls=${visuals.calls} model=${visuals.model} ms=${visuals.ms}`,
+  );
+  return {
+    segments,
+    pageCount,
+    truncated: extracted?.truncated ?? false,
+    headings: extracted?.headings ?? [],
+  };
 }
 
 async function extractIntoChunks(asset, bytes, format, deadline) {
@@ -217,7 +431,16 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
     segments = result.segments;
     pagesTotal = result.pageCount || segments.length;
   } else {
-    const result = await extractDocument(bytes, format, "document");
+    const extracted = await extractDocument(bytes, format, "document");
+    // DOCX/PPTX pictures are readable even when Gemini cannot open the file
+    // itself; this is also the only way a screenshot-only deck has any content.
+    // Only on the first pass: a resumed pass already merged them, and reading
+    // every picture again would spend quota for nothing.
+    const firstPass = (asset.nextPage ?? 1) <= 1 && (asset.pagesDone ?? 0) === 0;
+    const result =
+      (format === "docx" || format === "pptx") && firstPass
+        ? await withEmbeddedVisuals(bytes, format, extracted, deadline)
+        : extracted;
     if (!result) {
       await failAsset(asset.id, "UNREADABLE_FILE");
       return { state: "failed", errorCode: "UNREADABLE_FILE" };

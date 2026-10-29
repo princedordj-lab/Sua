@@ -68,10 +68,50 @@ export const longDoc = {
   noteBodyMaxWords: int("NOTE_BODY_MAX_WORDS", 12_000),
 };
 
+/**
+ * Native document reading: Gemini receives the uploaded PDF itself (text,
+ * scans, charts, tables) instead of the server parsing and OCR'ing it page by
+ * page. Only documents that are eligible and under quota take this path; every
+ * failure falls back to the deterministic extractor in lib/extraction.js.
+ */
+export const documentRead = {
+  // Kill switch: NATIVE_DOC_READ=0 restores the legacy page-wise path.
+  enabled: process.env.NATIVE_DOC_READ !== "0",
+  // Flash on purpose: Gemini's free tier gives Pro too small a daily quota.
+  model: process.env.DOC_READ_MODEL ?? "gemini-3.5-flash",
+  // Used when the primary model is overloaded (503) or retired (404).
+  fallbackModel: process.env.DOC_READ_FALLBACK_MODEL ?? "gemini-2.5-flash",
+  // One read request per file. Longer files use the legacy extractor.
+  maxPages: int("DOC_READ_MAX_PAGES", 60),
+  // Base64 inflates by ~4/3 and Gemini's inline request cap is ~20MB.
+  inlineMaxBytes: int("DOC_READ_INLINE_MAX_BYTES", 14 * 1024 * 1024),
+  // Document upload cap; files above inlineMaxBytes go through the Files API.
+  maxBytes: int("DOC_READ_MAX_BYTES", 25 * 1024 * 1024),
+  timeoutMs: int("DOC_READ_TIMEOUT_MS", 120_000),
+  maxOutputTokens: int("DOC_READ_MAX_TOKENS", 32_000),
+  // After a 429/quota error, skip Gemini for a while and let every upload be
+  // extracted deterministically instead of hammering a closed quota.
+  quotaCooldownMs: int("DOC_READ_QUOTA_COOLDOWN_MS", 10 * 60_000),
+  // DOCX/PPTX carry no text Gemini can read directly, but their pictures
+  // (figures, pasted scans, slide screenshots) are readable. Embedded visuals
+  // are read in batches and merged into the slide/section text they belong to.
+  embeddedImages: process.env.DOC_READ_EMBEDDED_IMAGES !== "0",
+  // Per-file image caps: the free-tier quota is per project, not per app.
+  maxEmbeddedImages: int("DOC_READ_MAX_IMAGES", 24),
+  imageBatchSize: int("DOC_READ_IMAGE_BATCH", 6),
+  // Icons, bullets and logos are noise; real figures and scans are bigger.
+  minImageBytes: int("DOC_READ_MIN_IMAGE_BYTES", 6_000),
+  maxOutputTokensPerImage: int("DOC_READ_IMAGE_MAX_TOKENS", 1_200),
+};
+
 export const notePipeline = {
   // A source smaller than this skips the Split/Digest map-reduce entirely.
   shortSourcePages: int("SHORT_SOURCE_PAGES", 15),
   shortSourceMinutes: int("SHORT_SOURCE_MINUTES", 20),
+  // A file whose whole cleaned text fits here also skips map-reduce: one write
+  // call sees the entire source. Kept at the study-set material cap so no part
+  // of the source is silently dropped between generated artefacts.
+  shortSourceChars: int("SHORT_SOURCE_CHARS", 60_000),
   // Target size of one digest chunk.
   chunkWords: int("CHUNK_WORDS", 3000),
   // Output budget for one digest call. A 3000-word chunk of dense physics needs

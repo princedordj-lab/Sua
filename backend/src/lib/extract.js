@@ -405,3 +405,155 @@ async function slideNotes(zip, slideNumber, slideText) {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Embedded pictures (DOCX/PPTX)
+// ---------------------------------------------------------------------------
+
+// Gemini reads these image types; anything else inside an Office file (EMF,
+// WMF, SVG, TIFF) stays untouched rather than being sent and rejected.
+const READABLE_IMAGE_MIME = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  heic: "image/heic",
+  heif: "image/heif",
+};
+
+/** Zip paths are POSIX-relative; resolve `../media/x.png` against its folder. */
+function resolveZipPath(baseDir, target) {
+  const parts = target.startsWith("/")
+    ? target.slice(1).split("/")
+    : `${baseDir}/${target}`.split("/");
+  const stack = [];
+  for (const part of parts) {
+    if (!part || part === ".") continue;
+    if (part === "..") stack.pop();
+    else stack.push(part);
+  }
+  return stack.join("/");
+}
+
+/** `<Relationship Id Target>` pairs from a `.rels` part. */
+function relationshipTargets(xml) {
+  const targets = new Map();
+  for (const match of String(xml ?? "").matchAll(/<Relationship\b[^>]*>/g)) {
+    const tag = match[0];
+    const id = tag.match(/\bId="([^"]+)"/)?.[1];
+    const target = tag.match(/\bTarget="([^"]+)"/)?.[1];
+    if (id && target) targets.set(id, target);
+  }
+  return targets;
+}
+
+function mediaName(path) {
+  return path.split("/").pop() ?? path;
+}
+
+function imageMimeOf(path) {
+  const extension = String(path).split(".").pop()?.toLowerCase() ?? "";
+  return READABLE_IMAGE_MIME[extension] ?? null;
+}
+
+/**
+ * Pictures embedded in a DOCX/PPTX, in document order, for native reading.
+ *
+ * Gemini cannot open OOXML, so the text comes from the local extractor above;
+ * this is what makes a deck of screenshots or a Word file of pasted scans
+ * readable at all. Each entry is `{ id, name, page, bytes, mimeType }` where
+ * `page` is the slide number (PPTX) or null (DOCX), `id` is stable per media
+ * file so a repeated picture is only read once, and unreadable types, tiny
+ * icons and anything past `limit` are dropped.
+ *
+ * Returns [] rather than throwing: a file with no usable pictures is normal.
+ */
+export async function extractEmbeddedImages(input, format, { minBytes = 0, limit = 24 } = {}) {
+  try {
+    const normalizedFormat = String(format ?? "").toLowerCase().replace(/^\./, "");
+    if (normalizedFormat !== "docx" && normalizedFormat !== "pptx") return [];
+    const buffer = await toBuffer(input);
+    if (!buffer?.length) return [];
+    const zip = await JSZip.loadAsync(buffer);
+
+    /** @type {{ id: string, name: string, page: number|null, path: string }[]} */
+    const occurrences = [];
+
+    if (normalizedFormat === "pptx") {
+      const slides = Object.keys(zip.files)
+        .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+        .sort(
+          (a, b) =>
+            Number.parseInt(a.match(/slide(\d+)\.xml/)[1], 10) -
+            Number.parseInt(b.match(/slide(\d+)\.xml/)[1], 10),
+        );
+      for (const slidePath of slides) {
+        const page = Number.parseInt(slidePath.match(/slide(\d+)\.xml/)[1], 10);
+        const relsPath = `ppt/slides/_rels/${mediaName(slidePath)}.rels`;
+        const relsEntry = zip.file(relsPath);
+        if (!relsEntry) continue;
+        const targets = relationshipTargets(await relsEntry.async("string"));
+        for (const target of targets.values()) {
+          const path = resolveZipPath("ppt/slides", target);
+          if (!path.startsWith("ppt/media/")) continue;
+          // One entry per slide a picture appears on: the same scan used twice
+          // is read once but belongs to both slides.
+          occurrences.push({ id: mediaName(path), name: mediaName(path), page, path });
+        }
+      }
+    } else {
+      const documentEntry = zip.file("word/document.xml");
+      const relsEntry = zip.file("word/_rels/document.xml.rels");
+      if (documentEntry && relsEntry) {
+        const targets = relationshipTargets(await relsEntry.async("string"));
+        const xml = await documentEntry.async("string");
+        for (const match of xml.matchAll(/r:(?:embed|link)="([^"]+)"/g)) {
+          const target = targets.get(match[1]);
+          if (!target) continue;
+          const path = resolveZipPath("word", target);
+          if (!path.startsWith("word/media/")) continue;
+          occurrences.push({ id: mediaName(path), name: mediaName(path), page: null, path });
+        }
+      }
+    }
+
+    // `limit` counts distinct pictures (that is what costs a model read); the
+    // occurrence list keeps every place a picture is used.
+    const selected = new Set();
+    for (const occurrence of occurrences) {
+      if (selected.size >= limit) break;
+      if (!imageMimeOf(occurrence.path)) continue;
+      selected.add(occurrence.path);
+    }
+    if (!selected.size) return [];
+
+    const bytesByPath = new Map();
+    for (const path of selected) {
+      const entry = zip.file(path);
+      if (!entry) continue;
+      const bytes = await entry.async("uint8array");
+      if (!bytes?.length || bytes.length < minBytes) continue;
+      bytesByPath.set(path, Buffer.from(bytes));
+    }
+
+    const images = [];
+    for (const occurrence of occurrences) {
+      const bytes = bytesByPath.get(occurrence.path);
+      if (!bytes) continue;
+      images.push({
+        id: occurrence.id,
+        name: occurrence.name,
+        page: occurrence.page,
+        mimeType: imageMimeOf(occurrence.path),
+        bytes,
+      });
+    }
+    return images;
+  } catch (error) {
+    console.warn(
+      `Embedded image extraction failed (${format}):`,
+      error?.message ?? error,
+    );
+    return [];
+  }
+}
