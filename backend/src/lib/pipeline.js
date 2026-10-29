@@ -92,16 +92,24 @@ class JobCancelledError extends Error {
 }
 
 async function recordAiCall(jobId, step, result) {
-  await prisma.aiCall.create({
-    data: {
-      jobId,
-      step,
-      model: result.model ?? "unknown",
-      promptTokens: result.promptTokens ?? 0,
-      completionTokens: result.completionTokens ?? 0,
-      usdMicros: result.usdMicros ?? 0,
-    },
-  });
+  try {
+    await prisma.aiCall.create({
+      data: {
+        jobId,
+        step,
+        model: result.model ?? "unknown",
+        promptTokens: result.promptTokens ?? 0,
+        completionTokens: result.completionTokens ?? 0,
+        usdMicros: result.usdMicros ?? 0,
+      },
+    });
+  } catch (error) {
+    // Deleting a note cascades its jobs away. A stage that was already in
+    // flight must not crash on the missing parent row — the NoteDeletedError
+    // guard stops the run at the next stage boundary.
+    if (error?.code === "P2003" || error?.code === "P2025") return;
+    throw error;
+  }
 }
 
 /**

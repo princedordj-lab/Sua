@@ -523,8 +523,25 @@ export function registerUploadCanceller(canceller: (noteId: string) => void) {
   uploadCanceller = canceller;
 }
 
-export async function deleteNote(db: SQLiteDatabase, id: string) {
-  uploadCanceller?.(id);
+/**
+ * Remember that this id was deleted (locally or by another device). Every
+ * writer checks it: a stale save, a queued upsert or a pull already in flight
+ * can never bring the note back.
+ */
+export async function markNoteTombstoned(
+  db: SQLiteDatabase,
+  id: string,
+  deletedAt: string = new Date().toISOString(),
+) {
+  await db.runAsync(
+    "INSERT OR REPLACE INTO note_tombstones (id, deleted_at) VALUES (?, ?)",
+    id,
+    deletedAt,
+  );
+}
+
+/** Local bytes only: recorded segments and the files still waiting to upload. */
+async function deleteNoteFilesLocally(db: SQLiteDatabase, id: string) {
   const note = await getNote(db, id).catch(() => null);
   if (note?.sourceRef) {
     const segments = await listSessionSegments(db, note.sourceRef).catch(() => []);
@@ -549,38 +566,52 @@ export async function deleteNote(db: SQLiteDatabase, id: string) {
       } catch {}
     }
   }
+}
+
+/**
+ * Every SQLite row that belongs to one note. Callable inside an existing
+ * transaction (expo-sqlite does not nest), which is how the sync and pull
+ * paths reuse it.
+ */
+async function purgeNoteRowsLocally(db: SQLiteDatabase, id: string) {
+  const note = await getNote(db, id).catch(() => null);
+  // Unsynced work for a deleted note must never reach the server.
+  await db.runAsync("DELETE FROM sync_queue WHERE entity = 'note' AND entity_id = ?", id);
+  await db.runAsync("DELETE FROM notes WHERE id = ?", id);
+  await db.runAsync("DELETE FROM upload_queue WHERE note_id = ?", id);
+  await db.runAsync("DELETE FROM generation_queue WHERE note_id = ?", id);
+  await db.runAsync("DELETE FROM reviews WHERE note_id = ?", id);
+  await db.runAsync("DELETE FROM card_queue WHERE note_id = ?", id);
+  await db.runAsync("DELETE FROM quiz_attempts WHERE note_id = ?", id);
+  await db.runAsync("DELETE FROM flashcards WHERE note_id = ?", id);
+  await db.runAsync(
+    "DELETE FROM quiz_questions WHERE quiz_id IN (SELECT id FROM quizzes WHERE note_id = ?)",
+    id,
+  );
+  await db.runAsync("DELETE FROM quizzes WHERE note_id = ?", id);
+  if (note?.sourceRef) {
+    await db.runAsync("DELETE FROM recording_segments WHERE session_id = ?", note.sourceRef);
+    await db.runAsync("DELETE FROM recording_sessions WHERE id = ?", note.sourceRef);
+  }
+}
+
+/** Rows and files, in one transaction. Used for deletions learned from the server. */
+export async function purgeNoteLocally(db: SQLiteDatabase, id: string) {
+  uploadCanceller?.(id);
+  await deleteNoteFilesLocally(db, id);
+  await db.withTransactionAsync(() => purgeNoteRowsLocally(db, id));
+}
+
+export async function deleteNote(db: SQLiteDatabase, id: string) {
+  uploadCanceller?.(id);
+  await deleteNoteFilesLocally(db, id);
   const now = new Date().toISOString();
   await db.withTransactionAsync(async () => {
     // Tombstone first: a sync pass or pull that overlaps this delete will then
     // refuse to write the note back.
-    await db.runAsync(
-      "INSERT OR REPLACE INTO note_tombstones (id, deleted_at) VALUES (?, ?)",
-      id,
-      now,
-    );
-    // Remove unsent upserts and prior delete markers before writing the final
-    // operation. An older upsert must never recreate a note after its delete.
-    await db.runAsync(
-      "DELETE FROM sync_queue WHERE entity = 'note' AND entity_id = ?",
-      id,
-    );
-    await db.runAsync("DELETE FROM notes WHERE id = ?", id);
-    // Files queued for upload would sync into an orphaned note; drop them too.
-    await db.runAsync("DELETE FROM upload_queue WHERE note_id = ?", id);
-    await db.runAsync("DELETE FROM generation_queue WHERE note_id = ?", id);
-    await db.runAsync("DELETE FROM reviews WHERE note_id = ?", id);
-    await db.runAsync("DELETE FROM card_queue WHERE note_id = ?", id);
-    await db.runAsync("DELETE FROM quiz_attempts WHERE note_id = ?", id);
-    await db.runAsync("DELETE FROM flashcards WHERE note_id = ?", id);
-    await db.runAsync(
-      "DELETE FROM quiz_questions WHERE quiz_id IN (SELECT id FROM quizzes WHERE note_id = ?)",
-      id,
-    );
-    await db.runAsync("DELETE FROM quizzes WHERE note_id = ?", id);
-    if (note?.sourceRef) {
-      await db.runAsync("DELETE FROM recording_segments WHERE session_id = ?", note.sourceRef);
-      await db.runAsync("DELETE FROM recording_sessions WHERE id = ?", note.sourceRef);
-    }
+    await markNoteTombstoned(db, id, now);
+    await purgeNoteRowsLocally(db, id);
+    // One queued operation for the id; it outlives the note row on purpose.
     await db.runAsync(
       "INSERT INTO sync_queue (entity, entity_id, operation, payload, created_at) VALUES ('note', ?, 'delete', '{}', ?)",
       id,
@@ -645,16 +676,16 @@ export async function purgeCourseLocally(db: SQLiteDatabase, courseId: string) {
   );
   for (const row of noteRows) {
     uploadCanceller?.(row.id);
+    await deleteNoteFilesLocally(db, row.id);
   }
+  const now = new Date().toISOString();
   await db.withTransactionAsync(async () => {
-    await db.runAsync(
-      "DELETE FROM sync_queue WHERE entity = 'note' AND entity_id IN (SELECT id FROM notes WHERE course_id = ?)",
-      courseId,
-    );
-    await db.runAsync(
-      "DELETE FROM upload_queue WHERE note_id IN (SELECT id FROM notes WHERE course_id = ?)",
-      courseId,
-    );
+    for (const row of noteRows) {
+      // Tombstoned like a single delete: another device may still hold a stale
+      // copy, and a pull already in flight must not restore these notes.
+      await markNoteTombstoned(db, row.id, now);
+      await purgeNoteRowsLocally(db, row.id);
+    }
     await db.runAsync("DELETE FROM notes WHERE course_id = ?", courseId);
   });
 }
@@ -712,15 +743,11 @@ async function syncPendingNotesNow(db: SQLiteDatabase, token: string) {
       const status = results.get(item.entityId)?.status ?? "accepted";
       if (status === "deleted") {
         // The server holds a tombstone for this id, so the note is gone for
-        // good. Drop the local copy and remember it so pulls can't re-add it.
-        await db.runAsync(
-          "INSERT OR REPLACE INTO note_tombstones (id, deleted_at) VALUES (?, ?)",
-          item.entityId,
-          new Date().toISOString(),
-        );
-        await db.runAsync("DELETE FROM notes WHERE id = ?", item.entityId);
-        await db.runAsync("DELETE FROM upload_queue WHERE note_id = ?", item.entityId);
-        await db.runAsync("DELETE FROM generation_queue WHERE note_id = ?", item.entityId);
+        // good. Purge every local trace — cards, quizzes, attempts, files —
+        // and remember it so a pull can't re-add it.
+        await deleteNoteFilesLocally(db, item.entityId);
+        await markNoteTombstoned(db, item.entityId);
+        await purgeNoteRowsLocally(db, item.entityId);
         await db.runAsync("DELETE FROM sync_queue WHERE id = ?", item.id);
         continue;
       }
@@ -860,6 +887,56 @@ export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
 export async function pullCourseNotes(db: SQLiteDatabase, token: string, courseId: string) {
   const notes = await notesApi.listForCourse(token, courseId);
   for (const note of notes) await upsertSyncedNote(db, note);
+}
+
+/**
+ * Deletions made on another device (or on the web). The course pull can only
+ * upsert, so without this a note deleted elsewhere would stay cached here
+ * forever. Tombstones are paged from a stored (deletedAt, id) cursor; purging
+ * an already-purged id is a cheap no-op, so the cursor only needs to be
+ * monotonic, not exact.
+ */
+export async function pullTombstones(db: SQLiteDatabase, token: string) {
+  let cursor: { deletedAt: string; id: string } | null = null;
+  const stored = await getSetting(db, "note_tombstone_cursor").catch(() => null);
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored) as { deletedAt?: string; id?: string };
+      if (parsed?.deletedAt && parsed?.id) {
+        cursor = { deletedAt: parsed.deletedAt, id: parsed.id };
+      }
+    } catch {}
+  }
+
+  let purged = 0;
+  for (let page = 0; page < 20; page += 1) {
+    const response = await notesApi.tombstones(token, {
+      since: cursor?.deletedAt,
+      after: cursor?.id,
+      limit: 500,
+    });
+    const rows = response.deleted ?? [];
+    if (rows.length) {
+      for (const row of rows) {
+        uploadCanceller?.(row.id);
+        await deleteNoteFilesLocally(db, row.id);
+      }
+      // One transaction per page: a whole-course delete can return hundreds.
+      await db.withTransactionAsync(async () => {
+        for (const row of rows) {
+          await markNoteTombstoned(db, row.id, row.deletedAt);
+          await purgeNoteRowsLocally(db, row.id);
+        }
+      });
+    }
+    purged += rows.length;
+    if (response.cursor) {
+      cursor = response.cursor;
+      await setSetting(db, "note_tombstone_cursor", JSON.stringify(cursor));
+    }
+    if (rows.length < 500) break;
+  }
+  return purged;
 }
 
 // ---------------------------------------------------------------------------
@@ -1735,6 +1812,11 @@ export async function listNotesMissingStudySet(
   );
 }
 
+/** Drop a queued generation whose note no longer exists (deleted elsewhere). */
+export async function removeGenerationQueueItem(db: SQLiteDatabase, id: number) {
+  await db.runAsync("DELETE FROM generation_queue WHERE id = ?", id);
+}
+
 export async function updateGeneration(
   db: SQLiteDatabase,
   id: number,
@@ -2454,6 +2536,7 @@ export async function wipeLocalData(db: SQLiteDatabase) {
     DELETE FROM recording_sessions;
     DELETE FROM sync_queue;
     DELETE FROM notes;
+    DELETE FROM note_tombstones;
     DELETE FROM courses;
     DELETE FROM settings;
   `);

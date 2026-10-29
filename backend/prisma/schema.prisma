@@ -127,7 +127,9 @@ model Asset {
   resourceType String   @default("raw")
   status       String   @default("pending")
   noteId       String?
-  note         Note?    @relation(fields: [noteId], references: [id], onDelete: SetNull)
+  // Cascade: the file (and its extracted text) belongs to the note and must not
+  // outlive it. Storage bytes are deleted separately (StorageDeletion retries).
+  note         Note?    @relation(fields: [noteId], references: [id], onDelete: Cascade)
   // none = plain upload; lecture_note / course_reference = auto AI conversion
   task         String   @default("none")
   extractedText String?
@@ -227,6 +229,24 @@ model Job {
   @@map("jobs")
 }
 
+// Object keys whose bytes could not be deleted alongside their asset row.
+// The tick janitor retries with backoff; a row is removed once the object is
+// gone, so a transient storage error never leaves student files behind.
+model StorageDeletion {
+  id            String    @id @default(cuid())
+  userId        String
+  provider      String    @default("cloudinary")
+  publicId      String
+  resourceType  String    @default("raw")
+  attempts      Int       @default(0)
+  lastError     String?
+  nextAttemptAt DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+
+  @@index([nextAttemptAt])
+  @@map("storage_deletions")
+}
+
 model AiCall {
   id               String   @id @default(cuid())
   jobId            String
@@ -274,7 +294,8 @@ model Quiz {
   user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   courseId  String
   noteId    String?
-  note      Note?          @relation(fields: [noteId], references: [id], onDelete: SetNull)
+  // Cascade: quiz questions and attempts are the note's content and go with it.
+  note      Note?          @relation(fields: [noteId], references: [id], onDelete: Cascade)
   title     String
   questions QuizQuestion[]
   attempts  QuizAttempt[]

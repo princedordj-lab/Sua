@@ -185,6 +185,16 @@ export type SyncResult = {
   note?: ServerNote;
 };
 
+// GET /notes/tombstones: deletions other devices must apply locally.
+export type ServerTombstone = { id: string; deletedAt: string };
+
+export type TombstoneCursor = { deletedAt: string; id: string };
+
+export type ServerTombstonePage = {
+  deleted: ServerTombstone[];
+  cursor: TombstoneCursor | null;
+};
+
 export type AssetKind = "audio" | "document" | "image";
 
 export type ServerAsset = {

@@ -37,7 +37,7 @@ import { courseStyle } from "../../../lib/course-style";
 
 export default function CourseDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { courses, updateCourse, deleteCourse } = useApp();
+  const { courses, updateCourse, deleteCourse, flushNoteQueue } = useApp();
   const pv = usePalette();
   const db = useSQLiteContext();
   const [notes, setNotes] = useState<Note[]>([]);
@@ -189,7 +189,7 @@ export default function CourseDetail() {
     const label = note.title.trim() || "this note";
     Alert.alert(
       `Delete ${label.length > 28 ? `${label.slice(0, 28)}…` : label}?`,
-      "The note and its uploads will be removed from this device and your account.",
+      "Its files, flashcards and quizzes will be permanently deleted.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -199,6 +199,7 @@ export default function CourseDetail() {
             void (async () => {
               try {
                 await deleteNote(db, note.id);
+                void flushNoteQueue();
                 setNotes((prev) => prev.filter((item) => item.id !== note.id));
               } catch {
                 Alert.alert("Couldn’t delete note", "Try again in a moment.");

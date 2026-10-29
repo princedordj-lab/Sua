@@ -6,6 +6,7 @@ import {
   listGenerationQueue,
   listNotesMissingStudySet,
   pullCourseNotes,
+  removeGenerationQueueItem,
   setNoteAiState,
   setNoteSummary,
   storeStudySet,
@@ -91,6 +92,9 @@ async function pullStudySet(
 ) {
   const token = await deps.getAuthToken();
   if (!token) throw new Error("no auth token");
+  // The note can be deleted (here or on another device) between the job
+  // finishing and this pull; never recreate cards for a row that is gone.
+  if (!(await getNote(deps.db, noteId).catch(() => null))) return;
   const study = await studyApi.forNote(token, noteId);
   // Keep the server summary in step even when only the cards were missing.
   if (study.summaryMarkdown) {
@@ -287,6 +291,22 @@ async function pushNoteOrThrow(deps: DrainDeps, token: string, noteId: string) {
   }
 }
 
+/**
+ * The note vanished while a request was in flight (deleted on another device).
+ * The queue row goes with it; nothing must be retried or mirrored.
+ */
+async function dropQueueForGoneNote(deps: DrainDeps, itemId: number, noteId: string) {
+  const note = await getNote(deps.db, noteId).catch(() => null);
+  if (note) return false;
+  await removeGenerationQueueItem(deps.db, itemId).catch(() => {});
+  return true;
+}
+
+function isNotFound(error: unknown) {
+  const status = (error as { status?: number } | null)?.status;
+  return status === 404 || status === 410;
+}
+
 async function runOne(
   deps: DrainDeps,
   itemName: {
@@ -296,12 +316,14 @@ async function runOne(
     jobId: string | null;
   },
 ) {
-  // A note can be deleted while an earlier drain is waiting for the network.
-  // Do not submit or mirror work for a queue row whose note no longer exists.
-  if (!(await getNote(deps.db, itemName.noteId).catch(() => null))) return false;
   const token = await deps.getAuthToken();
   if (!token) throw new Error("no auth token");
-  if (!(await getNote(deps.db, itemName.noteId).catch(() => null))) return false;
+  // A note can be deleted while an earlier drain is waiting for the network.
+  // Do not submit or mirror work for a queue row whose note no longer exists.
+  if (!(await getNote(deps.db, itemName.noteId).catch(() => null))) {
+    await removeGenerationQueueItem(deps.db, itemName.id).catch(() => {});
+    return false;
+  }
   await updateGeneration(deps.db, itemName.id, { state: "active" });
   await setNoteAiState(deps.db, itemName.noteId, "queued");
 
@@ -311,7 +333,17 @@ async function runOne(
     // The server cannot accept a job for a note it has never seen, so the note
     // is pushed (and acknowledged) before the request goes out.
     await pushNoteOrThrow(deps, token, itemName.noteId);
-    const job = await jobsApi.create(token, itemName.noteId, itemName.kind);
+    let job;
+    try {
+      job = await jobsApi.create(token, itemName.noteId, itemName.kind);
+    } catch (error) {
+      // A delete that landed on the server first answers 404; the note is
+      // gone, so the request is moot rather than retryable.
+      if (isNotFound(error) && (await dropQueueForGoneNote(deps, itemName.id, itemName.noteId))) {
+        return false;
+      }
+      throw error;
+    }
     if (!job) throw new Error(GENERIC_FAILURE);
     // The server closes a job when it cannot queue it (worker/Redis down). That
     // is a real failure, not something to poll for three minutes.
@@ -324,8 +356,20 @@ async function runOne(
   }
 
   for (let poll = 0; poll < MAX_POLLS; poll += 1) {
-    const job = await jobsApi.get(token, jobId);
-    if (!(await getNote(deps.db, itemName.noteId).catch(() => null))) return false;
+    let job;
+    try {
+      job = await jobsApi.get(token, jobId);
+    } catch (error) {
+      // The job row cascades away with a deleted note.
+      if (isNotFound(error) && (await dropQueueForGoneNote(deps, itemName.id, itemName.noteId))) {
+        return false;
+      }
+      throw error;
+    }
+    if (!(await getNote(deps.db, itemName.noteId).catch(() => null))) {
+      await removeGenerationQueueItem(deps.db, itemName.id).catch(() => {});
+      return false;
+    }
     if (job.state === "done") {
       await updateGeneration(deps.db, itemName.id, { state: "done", jobId });
       if (itemName.kind === "course_reference") {
@@ -366,7 +410,10 @@ async function drainGenerationQueueNow({ db, getAuthToken, onNoteChange }: Drain
     // reconnect/foreground tick) re-triggers the drain. The wait is capped so a
     // stuck upload cannot keep the card "waiting" indefinitely.
     const note = await getNote(db, item.noteId).catch(() => null);
-    if (!note) continue;
+    if (!note) {
+      await removeGenerationQueueItem(db, item.id).catch(() => {});
+      continue;
+    }
     if ((await countPendingUploads(db, item.noteId)) > 0) {
       const waitedMs = Date.now() - Date.parse(item.updatedAt);
       if (Number.isFinite(waitedMs) && waitedMs > UPLOAD_WAIT_MS) {

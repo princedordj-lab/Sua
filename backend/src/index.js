@@ -13,6 +13,7 @@ import { chatRouter } from "./routes/chat.js";
 import { timingSafeEqual } from "node:crypto";
 import { runJobs } from "./lib/runner.js";
 import { extractNext } from "./lib/extraction.js";
+import { pruneNoteTombstones, retryStorageDeletions } from "./lib/note-deletion.js";
 import { studyRouter } from "./routes/study.js";
 
 const app = express();
@@ -104,7 +105,19 @@ async function handleTick(req, res) {
       Math.max(15_000, Number(req.query?.extractBudgetMs ?? 120_000)),
     );
     const extraction = await extractNext({ maxAssets, budgetMs: extractBudgetMs });
-    res.json({ ok: true, ...result, extraction });
+    // Deletion housekeeping: retry object deletes that failed with their note,
+    // and drop tombstones no device can still need. Neither may fail the tick.
+    const storage = await retryStorageDeletions({ limit: 10 }).catch((error) => {
+      console.warn("Storage deletion retry failed:", error?.message ?? error);
+      return null;
+    });
+    const tombstones = await pruneNoteTombstones()
+      .then((count) => ({ pruned: count }))
+      .catch((error) => {
+        console.warn("Tombstone prune failed:", error?.message ?? error);
+        return null;
+      });
+    res.json({ ok: true, ...result, extraction, janitor: { storage, tombstones } });
   } catch (err) {
     console.error("Tick error:", err);
     res.status(500).json({ error: "Tick failed", message: err?.message ?? String(err) });

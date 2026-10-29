@@ -639,7 +639,7 @@ export function CourseDetailClient() {
         open={Boolean(deleteNote)}
         onClose={closeDeleteNote}
         title={`Delete ${deleteNote?.title || "this note"}?`}
-        description="The note, its uploads and its study set are removed from every device."
+        description="Its files, flashcards and quizzes will be permanently deleted from every device."
         footer={
           <>
             <Button variant="ghost" onClick={closeDeleteNote}>

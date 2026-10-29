@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { deleteAssetObject } from "../lib/storage.js";
+import { flushStorageDeletes, purgeNoteRows } from "../lib/note-deletion.js";
 import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
@@ -66,6 +66,45 @@ notesRouter.get("/course/:courseId", async (req, res) => {
   res.json(notes.map(shapeNote));
 });
 
+// Deletions another device must learn about: without this a note deleted on
+// one device simply disappears from the course list, and every other device
+// keeps its cached copy forever. User-scoped, ordered by (deletedAt, id) so a
+// batch of deletes created in one transaction pages without skipping ids.
+notesRouter.get("/tombstones", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const sinceRaw = typeof req.query?.since === "string" ? req.query.since : "";
+  const since = sinceRaw ? new Date(sinceRaw) : null;
+  if (since && Number.isNaN(since.getTime())) {
+    return res.status(400).json({ error: "invalid since" });
+  }
+  const afterId = typeof req.query?.after === "string" ? req.query.after : "";
+  const limit = Math.min(1000, Math.max(1, Number(req.query?.limit ?? 500) || 500));
+  const deleted = await withUser(identity.clerkId, async (tx) => {
+    const user = await requireUser(tx, identity);
+    return tx.noteTombstone.findMany({
+      where: {
+        userId: user.id,
+        ...(since
+          ? {
+              OR: [
+                { deletedAt: { gt: since } },
+                ...(afterId ? [{ deletedAt: since, id: { gt: afterId } }] : []),
+              ],
+            }
+          : {}),
+      },
+      orderBy: [{ deletedAt: "asc" }, { id: "asc" }],
+      take: limit,
+      select: { id: true, deletedAt: true },
+    });
+  });
+  const last = deleted[deleted.length - 1];
+  res.json({
+    deleted,
+    cursor: last ? { deletedAt: last.deletedAt, id: last.id } : null,
+  });
+});
+
 // Single note by id — the web viewer is link-addressed (/app/note/:id) and has
 // no local SQLite row to read from, so deep links need this lookup.
 notesRouter.get("/:noteId", async (req, res) => {
@@ -100,14 +139,13 @@ notesRouter.post("/sync", async (req, res) => {
   const changes = Array.isArray(req.body?.changes) ? req.body.changes : [];
   if (changes.length > 100) return res.status(400).json({ error: "Too many changes" });
 
-  // Storage deletes are external I/O, so they happen after the transaction
-  // (withUser caps a transaction at 15 s).
-  const storageDeletes = [];
-
-  const { notes, results } = await withUser(identity.clerkId, async (tx) => {
+  const outcome = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
     const notes = [];
     const results = [];
+    // Storage deletes are external I/O, so the keys are returned and deleted
+    // after the transaction (withUser caps a transaction at 15 s).
+    const storageKeys = [];
     for (const change of changes) {
       if (!change?.id) {
         results.push({ id: "", status: "rejected", reason: "missing id" });
@@ -137,14 +175,7 @@ notesRouter.post("/sync", async (req, res) => {
           data: [{ id: change.id, userId: user.id }],
           skipDuplicates: true,
         });
-        const assets = await tx.asset.findMany({
-          where: { noteId: change.id, userId: user.id },
-        });
-        for (const asset of assets) {
-          if (asset.publicId && asset.publicId !== "pending") storageDeletes.push(asset);
-        }
-        await tx.asset.deleteMany({ where: { noteId: change.id, userId: user.id } });
-        await tx.note.deleteMany({ where: { id: change.id, userId: user.id } });
+        storageKeys.push(...(await purgeNoteRows(tx, { userId: user.id, noteIds: [change.id] })));
         // Idempotent: deleting a note that is already gone still succeeds.
         results.push({ id: change.id, status: "accepted" });
         continue;
@@ -213,22 +244,17 @@ notesRouter.post("/sync", async (req, res) => {
       notes.push(note);
       results.push({ id: change.id, status: "accepted" });
     }
-    return { notes, results };
+    return { notes, results, userId: user.id, storageKeys };
   });
-  res.json({ notes: notes.map(shapeNote), results });
+  res.json({ notes: outcome.notes.map(shapeNote), results: outcome.results });
 
-  // Best-effort storage cleanup for deleted notes, outside the transaction.
-  for (const asset of storageDeletes) {
-    try {
-      await deleteAssetObject(asset);
-    } catch (err) {
-      console.warn(`Storage object delete failed for asset ${asset.publicId}:`, err);
-    }
-  }
+  // Storage cleanup for deleted notes, outside the transaction. Failures are
+  // queued for the janitor instead of being lost with the asset row.
+  await flushStorageDeletes(outcome.storageKeys, outcome.userId);
 
   // A pushed note may be the missing half of a conversion-marked upload that
   // landed first (the /complete route covers the reverse order). Idempotent.
-  for (const note of notes) {
+  for (const note of outcome.notes) {
     try {
       await maybeEnqueueGeneration(identity.clerkId, note.id);
     } catch (error) {

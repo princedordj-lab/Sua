@@ -472,7 +472,7 @@ function uploadStateLabel(item: UploadQueueItem) {
 export default function Create() {
   const pv = usePalette();
   const db = useSQLiteContext();
-  const { courses, getAuthToken } = useApp();
+  const { courses, getAuthToken, flushNoteQueue } = useApp();
   const params = useLocalSearchParams<{ mode?: string; noteId?: string; courseId?: string }>();
 
   const [mode, setMode] = useState<Mode>(
@@ -1357,7 +1357,7 @@ export default function Create() {
     const label = title.trim() || "this note";
     Alert.alert(
       `Delete ${label.length > 28 ? `${label.slice(0, 28)}…` : label}?`,
-      "This removes the note from this device and queues the deletion for sync.",
+      "Its files, flashcards and quizzes will be permanently deleted.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -1369,6 +1369,7 @@ export default function Create() {
             draftRef.current = { ...draftRef.current, dirty: false };
             deleteNote(db, target)
               .then(() => {
+                void flushNoteQueue();
                 resetDraftSession();
                 router.setParams({ noteId: "", courseId: "" });
                 if (router.canGoBack()) router.back();

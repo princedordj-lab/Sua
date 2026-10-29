@@ -18,6 +18,7 @@ import {
   listNotes,
   listLocalCourses,
   pullCourseNotes,
+  pullTombstones,
   purgeCourseLocally,
   removeLocalCourse,
   replaceLocalCourses,
@@ -48,6 +49,9 @@ type AppContextValue = {
   courses: Course[];
   getAuthToken: () => Promise<string | null>;
   retryHydration: () => void;
+  // Push queued note changes (deletes included) now instead of waiting for the
+  // next reconnect/foreground event.
+  flushNoteQueue: () => Promise<void>;
   signOut: () => Promise<void>;
   updateProfile: (changes: Partial<UserProfile>) => Promise<void>;
   deleteAccount: () => Promise<void>;
@@ -285,6 +289,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           await Promise.all(
             serverCourses.map((course) => pullCourseNotes(db, token, course.id)),
           );
+          // After the notes: apply deletions made on other devices, which the
+          // course pull cannot express (a missing note is indistinguishable
+          // from one this device has not created yet).
+          await pullTombstones(db, token);
         } catch {
           // Reachable server but the pull failed (transient): retry soon
           // instead of waiting for the next reconnect or foreground event.
@@ -500,6 +508,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [db, getToken, userId],
   );
 
+  // A delete must reach the server immediately when the device is online; the
+  // reconnect/foreground listeners only fire on the *next* transition.
+  const flushNoteQueue = useCallback(async () => {
+    // Best-effort by contract: callers fire it without awaiting, and a failed
+    // push simply leaves the delete queued for the next reconnect pass.
+    const token = await getToken().catch(() => null);
+    if (!token) return;
+    await syncPendingNotes(db, token).catch(() => {});
+    await pullTombstones(db, token).catch(() => {});
+  }, [db, getToken]);
+
   const profile = useMemo<UserProfile | null>(() => {
     if (active.profile) return serverProfileToLocal(active.profile);
     if (isSignedIn && user) {
@@ -527,6 +546,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       courses: active.courses,
       getAuthToken,
       retryHydration,
+      flushNoteQueue,
       signOut,
       updateProfile,
       deleteAccount,
@@ -541,6 +561,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       completeOnboarding,
       deleteAccount,
       deleteCourse,
+      flushNoteQueue,
       getAuthToken,
       hasCompletedOnboarding,
       hydrationIssue,

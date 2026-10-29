@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { deleteAssetObject } from "../lib/storage.js";
+import { flushStorageDeletes, purgeNoteRows } from "../lib/note-deletion.js";
 import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
@@ -110,46 +110,46 @@ coursesRouter.delete("/:id", async (req, res) => {
   const result = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
     if (moveToCourseId) {
-      if (moveToCourseId === id) return { count: 0, error: "invalid_move_target" };
+      if (moveToCourseId === id) {
+        return { count: 0, error: "invalid_move_target", storageKeys: [], userId: user.id };
+      }
       const target = await tx.course.findFirst({
         where: { id: moveToCourseId, userId: user.id },
         select: { id: true },
       });
-      if (!target) return { count: 0, error: "move_target_not_found" };
+      if (!target) {
+        return { count: 0, error: "move_target_not_found", storageKeys: [], userId: user.id };
+      }
       await tx.note.updateMany({
         where: { courseId: id, userId: user.id },
         data: { courseId: target.id },
       });
-      return tx.course.deleteMany({ where: { id, userId: user.id } });
+      const deleted = await tx.course.deleteMany({ where: { id, userId: user.id } });
+      return { count: deleted.count, storageKeys: [], userId: user.id };
     }
     const notes = await tx.note.findMany({
       where: { courseId: id, userId: user.id },
       select: { id: true },
     });
-    if (notes.length > 0) {
-      const noteIds = notes.map((n) => n.id);
-      const assets = await tx.asset.findMany({
-        where: { noteId: { in: noteIds }, userId: user.id },
-      });
-      for (const asset of assets) {
-        if (asset.publicId && asset.publicId !== "pending") {
-          try {
-            await deleteAssetObject(asset);
-          } catch (err) {
-            console.warn(`Storage object delete failed for asset ${asset.publicId}:`, err);
-          }
-        }
-      }
-      await tx.asset.deleteMany({
-        where: { noteId: { in: noteIds }, userId: user.id },
+    const noteIds = notes.map((n) => n.id);
+    if (noteIds.length > 0) {
+      // Every other device learns about this from the tombstone pull; without
+      // them a cached copy of the deleted course's notes would survive forever.
+      await tx.noteTombstone.createMany({
+        data: noteIds.map((noteId) => ({ id: noteId, userId: user.id })),
+        skipDuplicates: true,
       });
     }
-    return tx.course.deleteMany({ where: { id, userId: user.id } });
+    const storageKeys = await purgeNoteRows(tx, { userId: user.id, noteIds });
+    const deleted = await tx.course.deleteMany({ where: { id, userId: user.id } });
+    return { count: deleted.count, storageKeys, userId: user.id };
   });
   if (result.count === 0) {
     return res.status(result.error === "move_target_not_found" ? 400 : 404).json({
       error: result.error === "move_target_not_found" ? "Move target not found" : "Course not found",
     });
   }
+  // Object I/O belongs outside the transaction (withUser caps it at 15 s).
+  await flushStorageDeletes(result.storageKeys, result.userId);
   res.status(204).end();
 });

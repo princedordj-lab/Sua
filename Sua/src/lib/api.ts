@@ -15,6 +15,7 @@ import type {
   ServerProfileUpdate,
   ServerReviewSyncResponse,
   ServerStudy,
+  ServerTombstonePage,
   SignedUpload,
   SyncResult,
   UploadTask,
@@ -66,8 +67,13 @@ export async function apiRequest<T>(
       detail = "";
     }
 
+    // Callers such as the generation queue need to tell "this note is gone"
+    // (404) apart from a transient failure without parsing the message.
+    const fail = (message: string) =>
+      Object.assign(new Error(message), { status: response.status });
+
     if (response.status >= 500) {
-      throw new Error("Something went wrong on the server. Please try again.");
+      throw fail("Something went wrong on the server. Please try again.");
     }
 
     if (
@@ -75,14 +81,14 @@ export async function apiRequest<T>(
         detail,
       )
     ) {
-      throw new Error("Unable to complete request. Please try again.");
+      throw fail("Unable to complete request. Please try again.");
     }
 
     if (response.status === 409 && /sync notes/i.test(detail)) {
-      throw new Error("Note is syncing with the server. Please wait a moment.");
+      throw fail("Note is syncing with the server. Please wait a moment.");
     }
 
-    throw new Error(detail || "Request failed. Please try again.");
+    throw fail(detail || "Request failed. Please try again.");
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -141,6 +147,20 @@ export const notesApi = {
       token,
       body: JSON.stringify({ changes }),
     }),
+  tombstones: (
+    token: string,
+    options: { since?: string; after?: string; limit?: number } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (options.since) params.set("since", options.since);
+    if (options.after) params.set("after", options.after);
+    if (options.limit) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return apiRequest<ServerTombstonePage>(
+      `/notes/tombstones${query ? `?${query}` : ""}`,
+      { token },
+    );
+  },
 };
 
 export const uploadsApi = {

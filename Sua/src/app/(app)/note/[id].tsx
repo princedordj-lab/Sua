@@ -85,7 +85,7 @@ export default function NoteView() {
   const noteScaleValue = (["small", "medium", "large"].includes(noteScale.value)
     ? noteScale.value
     : "medium") as MarkdownScale;
-  const { courses, getAuthToken } = useApp();
+  const { courses, getAuthToken, flushNoteQueue } = useApp();
   const [note, setNote] = useState<Note | null>(null);
   const [missing, setMissing] = useState(false);
   // Whether this device still holds an unsent change. Read from the queue (not
@@ -313,7 +313,7 @@ export default function NoteView() {
   const confirmDelete = () => {
     Alert.alert(
       "Delete this note?",
-      "The note and its uploads are removed from this device and your account when you next connect.",
+      "Its files, flashcards and quizzes will be permanently deleted.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -326,6 +326,9 @@ export default function NoteView() {
               deletedRef.current = true;
               try {
                 await deleteNote(db, id);
+                // Send the delete at once instead of waiting for the next
+                // reconnect/foreground pass; the local queue keeps it safe.
+                void flushNoteQueue();
                 if (router.canGoBack()) router.back();
                 else router.replace("/courses");
               } catch {
