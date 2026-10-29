@@ -1260,9 +1260,9 @@ function summaryToMergeMaterial(summaries) {
   return summaries.map((summary) => digestToText(summary)).join("\n\n");
 }
 
-function rawTextOfAll(source) {
+function rawTextOfAll(rows) {
   return clampChars(
-    source.rows.map((row) => row.text ?? "").join("\n\n"),
+    rows.map((row) => row.text ?? "").join("\n\n"),
     longDoc.maxSourceChars,
   );
 }
