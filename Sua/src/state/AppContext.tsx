@@ -157,6 +157,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const bumpHydrationRevision = useCallback(() => {
     hydrationRevision.current += 1;
   }, []);
+  // Once the server confirms an account is onboarded in this session, no later
+  // snapshot may undo that: a brief "home then setup" bounce is the regression
+  // this guarantees against, and re-onboarding an existing student is never
+  // the right answer.
+  const [confirmedOnboardedFor, setConfirmedOnboardedFor] = useState<
+    string | null
+  >(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestRefresh = useCallback((delayMs = 0) => {
     if (delayMs <= 0) {
@@ -280,6 +287,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // A newer local write already happened: this snapshot is older than the
         // truth on the server, so applying it would undo that write.
         if (hydrationRevision.current !== revision) return;
+        const onboarded = Boolean(
+          profile.onboarded ??
+            (profile.onboardingCompletedAt || serverCourses.length > 0),
+        );
+        // Sticky: set before the state lands so a snapshot that arrives while
+        // setup is on screen can never flip the verdict back to "new account".
+        if (onboarded) setConfirmedOnboardedFor(userId);
         setHydrated({
           clerkId: userId,
           profile,
@@ -289,14 +303,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setHydrationError(null);
         // Keep the offline fallback fresh: an onboarded account may sign in
         // without a connection next time and should go straight to the app.
-        void writeOnboardedCache(
-          db,
-          userId,
-          Boolean(
-            profile.onboarded ??
-              (profile.onboardingCompletedAt || serverCourses.length > 0),
-          ),
-        );
+        void writeOnboardedCache(db, userId, onboarded);
         // Mirror courses into SQLite so an offline cold start can still list
         // them (and therefore create notes) without the API.
         void replaceLocalCourses(db, serverCourses.map(serverCourseToCache)).catch(() => {});
@@ -391,6 +398,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     await setSetting(db, "expo_push_token", "").catch(() => {});
     bumpHydrationRevision();
+    setConfirmedOnboardedFor(null);
     setHydrated(EMPTY_HYDRATED);
     await clerkSignOut();
   }, [bumpHydrationRevision, clerkSignOut, db, getToken]);
@@ -456,6 +464,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
       void upsertLocalCourse(db, serverCourseToCache(course)).catch(() => {});
       bumpHydrationRevision();
+      setConfirmedOnboardedFor(userId);
       setHydrated((prev) => ({
         clerkId: userId,
         // The server just accepted the flag: hold the verdict locally even if
@@ -585,10 +594,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const isProfileResolved = Boolean(active.profile);
   // The server verdict wins; the local fallback keeps a server that predates
   // the field (or an old cached profile) from re-onboarding existing accounts.
-  const hasCompletedOnboarding = Boolean(
-    active.profile?.onboarded ??
-      (active.profile?.onboardingCompletedAt || active.courses.length > 0),
-  );
+  // The sticky confirmation outlives a lone snapshot disagreeing with it.
+  const hasCompletedOnboarding =
+    (Boolean(userId) && confirmedOnboardedFor === userId) ||
+    Boolean(
+      active.profile?.onboarded ??
+        (active.profile?.onboardingCompletedAt || active.courses.length > 0),
+    );
 
   const value = useMemo<AppContextValue>(
     () => ({

@@ -63,8 +63,11 @@ export default function AuthFinish() {
   useEffect(() => {
     if (!isLoaded) return;
     if (!isSignedIn) {
-      router.replace("/welcome");
-      return;
+      // A session activated moments ago can still read as signed out for a
+      // frame; only leave once that state sticks, or a fresh sign-in would
+      // strand the student on the welcome screen.
+      const timeout = setTimeout(() => router.replace("/welcome"), 1500);
+      return () => clearTimeout(timeout);
     }
     if (!userId || !cacheLoaded) return;
     if (routed.current) return;
