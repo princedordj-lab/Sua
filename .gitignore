@@ -14,3 +14,4 @@ debug.log
 .tmp/
 backend/.env.local
 .env
+.qoder/
