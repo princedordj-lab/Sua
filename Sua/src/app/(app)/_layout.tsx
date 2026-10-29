@@ -30,13 +30,19 @@ export default function AppLayout() {
       router.replace("/welcome");
       return;
     }
-    // A positive server verdict only: an unresolved profile (offline, timeout,
-    // error) must never be mistaken for a new account.
-    if (!isHydrating && isProfileResolved && !hasCompletedOnboarding) {
+    // A positive server verdict only: an unresolved or degraded profile
+    // (offline, timeout, error) must never be mistaken for a new account.
+    if (
+      !isHydrating &&
+      !hydrationIssue &&
+      isProfileResolved &&
+      !hasCompletedOnboarding
+    ) {
       router.replace("/setup");
     }
   }, [
     hasCompletedOnboarding,
+    hydrationIssue,
     isHydrating,
     isLoaded,
     isProfileResolved,

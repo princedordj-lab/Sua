@@ -150,6 +150,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [refreshTick, setRefreshTick] = useState(0);
   const [hydrationIssue, setHydrationIssue] = useState(false);
   const [hydrationError, setHydrationError] = useState<string | null>(null);
+  // A hydration snapshot only describes the state it was requested for. Local
+  // writes bump this so a response already in flight cannot overwrite a newer
+  // server write (finishing onboarding, adding a course...).
+  const hydrationRevision = useRef(0);
+  const bumpHydrationRevision = useCallback(() => {
+    hydrationRevision.current += 1;
+  }, []);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestRefresh = useCallback((delayMs = 0) => {
     if (delayMs <= 0) {
@@ -259,6 +266,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     if (!isLoaded || !isSignedIn || !userId) return;
+    const revision = hydrationRevision.current;
     (async () => {
       try {
         const token = await getToken();
@@ -269,6 +277,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const profile = await profileApi.get(token);
         const serverCourses = await coursesApi.list(token);
         if (cancelled) return;
+        // A newer local write already happened: this snapshot is older than the
+        // truth on the server, so applying it would undo that write.
+        if (hydrationRevision.current !== revision) return;
         setHydrated({
           clerkId: userId,
           profile,
@@ -379,9 +390,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     }
     await setSetting(db, "expo_push_token", "").catch(() => {});
+    bumpHydrationRevision();
     setHydrated(EMPTY_HYDRATED);
     await clerkSignOut();
-  }, [clerkSignOut, db, getToken]);
+  }, [bumpHydrationRevision, clerkSignOut, db, getToken]);
 
   const updateProfile = useCallback(
     async (changes: Partial<UserProfile>) => {
@@ -399,6 +411,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           : {}),
         ...(changes.level !== undefined ? { level: changes.level || null } : {}),
       });
+      bumpHydrationRevision();
       setHydrated((prev) => ({
         ...prev,
         clerkId: userId,
@@ -408,7 +421,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         profile: { ...prev.profile, ...profile, usage: prev.profile?.usage ?? null },
       }));
     },
-    [getToken, userId],
+    [bumpHydrationRevision, getToken, userId],
   );
 
   // Server-side wipe (rows + storage objects, then the Clerk account). The
@@ -442,16 +455,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
         examDate: firstCourse.examDate || null,
       });
       void upsertLocalCourse(db, serverCourseToCache(course)).catch(() => {});
+      bumpHydrationRevision();
       setHydrated((prev) => ({
         clerkId: userId,
-        profile,
+        // The server just accepted the flag: hold the verdict locally even if
+        // the response (or a snapshot racing this write) lacks the field.
+        profile: {
+          ...profile,
+          onboarded: true,
+          onboardingCompletedAt:
+            profile.onboardingCompletedAt ?? new Date().toISOString(),
+        },
         courses: prev.courses.some((c) => c.id === course.id)
           ? prev.courses
           : [...prev.courses, serverCourseToLocal(course)],
       }));
       void writeOnboardedCache(db, userId, true);
     },
-    [db, getToken, userId],
+    [bumpHydrationRevision, db, getToken, userId],
   );
 
   const addCourse = useCallback(
@@ -466,13 +487,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         examDate: course.examDate || null,
       });
       void upsertLocalCourse(db, serverCourseToCache(created)).catch(() => {});
+      bumpHydrationRevision();
       setHydrated((prev) => ({
         ...prev,
         clerkId: userId,
         courses: [...prev.courses, serverCourseToLocal(created)],
       }));
     },
-    [db, getToken, userId],
+    [bumpHydrationRevision, db, getToken, userId],
   );
 
   const updateCourse = useCallback(
@@ -488,6 +510,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (!token || !userId) throw new Error("Not signed in");
       const updated = await coursesApi.update(token, id, payload);
       void upsertLocalCourse(db, serverCourseToCache(updated)).catch(() => {});
+      bumpHydrationRevision();
       setHydrated((prev) => ({
         ...prev,
         clerkId: userId,
@@ -496,7 +519,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ),
       }));
     },
-    [db, getToken, userId],
+    [bumpHydrationRevision, db, getToken, userId],
   );
 
   const deleteCourse = useCallback(
@@ -524,13 +547,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         await purgeCourseLocally(db, id);
       }
       await removeLocalCourse(db, id).catch(() => {});
+      bumpHydrationRevision();
       setHydrated((prev) => ({
         ...prev,
         clerkId: userId,
         courses: prev.courses.filter((course) => course.id !== id),
       }));
     },
-    [db, getToken, userId],
+    [bumpHydrationRevision, db, getToken, userId],
   );
 
   // A delete must reach the server immediately when the device is online; the
