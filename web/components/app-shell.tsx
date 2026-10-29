@@ -109,8 +109,9 @@ function AppShellContent({
   useEffect(() => {
     if (!profile) return;
     const needsOnboarding =
-      profile.onboarded ??
-      (!profile.onboardingCompletedAt && courses.length === 0);
+      profile.onboarded === undefined
+        ? !profile.onboardingCompletedAt && courses.length === 0
+        : !profile.onboarded;
     if (needsOnboarding) router.replace("/onboarding");
   }, [profile, courses.length, router]);
 
