@@ -3,7 +3,6 @@ import { ActivityIndicator, Alert, Text, View } from "react-native";
 import { router } from "expo-router";
 import { useAuth } from "@clerk/expo";
 import * as WebBrowser from "expo-web-browser";
-import { getPendingAuthDestination } from "../lib/pending-auth-destination";
 import { usePalette } from "../state/appearance";
 
 WebBrowser.maybeCompleteAuthSession();
@@ -15,7 +14,9 @@ export default function OAuthCallback() {
   useEffect(() => {
     if (!isLoaded) return;
     if (isSignedIn) {
-      router.replace(getPendingAuthDestination());
+      // Cold-start deep links land here too; the resolver reads the account
+      // verdict instead of trusting anything remembered from this process.
+      router.replace("/auth-finish");
       return;
     }
 

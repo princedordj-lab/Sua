@@ -15,7 +15,6 @@ import { Image } from "expo-image";
 import { Field, Logo, PrimaryButton } from "../components/ui";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { usePalette } from "../state/appearance";
-import { setPendingAuthDestination } from "../lib/pending-auth-destination";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -65,12 +64,10 @@ export default function SignIn() {
       );
       return;
     }
-    if (mode === "sign-in") {
-      router.replace("/home");
-    } else {
-      router.replace("/setup");
-    }
-  }, [mode]);
+    // Sign-in and sign-up both resolve server-side: only the account's
+    // onboarding verdict decides between Home and setup.
+    router.replace("/auth-finish");
+  }, []);
 
   const finalizeVerifiedSignUp = useCallback(async () => {
     if (signUp.status === "missing_requirements") {
@@ -125,7 +122,7 @@ export default function SignIn() {
 
   const completeSignIn = async () => {
     const { error } = await signIn.finalize({
-      navigate: () => router.replace("/home"),
+      navigate: navigateAfterAuth,
     });
     if (error) throw error;
   };
@@ -261,7 +258,6 @@ export default function SignIn() {
   }, [busy, finalizeVerifiedSignUp, signUp.status, verificationSubmitted]);
 
   const continueWithGoogle = async () => {
-    const authMode = mode;
     setBusy(true);
     try {
       const result = await startSSOFlow({
@@ -272,38 +268,20 @@ export default function SignIn() {
         }),
       });
       const { createdSessionId, setActive } = result;
-      if (createdSessionId && setActive) {
-        // Clerk can complete OAuth by creating an account even when the user
-        // started from the sign-in tab. Prefer the actual returned flow when
-        // it is available, then fall back to the selected tab.
-        const destination =
-          result.signUp || authMode === "sign-up" ? "/setup" : "/home";
-        setPendingAuthDestination(destination);
-        await setActive({
-          session: createdSessionId,
-          navigate: (params) => {
-            if (params?.session?.currentTask) {
-              router.replace("/sign-in");
-              Alert.alert(
-                "Additional verification required",
-                "Your account needs another verification step before Sua can continue. Complete the step with your identity provider, then sign in again.",
-              );
-              return;
-            }
-            router.replace(destination);
-          },
-        });
-      } else {
+      if (!createdSessionId || !setActive) {
         const missing = result.signUp?.missingFields?.join(", ");
-        if (result.signUp?.status === "missing_requirements") {
-          setMode("sign-up");
-        }
         throw new Error(
           missing
             ? `Google authentication needs these additional account details: ${missing}. Return to the form and complete them, or try Google again.`
             : "Google authentication needs an additional verification step before a session can start. Return to email sign-in or try Google again.",
         );
       }
+      // result.signUp is always a SignUpResource object (the SSO hook also
+      // creates a transfer sign-up), so it must never drive navigation.
+      await setActive({
+        session: createdSessionId,
+        navigate: navigateAfterAuth,
+      });
     } catch (error) {
       Alert.alert("Google sign-in failed", messageFromError(error));
     } finally {

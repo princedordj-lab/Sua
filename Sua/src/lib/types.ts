@@ -65,6 +65,10 @@ export type ServerProfile = {
   plan: string;
   planExpiresAt: string | null;
   onboardingCompletedAt: string | null;
+  // Server verdict: true once onboarding finished or the account already owns
+  // data (pre-flag accounts). Optional so an older server cannot break routing.
+  onboarded?: boolean;
+  hasData?: boolean;
   // Present on GET /me, absent on PATCH /me.
   usage?: ServerUsage | null;
 };

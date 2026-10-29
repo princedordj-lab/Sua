@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Alert, Pressable, ScrollView, Text, View } from "react-native";
 import { router } from "expo-router";
 import { CalendarDays, ChevronRight } from "lucide-react-native";
@@ -16,13 +16,19 @@ const levels = [
 ];
 export default function Setup() {
   const pv = usePalette();
-  const { profile, completeOnboarding } = useApp();
+  const { profile, completeOnboarding, hasCompletedOnboarding } = useApp();
   const [university, setUniversity] = useState("");
   const [programme, setProgramme] = useState("");
   const [level, setLevel] = useState("");
   const [course, setCourse] = useState("");
   const [code, setCode] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // Setup is only for accounts the server confirmed as new. If a stale link
+  // or a cached verdict lands an onboarded student here, send them home.
+  useEffect(() => {
+    if (hasCompletedOnboarding) router.replace("/home");
+  }, [hasCompletedOnboarding]);
 
   const finish = async (skip = false) => {
     if (saving) return;

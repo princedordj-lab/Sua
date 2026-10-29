@@ -103,13 +103,15 @@ function AppShellContent({
   const { profile, courses, loading, error, refresh } = useAppData();
   const { containerRef, isKeyboardOpen } = useVisualViewportHeight<HTMLDivElement>();
 
-  // New accounts finish onboarding before the shell becomes useful. A
-  // mobile-created account with courses skips it even if the flag is missing.
+  // New accounts finish onboarding before the shell becomes useful. The
+  // server verdict also covers accounts created before the flag existed; the
+  // local fallback keeps a rolling deploy safe.
   useEffect(() => {
     if (!profile) return;
-    if (!profile.onboardingCompletedAt && courses.length === 0) {
-      router.replace("/onboarding");
-    }
+    const needsOnboarding =
+      profile.onboarded ??
+      (!profile.onboardingCompletedAt && courses.length === 0);
+    if (needsOnboarding) router.replace("/onboarding");
   }, [profile, courses.length, router]);
 
   const name = profile?.name || user?.fullName || user?.firstName || "Sua student";

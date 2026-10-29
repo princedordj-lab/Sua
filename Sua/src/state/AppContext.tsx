@@ -28,6 +28,7 @@ import {
   upsertLocalCourse,
   type LocalCourse,
 } from "../lib/notes";
+import { writeOnboardedCache } from "../lib/onboarding-cache";
 import { flushUploads } from "../lib/uploads";
 import { drainGenerationQueue, reconcileAiOutputs } from "../lib/generate";
 import { flushStudyProgress } from "../lib/progress";
@@ -44,6 +45,10 @@ type AppContextValue = {
   isSignedIn: boolean;
   isHydrating: boolean;
   hydrationIssue: boolean;
+  hydrationError: string | null;
+  // True once a server profile was hydrated. Routing must not treat an
+  // unresolved profile as "not onboarded".
+  isProfileResolved: boolean;
   hasCompletedOnboarding: boolean;
   profile: UserProfile | null;
   courses: Course[];
@@ -144,6 +149,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // bounded retry so queued edits resume without waiting for an app restart.
   const [refreshTick, setRefreshTick] = useState(0);
   const [hydrationIssue, setHydrationIssue] = useState(false);
+  const [hydrationError, setHydrationError] = useState<string | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestRefresh = useCallback((delayMs = 0) => {
     if (delayMs <= 0) {
@@ -165,6 +171,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return { clerkId, profile: null, courses: [] };
     });
     setHydrationIssue(true);
+    setHydrationError("Sua could not reach the server in time.");
     void listLocalCourses(db)
       .then((cached) => {
         setHydrated((previous) =>
@@ -268,6 +275,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
           courses: serverCourses.map(serverCourseToLocal),
         });
         setHydrationIssue(false);
+        setHydrationError(null);
+        // Keep the offline fallback fresh: an onboarded account may sign in
+        // without a connection next time and should go straight to the app.
+        void writeOnboardedCache(
+          db,
+          userId,
+          Boolean(
+            profile.onboarded ??
+              (profile.onboardingCompletedAt || serverCourses.length > 0),
+          ),
+        );
         // Mirror courses into SQLite so an offline cold start can still list
         // them (and therefore create notes) without the API.
         void replaceLocalCourses(db, serverCourses.map(serverCourseToCache)).catch(() => {});
@@ -316,12 +334,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
           }).catch(() => {});
           void flushStudyProgress({ db, getAuthToken }).catch(() => {});
         }
-      } catch {
+      } catch (error) {
         // Backend unreachable. Fall back to the cached course list so notes
         // can still be created and viewed offline; keep any state already
         // hydrated by an earlier successful pass.
         if (cancelled) return;
         setHydrationIssue(true);
+        setHydrationError(
+          error instanceof Error && error.message
+            ? error.message
+            : "Could not check your account.",
+        );
         let cached: LocalCourse[] = [];
         try {
           cached = await listLocalCourses(db);
@@ -381,7 +404,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         clerkId: userId,
         // PATCH /me omits usage; keep the counters already hydrated so the free
         // plan meter on Home does not disappear after editing the profile.
-        profile: { ...profile, usage: prev.profile?.usage ?? null },
+        // Merge so a response without onboarded/hasData cannot wipe the verdict.
+        profile: { ...prev.profile, ...profile, usage: prev.profile?.usage ?? null },
       }));
     },
     [getToken, userId],
@@ -425,6 +449,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           ? prev.courses
           : [...prev.courses, serverCourseToLocal(course)],
       }));
+      void writeOnboardedCache(db, userId, true);
     },
     [db, getToken, userId],
   );
@@ -533,7 +558,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return null;
   }, [active.profile, user, isSignedIn]);
 
-  const hasCompletedOnboarding = Boolean(active.profile?.onboardingCompletedAt);
+  const isProfileResolved = Boolean(active.profile);
+  // The server verdict wins; the local fallback keeps a server that predates
+  // the field (or an old cached profile) from re-onboarding existing accounts.
+  const hasCompletedOnboarding = Boolean(
+    active.profile?.onboarded ??
+      (active.profile?.onboardingCompletedAt || active.courses.length > 0),
+  );
 
   const value = useMemo<AppContextValue>(
     () => ({
@@ -541,6 +572,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       isSignedIn,
       isHydrating,
       hydrationIssue,
+      hydrationError,
+      isProfileResolved,
       hasCompletedOnboarding,
       profile,
       courses: active.courses,
@@ -564,9 +597,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       flushNoteQueue,
       getAuthToken,
       hasCompletedOnboarding,
+      hydrationError,
       hydrationIssue,
       isHydrating,
       isLoaded,
+      isProfileResolved,
       isSignedIn,
       profile,
       retryHydration,

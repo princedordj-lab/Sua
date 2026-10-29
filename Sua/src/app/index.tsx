@@ -5,14 +5,13 @@ import { Logo } from "../components/ui";
 import { useApp } from "../state/AppContext";
 
 export default function Index() {
-  const { isLoaded, isHydrating, isSignedIn } = useApp();
+  const { isLoaded, isSignedIn } = useApp();
   useEffect(() => {
-    // Preserve the post-login Home transition after profile and course
-    // hydration. AppContext falls back to cached data after its timeout.
-    if (!isLoaded || (isSignedIn && isHydrating)) return;
-    if (isSignedIn) router.replace("/home");
-    else router.replace("/welcome");
-  }, [isHydrating, isLoaded, isSignedIn]);
+    // The resolver decides between Home, setup and the connect screen; it can
+    // read the per-user cache without waiting for the network.
+    if (!isLoaded) return;
+    router.replace(isSignedIn ? "/auth-finish" : "/welcome");
+  }, [isLoaded, isSignedIn]);
   return (
     <View className="flex-1 items-center justify-center bg-cream">
       <Logo />

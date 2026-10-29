@@ -49,6 +49,9 @@ export type ServerProfile = {
   plan: string;
   planExpiresAt: string | null;
   onboardingCompletedAt: string | null;
+  // Server verdict: finished onboarding, or the account already owns data.
+  onboarded?: boolean;
+  hasData?: boolean;
   usage: Usage;
 };
 

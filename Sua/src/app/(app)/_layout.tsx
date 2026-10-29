@@ -12,13 +12,36 @@ import { ChatFab } from "../../components/chat-fab";
 // generation). Blocking states now draw over the navigator; sign-out exits
 // with router.replace instead of an early-return <Redirect>.
 export default function AppLayout() {
-  const { isLoaded, isHydrating, isSignedIn, hydrationIssue, retryHydration } = useApp();
+  const {
+    isLoaded,
+    isHydrating,
+    isSignedIn,
+    hydrationIssue,
+    retryHydration,
+    isProfileResolved,
+    hasCompletedOnboarding,
+  } = useApp();
   const pathname = usePathname();
   const blocked = !isLoaded || isHydrating || !isSignedIn;
 
   useEffect(() => {
-    if (isLoaded && !isSignedIn) router.replace("/welcome");
-  }, [isLoaded, isSignedIn]);
+    if (!isLoaded) return;
+    if (!isSignedIn) {
+      router.replace("/welcome");
+      return;
+    }
+    // A positive server verdict only: an unresolved profile (offline, timeout,
+    // error) must never be mistaken for a new account.
+    if (!isHydrating && isProfileResolved && !hasCompletedOnboarding) {
+      router.replace("/setup");
+    }
+  }, [
+    hasCompletedOnboarding,
+    isHydrating,
+    isLoaded,
+    isProfileResolved,
+    isSignedIn,
+  ]);
 
   const isChat = pathname === "/ask-sua";
   return (

@@ -8,16 +8,31 @@ import { FREE_MONTHLY_LIMITS } from "../lib/pipeline.js";
 
 export const meRouter = Router();
 
+// The single onboarding verdict clients may route on. A flagless account that
+// already owns a course is an existing student (accounts predate the flag), so
+// it must never be treated as new. Every note and job hangs off a course.
+async function shapeProfile(tx, profile) {
+  const hasData = (await tx.course.count({ where: { userId: profile.id } })) > 0;
+  return {
+    ...toProfile(profile),
+    onboarded: Boolean(profile.onboardingCompletedAt) || hasData,
+    hasData,
+  };
+}
+
 // Free-plan counters are read-only in the web MVP (billing ships with mobile).
 // The current month row is created lazily by the pipeline — a missing row means
 // zero usage, not an error.
 async function shapeWithUsage(tx, profile) {
   const month = new Date().toISOString().slice(0, 7);
-  const usage = await tx.usage.findUnique({
-    where: { userId_month: { userId: profile.id, month } },
-  });
+  const [base, usage] = await Promise.all([
+    shapeProfile(tx, profile),
+    tx.usage.findUnique({
+      where: { userId_month: { userId: profile.id, month } },
+    }),
+  ]);
   return {
-    ...toProfile(profile),
+    ...base,
     usage: {
       month,
       summaries: usage?.summaries ?? 0,
@@ -97,9 +112,10 @@ meRouter.patch("/", async (req, res) => {
       where: { clerkId: identity.clerkId },
       data: changes,
     });
-    return shapeWithUsage(tx, updated);
+    // PATCH still omits `usage` (the client keeps its hydrated counters).
+    return shapeProfile(tx, updated);
   });
-  res.json(toProfile(profile));
+  res.json(profile);
 });
 
 // Delete the student's account and data: our rows + storage objects first,
