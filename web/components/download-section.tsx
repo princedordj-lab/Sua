@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { Download, ShieldCheck, Wifi } from "lucide-react";
 import { androidApp } from "@/config/download";
 
@@ -18,12 +19,25 @@ const installSteps = [
   },
 ];
 
+type DownloadSectionProps = {
+  /**
+   * The landing page drops this band mid-page, so it stays an `<section>` with an
+   * `<h2>`. `/download` renders it as the page lead, where the same heading is
+   * the document's `<h1>`.
+   */
+  headingAs?: "h1" | "h2";
+  title?: ReactNode;
+};
+
 /**
- * Marketing band for the Android build. Server component: the only interactive
- * part is a plain link to the GitHub release asset, so nothing here needs to
- * cross into the client bundle.
+ * The Android install band: headline, direct APK link, integrity check and the
+ * step-by-step card. Server component — the only interactive parts are plain
+ * links and native `<details>`, so nothing here needs the client bundle.
  */
-export function DownloadSection() {
+export function DownloadSection({
+  headingAs: Heading = "h2",
+  title,
+}: DownloadSectionProps) {
   return (
     <section
       className="download-section section-shell"
@@ -35,11 +49,15 @@ export function DownloadSection() {
           <span />
           Sua for Android
         </div>
-        <h2 id="download-title">
-          Take Sua with you
-          <br />
-          into the <em>lecture hall.</em>
-        </h2>
+        <Heading id="download-title">
+          {title ?? (
+            <>
+              Take Sua with you
+              <br />
+              into the <em>lecture hall.</em>
+            </>
+          )}
+        </Heading>
         <p className="download-description">
           Record a class, photograph the board and study your notes on the bus
           home — the app keeps working when the network doesn’t, then catches up
@@ -54,6 +72,9 @@ export function DownloadSection() {
           >
             <Download size={17} aria-hidden="true" />
             Download for Android
+          </a>
+          <a className="download-alt" href={androidApp.releasesUrl}>
+            All releases <span aria-hidden="true">↗</span>
           </a>
         </div>
 
@@ -135,3 +156,4 @@ export function DownloadSection() {
     </section>
   );
 }
+
