@@ -4,6 +4,7 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 // still the supported integration and runs as the default proxy export.
 const isPublicRoute = createRouteMatcher([
   "/",
+  "/download",
   "/health",
   "/policy",
   "/terms",

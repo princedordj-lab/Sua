@@ -9,6 +9,7 @@ import {
   ListChecks,
 } from "lucide-react";
 import { SuaChatMark, type SuaChatIconComponent } from "@/components/sua-chat-icon";
+import { DownloadSection } from "@/components/download-section";
 import {
   LandingClosingActions,
   LandingHeaderCta,
@@ -331,6 +332,8 @@ export default function Home() {
         </div>
       </section>
 
+      <DownloadSection />
+
       <section className="promise-section section-shell" id="about">
         <div className="promise-mark"><SuaMark /></div>
         <div className="promise-copy">
@@ -355,6 +358,7 @@ export default function Home() {
         <a className="wordmark footer-wordmark" href="#top"><SuaMark /><span>Sua</span></a>
         <p>Made for learning. Made for here.</p>
         <div className="footer-links">
+          <Link href="/download">Download the app</Link>
           <Link href="/sign-in">Sign in</Link>
           <Link href="/sign-up">Create an account</Link>
           <Link href="/policy">Privacy policy</Link>

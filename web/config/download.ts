@@ -20,6 +20,8 @@
 export const androidApp = {
   version: "1.0.0",
   url: "https://github.com/princedordj-lab/Sua/releases/download/v1.0.0/sua.apk",
+  /** Fallback when an exact asset name changes; the workflow attaches `sua.apk` to each tag. */
+  releasesUrl: "https://github.com/princedordj-lab/Sua/releases",
   sizeLabel: "134 MB",
   minAndroid: "8.0",
   sha256: "2177d76694758ab2cd0c22fb2e498a544cb01d211a06410459d82c5c7b586761",

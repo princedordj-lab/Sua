@@ -50,6 +50,7 @@ There is no test suite; verification is `npx tsc --noEmit` + `npx eslint .` + `n
 web/
   app/
     page.tsx                 marketing landing (client CTA island)
+    download/page.tsx        public Android install page (APK url/size/hash in config/download.ts)
     health/page.tsx          GET /api/health status page
     sign-in|sign-up/…        Clerk <SignIn/> / <SignUp/> (+ Suspense)
     onboarding/              first-run university / programme / level → first course
@@ -60,7 +61,7 @@ web/
       ask-sua, profile, preferences
     app.css                  every app-screen style (tokens live in globals.css)
   components/                app shell, data provider, ui primitives, markdown, report-mistake
-  config/                    theme.ts (ported palette) + appearance.tsx (mode provider)
+  config/                    theme.ts (ported palette) + appearance.tsx (mode provider) + download.ts (Android release asset)
   lib/
     api.ts                   typed fetch client + ApiError
     use-api.ts               Clerk-token-bound wrapper around api.ts
