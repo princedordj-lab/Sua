@@ -68,7 +68,7 @@ export function DownloadSection({
           <a
             className="button button-primary download-cta"
             href={androidApp.url}
-            aria-label={`Download Sua ${androidApp.version} for Android (${androidApp.sizeLabel})`}
+            aria-label={`Download Sua ${androidApp} for Android (${androidApp.sizeLabel})`}
           >
             <Download size={17} aria-hidden="true" />
             Download for Android
@@ -76,7 +76,7 @@ export function DownloadSection({
         </div>
 
         <p className="download-meta">
-          <span>v{androidApp.version}</span>
+          <span>v{androidApp.fileName}</span>
           <span aria-hidden="true">·</span>
           <span>{androidApp.sizeLabel}</span>
           <span aria-hidden="true">·</span>
@@ -123,7 +123,7 @@ export function DownloadSection({
         <dl className="download-facts">
           <div>
             <dt>Version</dt>
-            <dd>{androidApp.version}</dd>
+            <dd>{androidApp.fileName}</dd>
           </div>
           <div>
             <dt>Size</dt>
