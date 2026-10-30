@@ -163,8 +163,9 @@ export default function Home() {
           <nav className="main-nav" aria-label="Main navigation">
             <a href="#how-it-works">How it works</a>
             <a href="#product">Inside the app</a>
-            <a href="#features">Why Sua</a>
-            <a href="#about">Our promise</a>
+            <a className="nav-secondary" href="#features">Why Sua</a>
+            <a className="nav-secondary" href="#about">Our promise</a>
+            <Link href="/download">Download</Link>
           </nav>
 
           <LandingHeaderCta />
