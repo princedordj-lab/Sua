@@ -39,13 +39,12 @@ const cdnBaseUrl = (
   process.env.NEXT_PUBLIC_ANDROID_APK_BASE_URL?.trim() || bucketBaseUrl
 ).replace(/\/+$/, "");
 
-const version = "1.0.0";
+
 
 /** Version in the key keeps each published build immutable in the CDN. */
-const fileName = `sua-${version}.apk`;
+const fileName = `sua-v2[1].apk`;
 
 export const androidApp = {
-  version,
   fileName,
   /** Direct link to the object — no redirect, no third-party host. */
   url: `${cdnBaseUrl}/${fileName}`,
