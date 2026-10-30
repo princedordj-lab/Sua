@@ -32,7 +32,7 @@
  * Public base of the bucket: host plus the prefix objects live under. Edit the
  * placeholder, or set `NEXT_PUBLIC_ANDROID_APK_BASE_URL` to skip the edit.
  */
-const bucketBaseUrl ="https://dl.download.ssyncd.space/android/sua-v2%5B1%5D.apk";
+const bucketBaseUrl ="https://download.ssyncd.space/android/";
 
 /** Public base actually used: env override first, then the constant above. */
 const cdnBaseUrl = (
