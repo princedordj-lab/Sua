@@ -73,9 +73,13 @@ export function DownloadSection({
             <Download size={17} aria-hidden="true" />
             Download for Android
           </a>
-          <a className="download-alt" href={androidApp.releasesUrl}>
-            All releases <span aria-hidden="true">↗</span>
-          </a>
+          {/* The GitHub release is a mirror; once the APK comes from the CDN
+              there is no reason to send a student to github.com. */}
+          {androidApp.servedFromCdn ? null : (
+            <a className="download-alt" href={androidApp.releasesUrl}>
+              All releases <span aria-hidden="true">↗</span>
+            </a>
+          )}
         </div>
 
         <p className="download-meta">

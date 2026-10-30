@@ -1,0 +1,129 @@
+# NOT ACTIVE — this is the copy source for .github/workflows/release-apk.yml.
+#
+# It lives here because the automation that produced this branch can read
+# workflows but cannot write them (GitHub: "refusing to allow a GitHub App to
+# create or update workflow ... without `workflows` permission"). Paste this
+# file over .github/workflows/release-apk.yml from a token that has that
+# permission, then delete this copy. See docs/android-download-hosting.md.
+#
+
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Re-run the build from the Actions tab without moving the tag: choose the
+  # tag in the "Run workflow" form and the same steps run from that tag, then
+  # re-attach the APK to the same release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and attach the APK to (must already exist, e.g. v1.0.0)'
+        required: true
+        type: string
+
+# A tag push and a manual re-run for the same tag must not race to upload
+# `sua.apk`; the later run waits instead of cancelling the first.
+concurrency:
+  group: release-apk-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Empty on a tag push, so this falls back to the tag that triggered
+          # the run; on a manual run it builds the tag typed in the form.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve release tag
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          case "$tag" in
+            v*) ;;
+            *)
+              echo "::error::Refusing to release '${tag}' - pass a v* tag such as v1.0.0."
+              exit 1
+              ;;
+          esac
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Building release ${tag}"
+
+      - name: Check R2 credentials
+        id: r2
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        run: |
+          if [ -n "$R2_ENDPOINT" ] && [ -n "$R2_BUCKET" ] && [ -n "$R2_ACCESS_KEY_ID" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::R2 secrets are not set - skipping the CDN upload and publishing only the GitHub release asset."
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        working-directory: Sua
+        run: npm ci
+
+      - name: Build APK with EAS
+        working-directory: Sua
+        run: eas build --platform android --profile preview --non-interactive --local=false --json > ../build-output.json
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Download APK artifact
+        run: |
+          ARTIFACT_URL=$(jq -r '.[0].artifacts.buildUrl // .[0].artifacts.applicationArchiveUrl' build-output.json)
+          echo "Downloading APK from: $ARTIFACT_URL"
+          curl -L -o sua.apk "$ARTIFACT_URL"
+
+      - name: Upload APK to R2
+        if: ${{ steps.r2.outputs.configured == 'true' }}
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          # Key matches web/config/download.ts: <base>/sua-<version>.apk.
+          key="android/sua-${TAG#v}.apk"
+          aws s3 cp sua.apk "s3://${R2_BUCKET}/${key}" \
+            --endpoint-url "${R2_ENDPOINT}" \
+            --content-type application/vnd.android.package-archive \
+            --content-disposition 'attachment; filename="sua.apk"' \
+            --cache-control "public, max-age=31536000, immutable"
+          echo "Published s3://${R2_BUCKET}/${key}"
+
+      - name: Create Release and Upload APK
+        uses: softprops/action-gh-release@v2
+        with:
+          # Explicit so a manual run attaches to the chosen tag instead of the
+          # branch it was dispatched from.
+          tag_name: ${{ steps.release.outputs.tag }}
+          files: sua.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
