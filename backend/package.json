@@ -12,7 +12,13 @@
     "setup:neon-storage": "tsx scripts/create-neon-bucket.js",
     "prisma": "prisma",
     "postinstall": "prisma generate",
-    "build": "prisma generate && esbuild src/index.js --bundle --platform=node --format=esm --outfile=dist/index.js --external:@napi-rs/canvas --external:@prisma/client --external:express --external:cors --external:@clerk/express --external:pg --external:@vercel/functions --external:cloudinary --external:svix --external:dotenv --external:pdf-parse --external:pdfjs-dist --external:jszip"
+    "build": "prisma generate && esbuild src/index.js --bundle --platform=node --format=esm --outfile=dist/index.js --external:@napi-rs/canvas --external:@prisma/client --external:express --external:cors --external:@clerk/express --external:pg --external:@vercel/functions --external:cloudinary --external:svix --external:dotenv --external:pdf-parse --external:pdfjs-dist --external:jszip",
+    "r2:login": "wrangler login",
+    "r2:whoami": "wrangler whoami",
+    "r2:bucket:create": "wrangler r2 bucket create sua-downloads",
+    "r2:bucket:list": "wrangler r2 bucket list",
+    "r2:domain:add": "wrangler r2 bucket domain add sua-downloads",
+    "r2:upload": "wrangler r2 object put"
   },
   "keywords": [],
   "author": "",
@@ -40,6 +46,7 @@
     "@types/node": "^26.6.5",
     "@types/pg": "^8.23.1",
     "esbuild": "^0.25.12",
-    "tsx": "^4.23.15"
+    "tsx": "^4.23.15",
+    "wrangler": "^4.156.0"
   }
 }

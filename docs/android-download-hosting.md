@@ -42,16 +42,34 @@ dl.<domain>/android/sua-<version>.apk  (R2 custom domain)
 
 ### 1. Bucket
 
-Dashboard → **R2** → *Create bucket* → name `sua-downloads` (any name, but put
-it in `R2_BUCKET`). Or:
+`wrangler` is a devDependency of `backend/`, so run the Cloudflare commands from
+that folder (any `npx wrangler …` invocation works too — there is no lock to a
+directory; the existing `backend/wrangler.toml` describes the `sua-ai-worker`
+and is simply ignored by `r2` commands). Wrangler 4 needs **Node ≥ 22**.
 
 ```bash
-npx wrangler r2 bucket create sua-downloads
+cd backend
+npm install          # brings in wrangler
+npm run r2:login     # opens a browser to authorise your Cloudflare account
+npm run r2:whoami    # confirms the account and prints its Account ID
+npm run r2:bucket:create   # creates `sua-downloads`
 ```
+
+Without a browser (CI, remote box): `export CLOUDFLARE_API_TOKEN=…` instead of
+`r2:login`. That token needs account-level **Workers R2 Storage: Edit** — the
+bucket-scoped "Object Read and Write" token from step 3 can only touch objects
+in a bucket that already exists.
+
+Equivalents if you prefer the dashboard: **R2 → Create bucket** → `sua-downloads`.
 
 ### 2. Custom domain
 
-Dashboard → **R2** → `sua-downloads` → **Settings** → **Custom Domains** →
+```bash
+cd backend
+npm run r2:domain:add -- --domain dl.<your-domain> --zone-id <ZONE_ID>
+```
+
+or Dashboard → **R2** → `sua-downloads` → **Settings** → **Custom Domains** →
 *Connect Domain* → `dl.<your-domain>`.
 
 The domain's zone must be on Cloudflare; SSL and CDN caching are automatic.
@@ -100,9 +118,21 @@ top of the tag-triggered build and the manual re-run trigger.
 ## Publishing a build by hand
 
 Needed when the APK was built somewhere else, or when the secrets were added
-after a failed run. Upload against the **S3 endpoint**, not the public domain:
-Cloudflare caps uploads through a proxied hostname at 100 MB on Free/Pro, so a
-134 MB `PUT` to `dl.<domain>` would fail.
+after a failed run. **Never upload through `dl.<domain>`** — Cloudflare caps
+uploads through a proxied hostname at 100 MB on Free/Pro, so a 134 MB `PUT`
+would fail. Use wrangler (S3 API under the hood) or `aws s3 cp`:
+
+```bash
+cd backend
+VERSION=1.0.0
+npm run r2:upload -- "sua-downloads/android/sua-${VERSION}.apk" \
+  --file ../sua.apk \
+  --content-type application/vnd.android.package-archive \
+  --content-disposition 'attachment; filename="sua.apk"' \
+  --cache-control 'public, max-age=31536000, immutable'
+```
+
+Same thing with the AWS CLI (what CI runs — no Node 22 needed):
 
 ```bash
 VERSION=1.0.0
@@ -114,13 +144,6 @@ aws s3 cp sua.apk "s3://sua-downloads/android/sua-${VERSION}.apk" \
   --content-type application/vnd.android.package-archive \
   --content-disposition 'attachment; filename="sua.apk"' \
   --cache-control 'public, max-age=31536000, immutable'
-```
-
-Wrangler equivalent:
-
-```bash
-npx wrangler r2 object put "sua-downloads/android/sua-${VERSION}.apk" \
-  --file sua.apk --content-type application/vnd.android.package-archive
 ```
 
 `--content-disposition` keeps the saved file name `sua.apk` even though the

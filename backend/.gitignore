@@ -13,3 +13,6 @@ skills-lock.json
 
 # Local environment variables (ignored by version control)
 .env.local
+
+# Wrangler's local state (auth profiles, metrics-free logs) — `npm run r2:*`
+/.wrangler

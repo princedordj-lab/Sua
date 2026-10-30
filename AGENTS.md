@@ -30,6 +30,10 @@ npx prisma generate         # after schema edits; client goes to gitignored src/
 npm run build               # esbuild bundle -> dist/index.js (Vercel build)
 npm run eval -- <sample> --kind lecture_note|reference   # prompt/validation harness
 npm run eval -- --long [--sections N] [--mock]   # long-file needle/resume/failure/cost eval; --mock = deterministic offline provider (live needs the xkiro quota)
+npm run r2:login             # Cloudflare auth for the Android APK bucket (wrangler devDependency, Node >=22)
+npm run r2:bucket:create     # create the `sua-downloads` R2 bucket that hosts the APK
+npm run r2:domain:add -- --domain dl.<domain> --zone-id <zone>   # connect the public download hostname
+npm run r2:upload -- "sua-downloads/android/sua-<version>.apk" --file <path> --content-type application/vnd.android.package-archive
 ```
 
 Web (`cd web`): `npm run dev`, `npm run build`, `npm run lint`.
