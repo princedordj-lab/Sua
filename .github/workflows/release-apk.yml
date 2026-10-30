@@ -4,6 +4,21 @@ on:
   push:
     tags:
       - 'v*'
+  # Re-run the build from the Actions tab without moving the tag: choose the
+  # tag in the "Run workflow" form and the same steps run from that tag, then
+  # re-attach the APK to the same release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and attach the APK to (must already exist, e.g. v1.0.0)'
+        required: true
+        type: string
+
+# A tag push and a manual re-run for the same tag must not race to upload
+# `sua.apk`; the later run waits instead of cancelling the first.
+concurrency:
+  group: release-apk-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
@@ -13,6 +28,26 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # Empty on a tag push, so this falls back to the tag that triggered
+          # the run; on a manual run it builds the tag typed in the form.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve release tag
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          case "$tag" in
+            v*) ;;
+            *)
+              echo "::error::Refusing to release '${tag}' - pass a v* tag such as v1.0.0."
+              exit 1
+              ;;
+          esac
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Building release ${tag}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -44,6 +79,9 @@ jobs:
       - name: Create Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
+          # Explicit so a manual run attaches to the chosen tag instead of the
+          # branch it was dispatched from.
+          tag_name: ${{ steps.release.outputs.tag }}
           files: sua.apk
           generate_release_notes: true
         env:
