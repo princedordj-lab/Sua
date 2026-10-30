@@ -210,6 +210,20 @@
   font-weight: 600;
 }
 
+/* Labels stay on one line; the breakpoints below drop spacing (and the two
+   section anchors) instead of letting words break mid-label. */
+.main-nav a {
+  white-space: nowrap;
+}
+
+/* Five items plus the CTA pair need less airing before the 960px step. */
+@media (max-width: 1180px) {
+  .main-nav {
+    gap: 26px;
+    margin-left: 64px;
+  }
+}
+
 .main-nav a,
 .site-footer a:last-child {
   transition: color 180ms ease;
@@ -2358,5 +2372,19 @@
 
   .download-support {
     padding-bottom: 62px;
+  }
+}
+
+/* Below 860px the desktop nav keeps only its three primary destinations so the
+   wordmark and the sign-in / get-started pair never wrap; the section anchors
+   are still one scroll away, and the footer carries the full link set. */
+@media (max-width: 860px) {
+  .main-nav {
+    gap: 18px;
+    margin-left: 20px;
+  }
+
+  .main-nav .nav-secondary {
+    display: none;
   }
 }
