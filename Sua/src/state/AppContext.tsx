@@ -10,6 +10,7 @@ import {
 } from "react";
 import { useAuth, useClerk, useUser } from "@clerk/expo";
 import NetInfo from "@react-native-community/netinfo";
+import { useAuthVerdict, type AuthVerdict } from "../lib/auth-gate";
 import { AppState } from "react-native";
 import { coursesApi, profileApi, pushApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
@@ -42,7 +43,15 @@ import type {
 
 type AppContextValue = {
   isLoaded: boolean;
+  // Debounced verdict, safe for routing: it only reports "signed out" after the
+  // reading was stable (see lib/auth-gate.ts).
+  authVerdict: AuthVerdict;
   isSignedIn: boolean;
+  isSignedOut: boolean;
+  // True from the moment signOut() starts until a session exists again. Routing
+  // uses it so the welcome screen's self-heal does not fight an explicit
+  // sign-out during the grace window.
+  isSigningOut: boolean;
   isHydrating: boolean;
   hydrationIssue: boolean;
   hydrationError: string | null;
@@ -136,7 +145,19 @@ function cachedCourseToApp(course: LocalCourse): Course {
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const { isLoaded, isSignedIn: isSignedInRaw, getToken, userId } = useAuth();
-  const isSignedIn = Boolean(isSignedInRaw);
+  // Two readings of the same snapshot:
+  // - `signedInNow` is Clerk's raw answer, used by the data effects so a real
+  //   sign-out stops hydration immediately;
+  // - `authVerdict` debounces it, so one "signed out" frame (token refresh,
+  //   native client sync, five-minute poll) never looks like a logout.
+  const signedInNow = isSignedInRaw === true;
+  const authVerdict = useAuthVerdict(isLoaded, isSignedInRaw);
+  const isSignedIn = authVerdict === "signed-in";
+  const isSignedOut = authVerdict === "signed-out";
+  const [signOutRequested, setSignOutRequested] = useState(false);
+  // Derived, not stored: an explicit sign-out only "counts" until a session
+  // exists again, and deriving it keeps the effect-free lint rule happy.
+  const isSigningOut = signOutRequested && !signedInNow;
   const { signOut: clerkSignOut } = useClerk();
   const { user } = useUser();
   const db = useSQLiteContext();
@@ -207,14 +228,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // a bounded wait, expose cached courses and let connectivity/foreground
   // events retry the server bootstrap in the background.
   useEffect(() => {
-    if (!isLoaded || !isSignedIn || !userId || hydrated.clerkId === userId) {
+    if (!isLoaded || !signedInNow || !userId || hydrated.clerkId === userId) {
       return;
     }
     const timeout = setTimeout(() => {
       applyHydrationFallback(userId);
     }, 10_000);
     return () => clearTimeout(timeout);
-  }, [applyHydrationFallback, hydrated.clerkId, isLoaded, isSignedIn, userId]);
+  }, [applyHydrationFallback, hydrated.clerkId, isLoaded, signedInNow, userId]);
 
   // Flush the note queue and pull fresh copies whenever connectivity returns
   // or the app returns to the foreground — the queue must not wait for a
@@ -257,7 +278,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Needs a development build (Expo Go skips it silently).
   const pushRegistered = useRef(false);
   useEffect(() => {
-    if (!isSignedIn || userId || pushRegistered.current) return;
+    if (!signedInNow || userId || pushRegistered.current) return;
     void (async () => {
       if ((await getSetting(db, "push_enabled")) === "0") return;
       const expoToken = await registerForPushAndReport();
@@ -268,11 +289,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (!token) return;
       pushApi.registerToken(token, expoToken).catch(() => {});
     })();
-  }, [isSignedIn, userId, getToken, db]);
+  }, [signedInNow, userId, getToken, db]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!isLoaded || !isSignedIn || !userId) return;
+    if (!isLoaded || !signedInNow || !userId) return;
     const revision = hydrationRevision.current;
     (async () => {
       try {
@@ -379,28 +400,37 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [db, getAuthToken, getToken, isLoaded, isSignedIn, requestRefresh, refreshTick, userId]);
+  }, [db, getAuthToken, getToken, isLoaded, signedInNow, requestRefresh, refreshTick, userId]);
 
   // Derive per-user state from `hydrated` instead of clearing it in an
   // effect: switching/losing the session instantly hides stale data.
   const active = hydrated.clerkId === userId && userId ? hydrated : EMPTY_HYDRATED;
-  const isHydrating = isSignedIn && Boolean(userId) && !active.clerkId;
+  const isHydrating = signedInNow && Boolean(userId) && !active.clerkId;
 
   const signOut = useCallback(async () => {
+    // Routing must not "self-heal" the welcome screen back to /auth-finish
+    // while an explicit sign-out is still settling.
+    setSignOutRequested(true);
     // Release this device's push token best-effort: study pushes for a signed
     // out account make no sense, and the row would leak across sessions.
     const expoToken = await getSetting(db, "expo_push_token").catch(() => null);
-    if (expoToken) {
-      const token = await getToken().catch(() => null);
-      if (token) {
-        await profileApi.deletePushToken(token, expoToken).catch(() => {});
+    try {
+      if (expoToken) {
+        const token = await getToken().catch(() => null);
+        if (token) {
+          await profileApi.deletePushToken(token, expoToken).catch(() => {});
+        }
       }
+      await setSetting(db, "expo_push_token", "").catch(() => {});
+      bumpHydrationRevision();
+      setConfirmedOnboardedFor(null);
+      setHydrated(EMPTY_HYDRATED);
+      await clerkSignOut();
+    } catch (error) {
+      // Still signed in: let the guards work normally again.
+      setSignOutRequested(false);
+      throw error;
     }
-    await setSetting(db, "expo_push_token", "").catch(() => {});
-    bumpHydrationRevision();
-    setConfirmedOnboardedFor(null);
-    setHydrated(EMPTY_HYDRATED);
-    await clerkSignOut();
   }, [bumpHydrationRevision, clerkSignOut, db, getToken]);
 
   const updateProfile = useCallback(
@@ -579,7 +609,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const profile = useMemo<UserProfile | null>(() => {
     if (active.profile) return serverProfileToLocal(active.profile);
-    if (isSignedIn && user) {
+    if (signedInNow && user) {
       return {
         name: [user.firstName, user.lastName].filter(Boolean).join(" ") || "",
         email: user.primaryEmailAddress?.emailAddress ?? "",
@@ -589,7 +619,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       };
     }
     return null;
-  }, [active.profile, user, isSignedIn]);
+  }, [active.profile, user, signedInNow]);
 
   const isProfileResolved = Boolean(active.profile);
   // The server verdict wins; the local fallback keeps a server that predates
@@ -605,7 +635,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AppContextValue>(
     () => ({
       isLoaded,
+      authVerdict,
       isSignedIn,
+      isSignedOut,
+      isSigningOut,
       isHydrating,
       hydrationIssue,
       hydrationError,
@@ -627,6 +660,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [
       active.courses,
       addCourse,
+      authVerdict,
       completeOnboarding,
       deleteAccount,
       deleteCourse,
@@ -639,6 +673,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       isLoaded,
       isProfileResolved,
       isSignedIn,
+      isSignedOut,
+      isSigningOut,
       profile,
       retryHydration,
       signOut,

@@ -1,20 +1,21 @@
 /**
  * Android build, published as a GitHub Release asset.
  *
- * The APK is ~134 MB, so it cannot be served from `public/apk/` (Vercel's
- * Hobby static-upload cap is 100 MB). Publishing it as a release asset keeps
- * the repo lean and gives the landing page a stable CDN URL.
+ * The APK is ~134 MB, so it cannot be committed to the repo (GitHub rejects
+ * blobs over 100 MiB) or served from `public/apk/` (Vercel's Hobby static-
+ * upload cap is 100 MB). Publishing it as a release asset keeps the repo
+ * clean and gives the landing page a stable CDN URL.
  *
- * The APK is tracked in `web/public/apk/sua.apk` and automatically uploaded
- * via the GitHub Actions workflow in `.github/workflows/release-apk.yml`.
+ * The APK is built automatically via EAS in the GitHub Actions workflow at
+ * `.github/workflows/release-apk.yml` and attached to the release.
  *
  * To ship a new build:
- *   1. Replace `web/public/apk/sua.apk` with the new build.
- *   2. Update `version`, `url`, `sizeLabel` and `sha256` below.
- *   3. Commit and push, then create a matching tag:
+ *   1. Update `version`, `url`, `sizeLabel` and `sha256` below.
+ *   2. Commit and push, then create a matching tag:
  *        git tag v<version> && git push origin v<version>
- *      The workflow will create the release and attach the APK automatically.
- *   4. Run `npx tsc --noEmit && npx eslint . && npm run build` in `web/`.
+ *      The workflow will trigger an EAS build, download the APK, create the
+ *      GitHub release, and attach the APK automatically.
+ *   3. Run `npx tsc --noEmit && npx eslint . && npm run build` in `web/`.
  */
 export const androidApp = {
   version: "1.0.0",

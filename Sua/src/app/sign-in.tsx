@@ -15,6 +15,7 @@ import { Image } from "expo-image";
 import { Field, Logo, PrimaryButton } from "../components/ui";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { usePalette } from "../state/appearance";
+import { useApp } from "../state/AppContext";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -30,6 +31,7 @@ export default function SignIn() {
   const { signIn } = useSignIn();
   const { signUp } = useSignUp();
   const { startSSOFlow } = useSSO();
+  const { authVerdict, isSigningOut } = useApp();
 
   const [mode, setMode] = useState<"sign-in" | "sign-up">("sign-in");
   const [email, setEmail] = useState("");
@@ -41,6 +43,15 @@ export default function SignIn() {
   const [signInChallenge, setSignInChallenge] = useState<SignInChallenge | null>(null);
   const [busy, setBusy] = useState(false);
   const finalizingVerification = useRef(false);
+
+  useEffect(() => {
+    // The session can be restored or finish activating after this screen
+    // mounted. A signed-in student should never be left staring at the form,
+    // and the guard respects an explicit sign-out in progress.
+    if (authVerdict !== "signed-in" || isSigningOut) return;
+    const timeout = setTimeout(() => router.replace("/auth-finish"), 800);
+    return () => clearTimeout(timeout);
+  }, [authVerdict, isSigningOut]);
 
   const switchMode = (next: "sign-in" | "sign-up") => {
     setMode(next);

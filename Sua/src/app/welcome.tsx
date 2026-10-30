@@ -1,10 +1,28 @@
+import { useEffect } from "react";
 import { ImageBackground, Pressable, Text, View } from "react-native";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { ArrowRight, Sparkles } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Logo, PrimaryButton } from "../components/ui";
+import { useApp } from "../state/AppContext";
 
 export default function Welcome() {
+  const { authVerdict, isSigningOut } = useApp();
+  const { reason } = useLocalSearchParams<{ reason?: string }>();
+  // Only claim the session expired when it really did: a signed-out verdict
+  // plus the flag the app layout passes. An explicit sign-out never sets it.
+  const sessionExpired = reason === "expired" && authVerdict === "signed-out";
+
+  useEffect(() => {
+    // Self-heal. Landing here while signed in means a transient signed-out
+    // frame routed the student out, so send them back to the resolver once the
+    // session has held for a moment. `isSigningOut` keeps an explicit sign-out
+    // from bouncing straight back into the app.
+    if (authVerdict !== "signed-in" || isSigningOut) return;
+    const timeout = setTimeout(() => router.replace("/auth-finish"), 800);
+    return () => clearTimeout(timeout);
+  }, [authVerdict, isSigningOut]);
+
   return (
     <SafeAreaView className="flex-1 bg-[#19152C]" style={{ flex: 1 }}>
       <ImageBackground
@@ -29,6 +47,14 @@ export default function Welcome() {
               Sua turns lectures into clear study plans, flashcards, and quizzes
               that keep you ready for exam day.
             </Text>
+            {sessionExpired ? (
+              <View className="mt-5 rounded-2xl bg-white/10 px-4 py-3">
+                <Text className="text-sm font-semibold leading-5 text-white">
+                  Your session ended. Sign in again to pick up where you left
+                  off.
+                </Text>
+              </View>
+            ) : null}
           </View>
           <View className="gap-3 pb-4">
             <PrimaryButton onPress={() => router.push("/onboarding")}>

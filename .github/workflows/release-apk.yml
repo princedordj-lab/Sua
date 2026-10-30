@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  release:
+  build-and-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -14,10 +14,37 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        working-directory: Sua
+        run: npm ci
+
+      - name: Build APK with EAS
+        working-directory: Sua
+        run: eas build --platform android --profile preview --non-interactive --local=false --json > ../build-output.json
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Download APK artifact
+        run: |
+          ARTIFACT_URL=$(jq -r '.[0].artifacts.buildUrl // .[0].artifacts.applicationArchiveUrl' build-output.json)
+          echo "Downloading APK from: $ARTIFACT_URL"
+          curl -L -o sua.apk "$ARTIFACT_URL"
+
       - name: Create Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          files: web/public/apk/sua.apk
+          files: sua.apk
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -18,8 +18,11 @@ import { usePalette } from "../state/appearance";
 // truthiness says nothing about whether the account is new.
 export default function AuthFinish() {
   const pv = usePalette();
-  const { isLoaded, isSignedIn, userId } = useAuth();
+  // Clerk is the source for the account id; the *routing* verdict comes from
+  // AppContext, which waits out a transient signed-out frame before acting.
+  const { userId } = useAuth();
   const {
+    authVerdict,
     isHydrating,
     isProfileResolved,
     hasCompletedOnboarding,
@@ -61,13 +64,11 @@ export default function AuthFinish() {
   );
 
   useEffect(() => {
-    if (!isLoaded) return;
-    if (!isSignedIn) {
-      // A session activated moments ago can still read as signed out for a
-      // frame; only leave once that state sticks, or a fresh sign-in would
-      // strand the student on the welcome screen.
-      const timeout = setTimeout(() => router.replace("/welcome"), 1500);
-      return () => clearTimeout(timeout);
+    // The verdict already waited for a stable reading; no local debounce here.
+    if (authVerdict === "loading") return;
+    if (authVerdict === "signed-out") {
+      router.replace("/welcome");
+      return;
     }
     if (!userId || !cacheLoaded) return;
     if (routed.current) return;
@@ -89,14 +90,13 @@ export default function AuthFinish() {
     void writeOnboardedCache(db, userId, hasCompletedOnboarding);
     router.replace(hasCompletedOnboarding ? "/home" : "/setup");
   }, [
+    authVerdict,
     cacheLoaded,
     cachedOnboarded,
     db,
     hasCompletedOnboarding,
     isHydrating,
-    isLoaded,
     isProfileResolved,
-    isSignedIn,
     userId,
   ]);
 
@@ -120,8 +120,7 @@ export default function AuthFinish() {
   }, [signOut]);
 
   const unresolved =
-    isLoaded &&
-    isSignedIn &&
+    authVerdict === "signed-in" &&
     Boolean(userId) &&
     cacheLoaded &&
     cachedOnboarded !== true &&

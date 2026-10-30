@@ -13,23 +13,33 @@ import { ChatFab } from "../../components/chat-fab";
 // with router.replace instead of an early-return <Redirect>.
 export default function AppLayout() {
   const {
-    isLoaded,
+    authVerdict,
     isHydrating,
-    isSignedIn,
+    isSignedOut,
+    isSigningOut,
     hydrationIssue,
     retryHydration,
     isProfileResolved,
     hasCompletedOnboarding,
   } = useApp();
   const pathname = usePathname();
-  const blocked = !isLoaded || isHydrating || !isSignedIn;
+  // Only a stable verdict blocks the app: a signed-out frame during a token
+  // refresh or native client sync must not unmount the screens.
+  const blocked = isHydrating || authVerdict !== "signed-in";
 
   useEffect(() => {
-    if (!isLoaded) return;
-    if (!isSignedIn) {
-      router.replace("/welcome");
-      return;
-    }
+    if (!isSignedOut) return;
+    // Signing out on purpose already routes to Welcome; labelling that as an
+    // expiry would tell the student their session ended when they ended it.
+    router.replace(
+      isSigningOut
+        ? { pathname: "/welcome" }
+        : { pathname: "/welcome", params: { reason: "expired" } },
+    );
+  }, [isSignedOut, isSigningOut]);
+
+  useEffect(() => {
+    if (authVerdict !== "signed-in") return;
     // A positive server verdict only: an unresolved or degraded profile
     // (offline, timeout, error) must never be mistaken for a new account.
     if (
@@ -41,12 +51,11 @@ export default function AppLayout() {
       router.replace("/setup");
     }
   }, [
+    authVerdict,
     hasCompletedOnboarding,
     hydrationIssue,
     isHydrating,
-    isLoaded,
     isProfileResolved,
-    isSignedIn,
   ]);
 
   const isChat = pathname === "/ask-sua";
