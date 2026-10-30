@@ -1,8 +1,9 @@
 # Android APK hosting
 
-The `/download` page hands students a ~134 MB APK. It is published to a
-**Cloudflare R2 bucket behind a Sua subdomain**, and mirrored on the GitHub
-release by CI.
+The `/download` page hands students a ~134 MB APK that is served **straight
+from a Cloudflare R2 bucket** behind a Sua subdomain. There is no app store and
+no CI publishing step yet: the APK is uploaded by hand and the page links the
+object directly.
 
 ## Why R2
 
@@ -10,42 +11,45 @@ release by CI.
 | :--- | :--- | :--- |
 | Git repository blob | GitHub warns >50 MiB, blocks >100 MiB | no |
 | Vercel static upload (`web/public/`) | Hobby 100 MB, Pro 1 GB | no on Hobby |
-| GitHub release asset | no total-size or bandwidth limit | yes, but on github.com |
 | **Cloudflare R2 + custom domain** | 5 TiB per object, no egress charge | **yes** |
 
-R2 also keeps the download on a Sua host: Cloudflare caches `.apk` by default
-(it is in the default cached-extension list), the cacheable-file cap is 512 MB
-on Free/Pro, and egress is free on every plan.
+R2 keeps the download on a Sua host: Cloudflare caches `.apk` by default (it is
+in the default cached-extension list), the cacheable-file cap is 512 MB on
+Free/Pro, and egress is free on every plan.
 
 ## How the pieces fit
 
 ```
-EAS build ──► workflow ──► s3://<bucket>/android/sua-<version>.apk
-                    └────► GitHub release asset (mirror / release notes)
-
-dl.<domain>/android/sua-<version>.apk  (R2 custom domain)
-        ▲
-        └── web: NEXT_PUBLIC_ANDROID_APK_BASE_URL=https://dl.<domain>/android
+wrangler upload  ──►  s3://sua-downloads/android/sua-<version>.apk
+                                   │
+                                   ▼
+                 https://dl.<domain>/android/sua-<version>.apk
+                                   ▲
+                                   └── web/config/download.ts
+                                       (bucket base + version)
 ```
 
-- `web/config/download.ts` builds `url` from `NEXT_PUBLIC_ANDROID_APK_BASE_URL`
-  plus `sua-<version>.apk`. **If the variable is unset the page falls back to
-  the GitHub release asset** and shows the "All releases" link, so the site
-  keeps working before (or without) R2.
-- The key carries the version and is uploaded with
-  `Cache-Control: public, max-age=31536000, immutable`, so a new build never
-  overwrites a URL a student is already downloading.
-- CI only uploads to R2 when the four `R2_*` secrets exist; otherwise it logs a
-  notice and publishes the GitHub asset alone.
+`web/config/download.ts` holds everything the page knows about the build:
+
+- the bucket base — `NEXT_PUBLIC_ANDROID_APK_BASE_URL` if set, otherwise the
+  `bucketBaseUrl` constant in that file (so local/preview deploys can point
+  somewhere else without a code change);
+- `version` — also the object key suffix (`sua-<version>.apk`);
+- `sizeLabel` and `sha256` — what the page shows, and what it asks students to
+  check after downloading.
+
+Objects are uploaded with `Cache-Control: public, max-age=31536000, immutable`,
+so the key carries the version: a new build is a new key and can never overwrite
+a URL a student is already downloading.
 
 ## One-time setup
 
 ### 1. Bucket
 
 `wrangler` is a devDependency of `backend/`, so run the Cloudflare commands from
-that folder (any `npx wrangler …` invocation works too — there is no lock to a
-directory; the existing `backend/wrangler.toml` describes the `sua-ai-worker`
-and is simply ignored by `r2` commands). Wrangler 4 needs **Node ≥ 22**.
+that folder (any `npx wrangler …` invocation works too; the existing
+`backend/wrangler.toml` describes the `sua-ai-worker` and is ignored by `r2`
+commands). Wrangler 4 needs **Node ≥ 22**.
 
 ```bash
 cd backend
@@ -55,12 +59,10 @@ npm run r2:whoami    # confirms the account and prints its Account ID
 npm run r2:bucket:create   # creates `sua-downloads`
 ```
 
-Without a browser (CI, remote box): `export CLOUDFLARE_API_TOKEN=…` instead of
-`r2:login`. That token needs account-level **Workers R2 Storage: Edit** — the
-bucket-scoped "Object Read and Write" token from step 3 can only touch objects
-in a bucket that already exists.
+Without a browser (remote box): `export CLOUDFLARE_API_TOKEN=…` instead of
+`r2:login`. That token needs account-level **Workers R2 Storage: Edit**.
 
-Equivalents if you prefer the dashboard: **R2 → Create bucket** → `sua-downloads`.
+Dashboard equivalent: **R2 → Create bucket** → `sua-downloads`.
 
 ### 2. Custom domain
 
@@ -72,53 +74,28 @@ npm run r2:domain:add -- --domain dl.<your-domain> --zone-id <ZONE_ID>
 or Dashboard → **R2** → `sua-downloads` → **Settings** → **Custom Domains** →
 *Connect Domain* → `dl.<your-domain>`.
 
-The domain's zone must be on Cloudflare; SSL and CDN caching are automatic.
-Do **not** use the `r2.dev` development URL for production — Cloudflare
-rate-limits it and says it is not intended for production traffic.
-A `Cache Everything` rule is not required: `.apk` is cached by default.
+The zone must be on Cloudflare; SSL and CDN caching are automatic. Do **not**
+use the `r2.dev` development URL for production — Cloudflare rate-limits it and
+says it is not intended for production traffic. A `Cache Everything` rule is not
+required: `.apk` is cached by default.
 
-### 3. API token (S3 credentials)
+### 3. Point the page at the bucket
 
-Dashboard → **R2** → **Overview** → *Account Details* → **Manage** →
-*Create Account API token* → permission **Object Read and Write** → scope it to
-`sua-downloads`. Copy the **Access Key ID** and **Secret Access Key** (the
-secret is shown once) and note the account ID: the S3 endpoint is
-`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`.
-
-### 4. GitHub repository secrets
-
-| Secret | Value |
-| :--- | :--- |
-| `R2_ENDPOINT` | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` |
-| `R2_ACCESS_KEY_ID` | Access Key ID from step 3 |
-| `R2_SECRET_ACCESS_KEY` | Secret Access Key from step 3 |
-| `R2_BUCKET` | `sua-downloads` |
+One of:
 
 ```bash
-gh secret set R2_ENDPOINT --repo princedordj-lab/Sua
-gh secret set R2_ACCESS_KEY_ID --repo princedordj-lab/Sua
-gh secret set R2_SECRET_ACCESS_KEY --repo princedordj-lab/Sua
-gh secret set R2_BUCKET --repo princedordj-lab/Sua
+# Vercel → Project → Settings → Environment Variables (Production + Preview)
+NEXT_PUBLIC_ANDROID_APK_BASE_URL=https://dl.<your-domain>/android
 ```
 
-### 5. Vercel environment variable
+or edit `bucketBaseUrl` in `web/config/download.ts`. The page is statically
+prerendered, so the value is baked in at build time — **set it, then redeploy**
+(or rebuild) rather than expecting an env change to take effect on its own.
 
-`NEXT_PUBLIC_ANDROID_APK_BASE_URL=https://dl.<your-domain>/android`
+## Publishing a build
 
-Set it for all environments and **redeploy**: the `/download` page is statically
-prerendered, so the URL is baked in at build time.
-
-### 6. Apply the workflow
-
-Copy `docs/github-actions/release-apk.yml.pending` over
-`.github/workflows/release-apk.yml` from a token that can write workflows (the
-web editor works), then delete the pending copy. It adds the R2 upload step on
-top of the tag-triggered build and the manual re-run trigger.
-
-## Publishing a build by hand
-
-Needed when the APK was built somewhere else, or when the secrets were added
-after a failed run. **Never upload through `dl.<domain>`** — Cloudflare caps
+There is no CI step: upload the APK yourself and update the three values in
+`web/config/download.ts`. Never upload through `dl.<domain>` — Cloudflare caps
 uploads through a proxied hostname at 100 MB on Free/Pro, so a 134 MB `PUT`
 would fail. Use wrangler (S3 API under the hood) or `aws s3 cp`:
 
@@ -132,9 +109,8 @@ npm run r2:upload -- "sua-downloads/android/sua-${VERSION}.apk" \
   --cache-control 'public, max-age=31536000, immutable'
 ```
 
-Same thing with the AWS CLI (what CI runs — no Node 22 needed):
-
 ```bash
+# same thing with the AWS CLI, if wrangler is not installed
 VERSION=1.0.0
 ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
 
@@ -146,51 +122,70 @@ aws s3 cp sua.apk "s3://sua-downloads/android/sua-${VERSION}.apk" \
   --cache-control 'public, max-age=31536000, immutable'
 ```
 
-`--content-disposition` keeps the saved file name `sua.apk` even though the
-object key is versioned.
+Then in `web/config/download.ts`: bump `version` (if it changed), and set
+`sizeLabel` + `sha256` from the file you just uploaded:
+
+```bash
+URL=https://dl.<your-domain>/android/sua-1.0.0.apk
+curl -sL "$URL" | sha256sum | cut -d' ' -f1                       # -> sha256
+curl -sI "$URL" | awk 'tolower($1)=="content-length:"{printf "%.0f MB\n", $2/1000000}'
+```
 
 ## Verify
 
 ```bash
 # 1. Object is public, correctly typed and the right size
 curl -sI https://dl.<your-domain>/android/sua-1.0.0.apk | \
-  grep -Ei 'HTTP/|content-type|content-length|cache-control'
+  grep -Ei 'HTTP/|content-type|content-length|cache-control|content-disposition'
 
 # 2. Edge is caching it (second request should report a HIT)
 curl -sI https://dl.<your-domain>/android/sua-1.0.0.apk | grep -i cf-cache-status
 
 # 3. Bytes match the hash the page tells students to check
 curl -sL https://dl.<your-domain>/android/sua-1.0.0.apk | sha256sum
-# compare with `sha256` in web/config/download.ts
 
-# 4. The deployed page actually points at the CDN
-curl -s https://<web-host>/download | grep -o 'https://dl[^"]*\.apk'
+# 4. The built page links the bucket, not a third party
+cd web && NEXT_PUBLIC_ANDROID_APK_BASE_URL=https://dl.<your-domain>/android npm run build
+ grep -o 'https://dl[^"]*\.apk' .next/server/app/download.html
 ```
 
-If step 4 prints nothing, `NEXT_PUBLIC_ANDROID_APK_BASE_URL` was not set for the
-build that is deployed — set it and redeploy.
+If step 1 returns 404, the object key does not match `sua-<version>.apk` —
+re-upload under the canonical key rather than editing the page. If it returns
+`application/octet-stream`, re-upload with the `--content-type` above; Android
+file managers can refuse to launch the installer otherwise.
 
 ## Costs
 
 - Storage: `$0.015/GB-month` with **10 GB-month free**; one build is ~0.13 GB, so
   dozens of versions stay inside the free tier.
 - Egress: **free** on all plans (this is the reason for choosing R2).
-- Class A (writes): 1 million/month free — uploads are one per build.
-- Class B (reads): 10 million/month free.
+- Class A (writes): 1 million/month free — a manual upload is one per build.
+- Class B (reads): 10 million/month free; a CDN `HIT` does not hit the bucket.
 
-## Rolling back
+## Changing the host or rolling back
 
-- **Back to GitHub:** unset `NEXT_PUBLIC_ANDROID_APK_BASE_URL` and redeploy. The
-  page falls back to the release asset and shows "All releases" again.
-- **New build, same version:** never overwrite `sua-<version>.apk` — students may
-  be mid-download and the object is immutable in the CDN. Bump `version` in
-  `web/config/download.ts` and publish a new key.
-- **Play Store later:** the APK can keep serving sideloads; swap the CTA for the
+- **Different host/bucket:** set `NEXT_PUBLIC_ANDROID_APK_BASE_URL` (or edit
+  `bucketBaseUrl`) and rebuild. Nothing else references the URL.
+- **Broken build published under an existing version:** never overwrite
+  `sua-<version>.apk` — the key is served `immutable` and students may be
+  mid-download. Bump `version`, upload a new key, update `sha256`/`sizeLabel`.
+- **Play Store later:** keep the APK for sideloads and swap the CTA for the
   listing URL when there is one.
+
+## Deferred: CI publishing
+
+Uploading by hand is deliberate for now. When tag-triggered publishing is worth
+wiring, the prepared workflow lives at
+`docs/github-actions/release-apk.yml.pending`: it builds on a `v*` tag (and can
+be re-run manually with a tag input), uploads the APK to R2, and attaches it to
+the GitHub release. It needs `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`, `R2_BUCKET` and `EXPO_TOKEN` as repository secrets, and
+it has to be pasted in from a token that may write workflow files. Until then,
+none of those secrets are required.
 
 ## Secret hygiene
 
-Only the public base URL (`NEXT_PUBLIC_ANDROID_APK_BASE_URL`) is public. The
-`R2_*` values stay in GitHub secrets and never in `.env` files, the repo, or any
-`NEXT_PUBLIC_*` variable. The token is scoped to one bucket and can be revoked
-from the same dashboard screen that created it.
+Only the bucket base URL is public. R2 keys stay out of the repo, out of
+`backend/.env` (the API never touches R2 — uploads use Neon Object Storage) and
+out of every `NEXT_PUBLIC_*` variable. `wrangler login` keeps its credential in
+`~/.config/.wrangler`, not in the project.

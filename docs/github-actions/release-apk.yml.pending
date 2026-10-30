@@ -1,10 +1,14 @@
-# NOT ACTIVE — this is the copy source for .github/workflows/release-apk.yml.
+# DEFERRED — not applied, and nothing depends on it right now.
 #
-# It lives here because the automation that produced this branch can read
-# workflows but cannot write them (GitHub: "refusing to allow a GitHub App to
-# create or update workflow ... without `workflows` permission"). Paste this
-# file over .github/workflows/release-apk.yml from a token that has that
-# permission, then delete this copy. See docs/android-download-hosting.md.
+# The APK is published by hand to Cloudflare R2 (`npm run r2:upload` from
+# `backend/`); see docs/android-download-hosting.md. This file is kept for when
+# tag-triggered publishing is worth wiring: it adds an R2 upload step and a
+# manual "Run workflow" trigger with a tag input.
+#
+# To enable it, paste this over .github/workflows/release-apk.yml from a token
+# that may write workflow files (GitHub blocks workflow writes from this
+# environment: "without `workflows` permission"), add the R2_* / EXPO_TOKEN
+# secrets, then delete this copy.
 #
 
 name: Release APK

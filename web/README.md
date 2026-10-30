@@ -30,7 +30,7 @@ npm run worker                 # BullMQ worker — AI jobs never finish without 
 | `NEXT_PUBLIC_API_URL` | Express base URL, no trailing slash. |
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Must be the **same Clerk instance as mobile**, or accounts (and therefore data) will not be shared. |
 | `CLERK_SECRET_KEY` | Server-only (proxy/route handlers). Never expose it in client code. |
-| `NEXT_PUBLIC_ANDROID_APK_BASE_URL` | Public base of the R2 bucket that hosts the Android APK, e.g. `https://dl.<domain>/android`. Unset = the `/download` page links the GitHub release asset instead. Baked in at build time, so changing it needs a redeploy; runbook in `docs/android-download-hosting.md`. |
+| `NEXT_PUBLIC_ANDROID_APK_BASE_URL` | Public base of the R2 bucket that hosts the Android APK, e.g. `https://dl.<domain>/android`. Unset = the `bucketBaseUrl` constant in `config/download.ts` is used. Baked in at build time, so changing it needs a redeploy; runbook in `docs/android-download-hosting.md`. |
 
 Nothing else is required: uploads are signed by the backend (Neon Object Storage, with Cloudinary as its backend-side fallback), so the browser never holds a storage secret.
 
