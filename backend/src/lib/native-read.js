@@ -1,12 +1,15 @@
 /**
  * Native document reading.
  *
- * Instead of parsing a file locally and OCR'ing thin pages one at a time, the
- * file itself is handed to Gemini, which reads text, scans, tables, formulas,
- * diagrams and charts and returns it in a single pass:
+ * The model is the *fallback* reader, not the default one: PDFs are read
+ * locally first (lib/extract.js → embedded text layer), and this module is only
+ * reached for content no local parser can recover — a scanned PDF, or a single
+ * picture. When it is used, the file itself is handed to Gemini, which reads
+ * text, scans, tables, formulas, diagrams and charts in one pass:
  *
  * - PDF   → the document is the input; pages come back page-tagged, with a
- *           compact digest to seed the writer.
+ *           compact digest to seed the writer. Callers only get here when the
+ *           local text layer had no usable page at all.
  * - image → one picture (whiteboard, handout, slide photo) is the input; the
  *           transcription plus a short description of any figure is the page.
  * - DOCX/PPTX → Gemini cannot open OOXML, so the text stays with the local

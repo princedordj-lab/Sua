@@ -25,6 +25,7 @@ import {
 // CF Workers environments where the extract path is never reached.
 // import { extractDocument, renderPdfPage } from "./extract.js"; // lazy — see below
 import { checkSourceFidelity } from "./numbers.js";
+import { classifyPageText } from "./page-text.js";
 import { readImageNatively } from "./native-read.js";
 import {
   PROMPT_VERSION,
@@ -283,32 +284,37 @@ async function documentSegments(asset, deps, onScan) {
     };
   }
 
-  // Scanned pages carry no text layer; OCR just the pages that look empty, up
-  // to a hard cap so one huge scan cannot burn the whole AI budget.
+  // Scanned pages carry no text layer; OCR just the pages that have no usable
+  // text, up to a hard cap so one huge scan cannot burn the whole AI budget.
+  // A page that is merely short (a title page, a divider, a two-equation
+  // worked example) is content and is never sent to the model; neither is a
+  // page that renders blank.
   const segments = [];
   let scans = 0;
   for (const segment of extracted.segments) {
-    const existing = text(segment.text);
-    if (existing.length >= notePipeline.ocrMinChars) {
-      segments.push({ ...segment, text: existing });
+    const quality = classifyPageText(segment.text, { minChars: notePipeline.ocrMinChars });
+    if (quality.usable) {
+      segments.push({ ...segment, text: quality.text });
       continue;
     }
+    const existing = quality.text;
     if (scans >= notePipeline.maxOcrPages) {
+      if (existing) segments.push({ ...segment, text: existing });
+      continue;
+    }
+    if (!deps.renderPdfPage) {
       if (existing) segments.push({ ...segment, text: existing });
       continue;
     }
     scans += 1;
     await onScan();
-    if (!deps.renderPdfPage) {
-      if (existing) segments.push({ ...segment, text: existing });
-      continue;
-    }
     const image = await deps.renderPdfPage(
       bytes,
       segment.index,
       notePipeline.ocrScale,
     );
-    if (!image) {
+    if (!image || (deps.isRenderedPageBlank && (await deps.isRenderedPageBlank(image)))) {
+      // Nothing renderable, or a blank page: no model call, local text kept.
       if (existing) segments.push({ ...segment, text: existing });
       continue;
     }

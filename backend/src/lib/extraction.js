@@ -8,6 +8,12 @@
  * on SourceChunk rows and asset progress columns, so the next pass — same
  * code, any caller — continues from asset.nextPage and never repeats work.
  *
+ * PDFs are local-first: the embedded text layer (pdf-parse) is the source of
+ * truth for an ordinary text PDF, and it costs nothing. The model fallback is
+ * only reached for pages that have no usable text layer — a scan — which is
+ * read page-batch at a time inside a mixed PDF, or once for the whole file
+ * when nothing at all was readable.
+ *
  * All external I/O (storage read, PDF parse, page render, OCR) happens here,
  * outside withUser. Database writes are short direct-prisma transactions
  * (infra writes, runner-style): the owner role behind DATABASE_URL bypasses
@@ -21,10 +27,11 @@ import { createHash } from "node:crypto";
 import { prisma } from "../config/prisma.js";
 import { readAssetBytes } from "./storage.js";
 import {
+  classifyPageText,
   extractPdfPages,
   extractDocument,
   extractEmbeddedImages,
-  pdfOutline,
+  isRenderedPageBlank,
   renderPdfPage,
   MAX_TEXT_CHARS,
 } from "./extract.js";
@@ -38,8 +45,31 @@ import {
   readEmbeddedVisuals,
 } from "./native-read.js";
 
-const OCR_PAGE_SCALE = notePipeline.ocrScale ?? 2;
+/**
+ * Everything this module reaches outside itself — the database, the PDF
+ * helpers and the model calls. Production uses these defaults; the focused
+ * extraction checks in scripts/test-pdf-extraction.mjs inject fakes so the
+ * whole pass (chunk persistence, resumability, fallback) runs without a
+ * database or a network call.
+ */
+export const extractionDeps = {
+  db: prisma,
+  extractPdfPages,
+  extractDocument,
+  extractEmbeddedImages,
+  isRenderedPageBlank,
+  renderPdfPage,
+  readAssetBytes,
+  geminiImageText,
+  geminiOcrBatch,
+  readDocumentNatively,
+  nativeReadEnabled,
+  nativeReadEligible,
+  nativeReadBlocked,
+};
 
+
+const OCR_PAGE_SCALE = notePipeline.ocrScale ?? 2;
 // A claim that died mid-pass is retried after this stale window.
 const RUNNING_STALE_MS = 8 * 60_000;
 
@@ -77,9 +107,9 @@ function formatMatchesSignature(buffer, format) {
  * Claimable: pending, partial, or running-but-stale (pass that died).
  * FOR UPDATE SKIP LOCKED so concurrent triggers never double-run the asset.
  */
-export async function claimExtractionAsset({ targetAssetId = null } = {}) {
+export async function claimExtractionAsset({ targetAssetId = null, db = prisma } = {}) {
   const staleAfter = `${Math.round(RUNNING_STALE_MS / 1000)} seconds`;
-  return prisma.$transaction(async (tx) => {
+  return db.$transaction(async (tx) => {
     const rows = await (targetAssetId
       ? tx.$queryRaw`
           SELECT a."id" FROM "assets" a
@@ -139,18 +169,20 @@ export async function extractNext({
   maxAssets = 1,
   targetAssetId = null,
   budgetMs = longDoc.extractBudgetMs,
+  deps = extractionDeps,
 } = {}) {
+  const db = deps.db;
   let passes = 0;
   for (let i = 0; i < maxAssets; i += 1) {
-    const assetId = await claimExtractionAsset({ targetAssetId });
+    const assetId = await claimExtractionAsset({ targetAssetId, db });
     if (!assetId) break;
     try {
-      await runExtractionPass(assetId, budgetMs);
+      await runExtractionPass(assetId, budgetMs, deps);
       passes += 1;
     } catch (error) {
       warn("PASS_ERROR", `asset ${assetId}: ${error?.message ?? error}`);
       // Leave the pass resumable; the next claim picks it back up.
-      await prisma.asset.updateMany({
+      await db.asset.updateMany({
         where: { id: assetId, extractState: "running" },
         data: { extractState: "partial", updatedAt: new Date() },
       }).catch(() => {});
@@ -164,37 +196,95 @@ export async function extractNext({
 // One pass
 // ---------------------------------------------------------------------------
 
-function failAsset(assetId, code) {
-  return prisma.asset
+function failAsset(db, assetId, code) {
+  return db.asset
     .update({ where: { id: assetId }, data: { extractState: "failed", extractErrorCode: code } })
     .catch(() => {});
 }
 
-/** Entry point for one extraction pass on one already-claimed asset. */
-export async function runExtractionPass(assetId, budgetMs = longDoc.extractBudgetMs) {
+/**
+ * Read the PDF's embedded text layer once and classify every page.
+ *
+ * This is the whole "ordinary PDF" path: pdf-parse gives back one slot per
+ * page (blank pages included, so page numbers stay true to the file) and the
+ * only thing left to decide is which pages actually carry usable text.
+ *
+ * Returns `{ ok, segments, pagesTotal, usablePages, fallbackPages, reasons,
+ * ms }` or `{ ok: false }` when the bytes are not a parseable PDF.
+ */
+export async function readLocalPdfPages(asset, bytes, deps = extractionDeps) {
   const started = Date.now();
-  const asset = await prisma.asset.findUnique({ where: { id: assetId } });
+  let parsed;
+  try {
+    parsed = await deps.extractPdfPages(bytes);
+  } catch (error) {
+    warn("PDF_PARSE", `asset ${asset.id}: ${error?.message ?? error}`);
+    return { ok: false };
+  }
+  if (!parsed?.segments?.length) return { ok: false };
+
+  const segments = [];
+  const fallbackPages = [];
+  const reasons = { empty: 0, garbled: 0, sparse: 0 };
+  let usablePages = 0;
+  for (const segment of parsed.segments) {
+    const quality = classifyPageText(segment.text, { minChars: longDoc.ocrMinChars });
+    segments.push({
+      index: segment.index,
+      label: segment.label ?? `p. ${segment.index}`,
+      text: quality.text,
+      usable: quality.usable,
+      reason: quality.reason,
+    });
+    if (quality.usable) {
+      usablePages += 1;
+    } else {
+      fallbackPages.push(segment.index);
+      reasons[quality.reason] = (reasons[quality.reason] ?? 0) + 1;
+    }
+  }
+
+  return {
+    ok: true,
+    segments,
+    pagesTotal: parsed.pageCount || segments.length,
+    usablePages,
+    fallbackPages,
+    reasons,
+    ms: Date.now() - started,
+  };
+}
+
+/** Entry point for one extraction pass on one already-claimed asset. */
+export async function runExtractionPass(
+  assetId,
+  budgetMs = longDoc.extractBudgetMs,
+  deps = extractionDeps,
+) {
+  const started = Date.now();
+  const db = deps.db;
+  const asset = await db.asset.findUnique({ where: { id: assetId } });
   if (!asset || asset.kind !== "document" || asset.status !== "active") return null;
 
   const format = String(asset.format ?? "").toLowerCase();
   if (format === "ppt") {
     // Binary .ppt cannot be parsed in serverless JS. An honest failed state
     // beats pretending to process it.
-    await failAsset(assetId, "UNREADABLE_PPT");
+    await failAsset(db, assetId, "UNREADABLE_PPT");
     warn("SKIPPED", `asset ${assetId}: legacy .ppt binary format; re-export as .pptx`);
     return { state: "failed" };
   }
 
   let bytes;
   try {
-    bytes = await readAssetBytes(asset);
+    bytes = await deps.readAssetBytes(asset);
   } catch (error) {
-    await failAsset(assetId, "STORAGE_ERROR");
+    await failAsset(db, assetId, "STORAGE_ERROR");
     warn("STORAGE_ERROR", `asset ${assetId}: ${error?.message ?? error}`);
     return { state: "failed" };
   }
   if (!bytes?.length) {
-    await failAsset(assetId, "UNREADABLE_FILE");
+    await failAsset(db, assetId, "UNREADABLE_FILE");
     return { state: "failed" };
   }
   if (!formatMatchesSignature(bytes, format)) {
@@ -203,26 +293,56 @@ export async function runExtractionPass(assetId, budgetMs = longDoc.extractBudge
     warn("SIGNATURE", `asset ${assetId} format=${format} content does not match its extension; trying anyway`);
   }
 
-  // Native read first: the model reads the document itself. Any failure or
-  // ineligibility falls through to the deterministic page-wise extractor below.
-  const native = await tryNativeRead(asset, bytes, format, started + budgetMs);
-  if (native) return native;
+  // ---- PDF: local text layer first, model fallback only for scans ---------
+  let localPdf = null;
+  if (format === "pdf") {
+    localPdf = await readLocalPdfPages(asset, bytes, deps);
+    console.log(
+      `[extract] stage=local_pdf asset=${assetId} pages=${localPdf.pagesTotal ?? 0} usable=${localPdf.usablePages ?? 0} fallback=${localPdf.fallbackPages?.length ?? 0} empty=${localPdf.reasons?.empty ?? 0} garbled=${localPdf.reasons?.garbled ?? 0} sparse=${localPdf.reasons?.sparse ?? 0} ok=${localPdf.ok} ms=${localPdf.ms ?? 0}`,
+    );
+    // Nothing readable anywhere in the file: this is a scan. One model read of
+    // the whole document beats OCR'ing it page by page, and a failure only
+    // costs the page-wise fallback below — never the upload. First pass only: a
+    // resumed pass finishes with the page-wise fallback it already started
+    // instead of replacing the pages it recovered with a second full read.
+    const firstPass = (asset.nextPage ?? 1) <= 1 && (asset.pagesDone ?? 0) === 0;
+    if (localPdf.ok && localPdf.usablePages === 0 && firstPass) {
+      const native = await tryNativeRead(asset, bytes, format, started + budgetMs, deps);
+      if (native) {
+        console.log(
+          `[extract] summary asset=${assetId} format=pdf source=native_read pages=${native.pagesDone} local=0 state=done ms=${Date.now() - started}`,
+        );
+        return native;
+      }
+    }
+  } else if (deps.nativeReadEligible(format)) {
+    // Images have no local text layer at all: the model read is the extractor.
+    const native = await tryNativeRead(asset, bytes, format, started + budgetMs, deps);
+    if (native) return native;
+  }
 
-  const outcome = await extractIntoChunks(asset, bytes, format, started + budgetMs);
+  const outcome = await extractIntoChunks(asset, bytes, format, started + budgetMs, deps, localPdf);
+  const localFields = localPdf?.ok
+    ? ` usable=${localPdf.usablePages} fallback=${localPdf.fallbackPages.length}`
+    : "";
   console.log(
-    `[extract] stage=extract asset=${assetId} format=${format} pages=${outcome.pagesDone ?? 0}/${outcome.pagesTotal ?? 0} ocr=${outcome.ocrPages ?? 0} state=${outcome.state ?? "failed"} code=${outcome.errorCode ?? "-"}`,
+    `[extract] summary asset=${assetId} format=${format} source=local pages=${outcome.pagesDone ?? 0}/${outcome.pagesTotal ?? 0}${localFields} ocr=${outcome.ocrPages ?? 0} blank=${outcome.blankPages ?? 0} skipped=${outcome.skippedPages ?? 0} unrecovered=${outcome.unrecoveredPages ?? 0} state=${outcome.state ?? "failed"} code=${outcome.errorCode ?? "-"} ms=${Date.now() - started}`,
   );
   return outcome;
 }
 
 /**
  * Native read attempt. Returns the same outcome shape as extractIntoChunks when
- * the model read the document, or null when the caller should run the legacy
- * extractor. Persistence is skipped on any failure: an upload must never die
- * because the model or its quota did.
+ * the model read the document, or null when the caller should run the local
+ * page-wise extractor. Persistence is skipped on any failure: an upload must
+ * never die because the model or its quota did.
+ *
+ * Callers only reach this for files the local extractor cannot read (images,
+ * and PDFs whose every page lacks a usable text layer), so a successful read
+ * never erases text the local extractor already recovered.
  */
-async function tryNativeRead(asset, bytes, format, deadline) {
-  if (!nativeReadEnabled() || !nativeReadEligible(format)) return null;
+async function tryNativeRead(asset, bytes, format, deadline, deps = extractionDeps) {
+  if (!deps.nativeReadEnabled() || !deps.nativeReadEligible(format)) return null;
 
   // The read is one request, but a slow 60-page document can outlive a pass
   // that is nearly out of budget. Keep enough of it for the request, otherwise
@@ -236,7 +356,7 @@ async function tryNativeRead(asset, bytes, format, deadline) {
 
   let result;
   try {
-    result = await readDocumentNatively({ bytes, format, timeoutMs });
+    result = await deps.readDocumentNatively({ bytes, format, timeoutMs });
   } catch (error) {
     warn("NATIVE_READ", `asset ${asset.id}: ${error?.message ?? error}`);
     return null;
@@ -268,7 +388,7 @@ async function tryNativeRead(asset, bytes, format, deadline) {
   }));
 
   try {
-    await prisma.$transaction(async (tx) => {
+    await deps.db.$transaction(async (tx) => {
       await tx.sourceChunk.deleteMany({ where: { assetId: asset.id } });
       // Bookkeeping row: a page-less hint row the structure stage ignores when
       // it has no `headings` (native reads are already page-aligned).
@@ -334,14 +454,14 @@ async function tryNativeRead(asset, bytes, format, deadline) {
  * Returns the same `{ segments, pageCount, truncated, headings }` shape as
  * extractDocument, or the input unchanged when there is nothing to add.
  */
-export async function withEmbeddedVisuals(bytes, format, extracted, deadline) {
-  if (!nativeReadEnabled() || !documentRead.embeddedImages) return extracted;
-  if (nativeReadBlocked()) return extracted;
+export async function withEmbeddedVisuals(bytes, format, extracted, deadline, deps = extractionDeps) {
+  if (!deps.nativeReadEnabled() || !documentRead.embeddedImages) return extracted;
+  if (deps.nativeReadBlocked()) return extracted;
 
   const remaining = deadline ? deadline - Date.now() : documentRead.timeoutMs;
   if (remaining < NATIVE_MIN_BUDGET_MS) return extracted;
 
-  const images = await extractEmbeddedImages(bytes, format, {
+  const images = await deps.extractEmbeddedImages(bytes, format, {
     minBytes: documentRead.minImageBytes,
     limit: documentRead.maxEmbeddedImages,
   });
@@ -412,9 +532,10 @@ export async function withEmbeddedVisuals(bytes, format, extracted, deadline) {
   };
 }
 
-async function extractIntoChunks(asset, bytes, format, deadline) {
+async function extractIntoChunks(asset, bytes, format, deadline, deps = extractionDeps, localPdf = null) {
+  const db = deps.db;
   if (format !== "pdf" && format !== "docx" && format !== "pptx" && format !== "txt" && format !== "md") {
-    await failAsset(asset.id, "UNREADABLE_FILE");
+    await failAsset(db, asset.id, "UNREADABLE_FILE");
     return { state: "failed", errorCode: "UNREADABLE_FILE" };
   }
 
@@ -423,15 +544,19 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
   let headings = [];
   let pagesTotal = 0;
   if (format === "pdf") {
-    const result = await extractPdfPages(bytes);
-    if (!result) {
-      await failAsset(asset.id, "UNREADABLE_FILE");
+    // The pass already parsed the file for the local-first decision; reuse it
+    // instead of paying a second parse of the same bytes.
+    const result = localPdf?.ok
+      ? localPdf
+      : await readLocalPdfPages(asset, bytes, deps);
+    if (!result?.ok) {
+      await failAsset(db, asset.id, "UNREADABLE_FILE");
       return { state: "failed", errorCode: "UNREADABLE_FILE" };
     }
     segments = result.segments;
-    pagesTotal = result.pageCount || segments.length;
+    pagesTotal = result.pagesTotal || segments.length;
   } else {
-    const extracted = await extractDocument(bytes, format, "document");
+    const extracted = await deps.extractDocument(bytes, format, "document");
     // DOCX/PPTX pictures are readable even when Gemini cannot open the file
     // itself; this is also the only way a screenshot-only deck has any content.
     // Only on the first pass: a resumed pass already merged them, and reading
@@ -439,10 +564,10 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
     const firstPass = (asset.nextPage ?? 1) <= 1 && (asset.pagesDone ?? 0) === 0;
     const result =
       (format === "docx" || format === "pptx") && firstPass
-        ? await withEmbeddedVisuals(bytes, format, extracted, deadline)
+        ? await withEmbeddedVisuals(bytes, format, extracted, deadline, deps)
         : extracted;
     if (!result) {
-      await failAsset(asset.id, "UNREADABLE_FILE");
+      await failAsset(db, asset.id, "UNREADABLE_FILE");
       return { state: "failed", errorCode: "UNREADABLE_FILE" };
     }
     segments = result.segments;
@@ -453,12 +578,12 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
   // ---- 2. Persist pages from asset.nextPage, caps and budget respected ---
   const cap = longDoc.maxPages;
   const maxChars = longDoc.maxSourceChars;
-  const existing = await prisma.sourceChunk.findMany({
+  const existing = await db.sourceChunk.findMany({
     where: { assetId: asset.id },
     select: { index: true, sectionId: true },
   });
   const haveRows = new Set(existing.map((row) => row.index));
-  const [{ size: priorSize } = { size: 0 }] = await prisma.$queryRaw`
+  const [{ size: priorSize } = { size: 0 }] = await db.$queryRaw`
     SELECT COALESCE(SUM(LENGTH("text")), 0)::int AS size FROM "source_chunks" WHERE "assetId" = ${asset.id}
   `;
 
@@ -466,12 +591,16 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
   let pagesStored = 0;
   let cappedByLimit = false;
   let stoppedByBudget = false;
+  // Pages whose local text was unusable and which are left for the model
+  // fallback below. They still get a row now so page numbers stay true and a
+  // fallback failure can never lose the little the text layer did have.
+  let needsFallback = 0;
   // Points where a cap stopped mid-document, for user-facing notices.
   let rows = [];
   const storedPagesFlush = async () => {
     if (!rows.length) return;
-    await prisma.sourceChunk.createMany({ data: rows });
-    await prisma.asset.update({
+    await db.sourceChunk.createMany({ data: rows });
+    await db.asset.update({
       where: { id: asset.id },
       data: { pagesDone: pagesStored, nextPage: pagesStored + 1 },
     });
@@ -490,9 +619,14 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
       break;
     }
     const raw = String(segment.text ?? "").trim();
+    // PDF pages were classified when the file was parsed: local text that
+    // reads as words is kept as-is (that is the whole point of local-first),
+    // and only unusable pages are queued for the model.
+    const needsModel = format === "pdf" ? segment.usable === false : false;
+    if (needsModel) needsFallback += 1;
     if (!raw && format === "pdf") {
       // Blank/scanned page placeholder: page numbers must stay true even for
-      // pages with no text layer. The OCR sub-pass fills them in.
+      // pages with no text layer. The fallback sub-pass fills them in.
       if (!haveRows.has(page)) {
         rows.push({
           assetId: asset.id,
@@ -526,7 +660,9 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
         endPage: page,
         text: withTitle,
         hash: sha1(withTitle),
-        status: "pending",
+        // A usable page of local text is finished work: marking it `done`
+        // keeps a resumed pass (and the fallback sub-pass) from touching it.
+        status: format === "pdf" && !needsModel ? "done" : "pending",
       });
       size += withTitle.length;
       pagesStored = page;
@@ -541,7 +677,7 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
 
   // ---- 3. DOCX heading hints ride on a bookkeeping row (index -1) --------
   if (headings.length && !haveRows.has(-1)) {
-    await prisma.sourceChunk
+    await db.sourceChunk
       .create({
         data: {
           assetId: asset.id,
@@ -556,44 +692,50 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
       .catch(() => {});
   }
 
-  // ---- 4. OCR sub-pass for thin-text pages, bounded -----------------------
-  const ocrResult = await ocrThinPages({
-    asset,
-    bytes,
-    deadline,
-    ocrPagesDone: asset.ocrPages,
-  });
+  // ---- 4. Model fallback for pages with no usable local text -------------
+  const ocrResult = format === "pdf"
+    ? await recoverUnreadablePages({
+        asset,
+        bytes,
+        deadline,
+        ocrPagesDone: asset.ocrPages,
+        deps,
+      })
+    : { ocrPages: 0, blankPages: 0, unrecoveredPages: 0, skippedPages: 0 };
 
-  const storedCount = await prisma.sourceChunk.count({
+  const storedCount = await db.sourceChunk.count({
     where: { assetId: asset.id, index: { gt: 0 } },
   });
   // Every page within the cap has a row (blank ones included): the extraction
   // genuinely finished everything the caps allow.
   const handledAll = storedCount >= Math.min(pagesTotal, cap) && !stoppedByBudget;
   const finalState = handledAll || cappedByLimit ? "done" : "partial";
-  const truncated = cappedByLimit || stoppedByBudget || asset.truncated;
+  // Pages the OCR cap could not reach are content the student is told about.
+  const truncated = cappedByLimit || stoppedByBudget || ocrResult.skippedPages > 0 || asset.truncated;
 
   // Compat: maintain the flat extracted-text column for legacy readers, with
   // the same 100k cap extract.js always applied.
   if (!asset.extractedText) {
-    const compatRows = await prisma.sourceChunk.findMany({
+    const compatRows = await db.sourceChunk.findMany({
       where: { assetId: asset.id, index: { gt: 0 } },
       orderBy: { index: "asc" },
       select: { text: true },
     });
     const compat = compatRows.map((row) => row.text).join("\n\n").slice(0, MAX_TEXT_CHARS).trim();
     if (compat) {
-      await prisma.asset.update({ where: { id: asset.id }, data: { extractedText: compat } });
+      await db.asset.update({ where: { id: asset.id }, data: { extractedText: compat } });
     }
   }
 
-  await prisma.asset.update({
+  await db.asset.update({
     where: { id: asset.id },
     data: {
       extractState: finalState,
-      pagesDone: pagesStored,
+      // A pass that only recovered fallback pages (or found every page already
+      // stored) must not push the recorded progress backwards.
+      pagesDone: pagesStored || (asset.pagesDone ?? 0),
       pagesTotal,
-      nextPage: Math.min(pagesStored + 1, cap + 1),
+      nextPage: pagesStored ? Math.min(pagesStored + 1, cap + 1) : asset.nextPage ?? 1,
       truncated,
       extractErrorCode: null,
     },
@@ -604,42 +746,70 @@ async function extractIntoChunks(asset, bytes, format, deadline) {
     pagesDone: pagesStored,
     pagesTotal,
     ocrPages: (asset.ocrPages || 0) + ocrResult.ocrPages,
+    blankPages: ocrResult.blankPages,
+    unrecoveredPages: ocrResult.unrecoveredPages,
+    skippedPages: ocrResult.skippedPages,
+    fallbackPages: needsFallback,
     truncated,
   };
 }
 
 /**
- * Render + OCR pages whose stored text is too thin to use. Batches several
- * pages per Gemini call with bounded concurrency and per-call timeout; falls
- * back to single-image calls when a batch cannot be aligned. All rendering
- * and network I/O happens outside any transaction.
+ * Model fallback for pages whose local text layer was unusable (a scan inside
+ * an otherwise typed PDF, a broken font map, a page that is only a picture).
+ *
+ * Candidates come from the stored rows, so a resumed pass only ever looks at
+ * pages that still need work, and a page whose local text was kept `done` is
+ * never re-read. Each candidate is rendered locally first: a page with nothing
+ * on it is blank, not unreadable, and costs no model call.
+ *
+ * Nothing here is destructive — a batch that fails leaves its rows exactly as
+ * they were, so the next pass retries them and the local text survives.
  */
-async function ocrThinPages({ asset, bytes, deadline, ocrPagesDone }) {
+async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, deps = extractionDeps }) {
+  const db = deps.db;
   const remaining = longDoc.ocrMaxPages - (ocrPagesDone || 0);
-  if (remaining <= 0) return { ocrPages: 0 };
+  if (remaining <= 0) return { ocrPages: 0, blankPages: 0, unrecoveredPages: 0 };
 
-  const pendingRows = await prisma.sourceChunk.findMany({
+  const pendingRows = await db.sourceChunk.findMany({
     where: { assetId: asset.id, status: "pending" },
     orderBy: { index: "asc" },
     select: { index: true, text: true },
   });
-  const thin = pendingRows.filter((row) => (row.text ?? "").trim().length < longDoc.ocrMinChars);
-  if (!thin.length) return { ocrPages: 0 };
+  const candidates = pendingRows.filter(
+    (row) => !classifyPageText(row.text, { minChars: longDoc.ocrMinChars }).usable,
+  );
+  if (!candidates.length) return { ocrPages: 0, blankPages: 0, unrecoveredPages: 0 };
 
+  const started = Date.now();
   let processed = 0;
-  for (let start = 0; start < thin.length && processed < remaining; start += longDoc.ocrBatchPages) {
+  let blankPages = 0;
+  let unrecoveredPages = 0;
+  // Pages the file-level OCR cap did not let us touch: they stay pending and
+  // the asset is flagged truncated instead of silently losing content.
+  const touched = new Set();
+  for (let start = 0; start < candidates.length && processed < remaining; start += longDoc.ocrBatchPages) {
     if (Date.now() > deadline) break;
-    const slice = thin.slice(start, start + Math.min(longDoc.ocrBatchPages, remaining - processed));
+    const slice = candidates.slice(start, start + Math.min(longDoc.ocrBatchPages, remaining - processed));
     const pages = [];
     for (const row of slice) {
-      const image = await renderPdfPage(bytes, row.index, OCR_PAGE_SCALE);
-      if (image) pages.push({ index: row.index, image });
+      const image = await deps.renderPdfPage(bytes, row.index, OCR_PAGE_SCALE);
+      // A page that cannot be rendered stays pending: the local text (if any)
+      // is untouched and a later pass can try again.
+      if (!image) continue;
+      if (await deps.isRenderedPageBlank(image)) {
+        // Blank page: there is nothing to read, so nothing to spend on.
+        blankPages += 1;
+        touched.add(row.index);
+        continue;
+      }
+      pages.push({ index: row.index, image });
     }
-    if (!pages.length) break;
+    if (!pages.length) continue;
 
     let batchTexts = null;
     try {
-      const batchResult = await geminiOcrBatch({ pages });
+      const batchResult = await deps.geminiOcrBatch({ pages });
       if (batchResult.every((entry) => entry?.text !== null)) batchTexts = batchResult;
     } catch (error) {
       warn("OCR_BATCH", `asset ${asset.id}: ${error?.message ?? error}`);
@@ -649,15 +819,17 @@ async function ocrThinPages({ asset, bytes, deadline, ocrPagesDone }) {
       let text = batchTexts?.[slot]?.text ?? null;
       if (text == null) {
         try {
-          const single = await geminiImageText({ bytes: page.image, mimeType: "image/png" });
+          const single = await deps.geminiImageText({ bytes: page.image, mimeType: "image/png" });
           text = single?.text ?? null;
         } catch (error) {
           warn("OCR_SINGLE", `asset ${asset.id} page ${page.index}: ${error?.message ?? error}`);
         }
       }
       processed += 1;
+      touched.add(page.index);
       const usable = String(text ?? "").trim();
-      await prisma.sourceChunk.update({
+      if (!usable) unrecoveredPages += 1;
+      await db.sourceChunk.update({
         where: { assetId_index: { assetId: asset.id, index: page.index } },
         data: {
           text: usable,
@@ -667,9 +839,13 @@ async function ocrThinPages({ asset, bytes, deadline, ocrPagesDone }) {
         },
       });
     }
-    await prisma.asset
+    await db.asset
       .update({ where: { id: asset.id }, data: { ocrPages: (ocrPagesDone || 0) + processed } })
       .catch(() => {});
   }
-  return { ocrPages: processed };
+  const skippedPages = candidates.filter((row) => !touched.has(row.index)).length;
+  console.log(
+    `[extract] stage=pdf_fallback asset=${asset.id} candidates=${candidates.length} rendered=${processed} blank=${blankPages} skipped=${skippedPages} unrecovered=${unrecoveredPages} ms=${Date.now() - started}`,
+  );
+  return { ocrPages: processed, blankPages, unrecoveredPages, skippedPages };
 }
