@@ -74,6 +74,7 @@ const USER_FACING_MESSAGES = [
   "This .ppt file can't be parsed. Save it as .pptx and upload again.",
   "Document reading is temporarily unavailable. Tap Try again in a few minutes.",
   "This file took too long to process. Tap Try again — finished pages are kept.",
+  "This file is stuck on one step. Tap Try again — finished pages are kept, or upload it in chapters.",
   "Too many parts of this file could not be processed. Tap Try again, or upload it by chapter.",
   "This file is too long for one reference sheet. Upload it by chapter.",
   "There isn't enough text here to study yet. Add a bit more and try again.",
@@ -181,6 +182,7 @@ export const AI_ACTIVE_STATES: ReadonlySet<AiState> = new Set<AiState>([
   "checking",
   "summarising",
   "making_cards",
+  "saving",
 ]);
 
 export function isAiActive(state: AiState | null | undefined): boolean {
@@ -200,12 +202,15 @@ export function aiStageLabel(
     pendingUploads = 0,
     sourceType,
     progress,
+    detail,
   }: {
     pendingUploads?: number;
     sourceType?: NoteRow["sourceType"];
     progress?: { done: number; total: number } | null;
+    detail?: string | null;
   } = {},
 ): string {
+  if (detail) return detail;
   const progressSuffix =
     progress && progress.total > 1 && progress.done > 0
       ? ` (${Math.min(progress.done, progress.total)} of ${progress.total})`
@@ -224,9 +229,8 @@ export function aiStageLabel(
     case "digesting":
       return "Pulling out the important parts…" + progressSuffix;
     case "merging":
-      // Long-file reduce stage. The server's counter still counts digest
-      // groups, so no "(x of y)" here — it would describe a different unit.
-      return "Combining the important parts…";
+      // Reduce reports completed waves, so the counter is meaningful here.
+      return "Combining the important parts…" + progressSuffix;
     case "writing":
       return (kind === "course_reference"
         ? "Writing your reference sheet…"
@@ -237,6 +241,8 @@ export function aiStageLabel(
       return "Writing your summary…";
     case "making_cards":
       return "Making flashcards and a quiz…";
+    case "saving":
+      return "Saving your study materials…";
     default:
       return "";
   }

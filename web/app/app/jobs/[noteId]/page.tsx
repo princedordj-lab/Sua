@@ -29,6 +29,7 @@ const STAGES: { key: AiState; label: string }[] = [
   { key: "checking", label: "Checking numbers" },
   { key: "summarising", label: "Summarising" },
   { key: "making_cards", label: "Making cards and quiz" },
+  { key: "saving", label: "Saving your study materials" },
 ];
 
 function stageIndex(stage: AiState | undefined) {
@@ -42,6 +43,7 @@ export default function JobStatusPage() {
   const api = useApi();
   const note = useResource<ServerNote>(`job-note:${noteId}`, () => api.notes.get(noteId));
   const [job, setJob] = useState<ServerJob | null>(null);
+  const [heartbeatAgeMin, setHeartbeatAgeMin] = useState<number | null>(null);
   const [loadingJob, setLoadingJob] = useState(true);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -59,6 +61,11 @@ export default function JobStatusPage() {
       }
       if (cancelled) return;
       setJob(next);
+      setHeartbeatAgeMin(
+        next?.heartbeatAt
+          ? Math.max(0, Math.round((Date.now() - new Date(next.heartbeatAt).getTime()) / 60_000))
+          : null,
+      );
       setLoadingJob(false);
       if (next && (next.state === "queued" || next.state === "running")) {
         timer = setTimeout(() => void poll(), 5000);
@@ -122,6 +129,8 @@ export default function JobStatusPage() {
   const stage = (job?.stage ?? record.aiState ?? "queued") as AiState;
   const currentIndex = done ? STAGES.length : stageIndex(stage);
   const percent = done ? 100 : Math.min(94, Math.max(6, (currentIndex / STAGES.length) * 100));
+  const heartbeatMs = heartbeatAgeMin != null ? heartbeatAgeMin * 60_000 : null;
+  const stale = active && heartbeatAgeMin != null && heartbeatAgeMin >= 3;
 
   return (
     <div className="job-page">
@@ -140,14 +149,22 @@ export default function JobStatusPage() {
               ? "That run didn’t finish"
               : done
                 ? "Your study set is ready"
-                : aiStageLabel(stage, kind, record)}
+                : aiStageLabel(stage, kind, {
+                    sourceType: record.sourceType,
+                    progress: job
+                      ? { done: job.progressDone ?? 0, total: job.progressTotal ?? 0 }
+                      : null,
+                    detail: job?.stageDetail,
+                  })}
           </h1>
           <p>
             {failed
               ? job?.error || GENERIC_FAILURE
               : done
                 ? "Summary, flashcards and quiz are waiting in the note."
-                : "You can leave this page — the pipeline keeps running in the background."}
+                : stale
+                  ? `Still working — last update ${Math.max(1, Math.round((heartbeatMs ?? 0) / 60_000))} min ago.`
+                  : "You can leave this page — the pipeline keeps running in the background."}
           </p>
           <div className="job-hero-meta">
             <Chip tone={failed ? "danger" : done ? "success" : "info"}>

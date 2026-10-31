@@ -288,6 +288,7 @@ export default function NoteViewPage() {
                       job?.progressTotal && job.progressTotal > 0
                         ? { done: job.progressDone ?? 0, total: job.progressTotal }
                         : null,
+                    detail: job?.stageDetail,
                   },
                 )}
               </h2>

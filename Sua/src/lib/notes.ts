@@ -20,6 +20,7 @@ export type AiState =
   | "checking"
   | "summarising"
   | "making_cards"
+  | "saving"
   | "ready"
   | "failed";
 

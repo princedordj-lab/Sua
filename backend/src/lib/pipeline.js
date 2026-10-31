@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { readAssetBytes } from "./storage.js";
 import { withUser } from "./db.js";
-import { bulkModel, chatCompletion, aiConfigured } from "./ai.js";
+import { bulkModel, chatCompletion, aiConfigured, timeoutForDeadline } from "./ai.js";
 import { enqueueStudyJob, studyQueueConfigured, STALE_QUEUED_MS } from "./queue.js";
 import { prepareMaterial, assembleSource, sourceFromSegments, writeNote } from "./note-pipeline.js";
 import {
   USER_MESSAGES,
   UserFacingError,
+  JobYieldError,
   isUserFacing,
   isJobYield,
   notePipeline,
@@ -69,6 +70,7 @@ async function setStage(job, stage, state = "running", progress = null) {
     data: {
       stage,
       state,
+      heartbeatAt: new Date(),
       ...(progress
         ? {
             progressDone: Math.max(0, Number(progress.done ?? 0)),
@@ -102,6 +104,7 @@ async function recordAiCall(jobId, step, result) {
         promptTokens: result.promptTokens ?? 0,
         completionTokens: result.completionTokens ?? 0,
         usdMicros: result.usdMicros ?? 0,
+        durationMs: result.durationMs ?? null,
       },
     });
   } catch (error) {
@@ -110,6 +113,29 @@ async function recordAiCall(jobId, step, result) {
     // guard stops the run at the next stage boundary.
     if (error?.code === "P2003" || error?.code === "P2025") return;
     throw error;
+  }
+}
+
+/**
+ * Failed provider calls are diagnostics, not note content. Keeping them next
+ * to the successful ones is what makes a slow or poisoned reduce wave visible
+ * (status, kind and duration) without reading the source.
+ */
+async function recordAiFailure(jobId, step, error, durationMs) {
+  try {
+    await prisma.aiCall.create({
+      data: {
+        jobId,
+        step: `${step}_failed`,
+        model: "unknown",
+        status: Number.isFinite(error?.status) ? error.status : null,
+        errorCode: String(error?.kind ?? error?.name ?? "ERROR").slice(0, 40),
+        durationMs: Number.isFinite(durationMs) ? Math.round(durationMs) : null,
+      },
+    });
+  } catch (inner) {
+    if (inner?.code === "P2003" || inner?.code === "P2025") return;
+    console.warn(`could not record failed AI call for job ${jobId}: ${inner?.message ?? inner}`);
   }
 }
 
@@ -193,10 +219,16 @@ async function closeDeletedJob(job) {
 }
 
 async function startAttempt(job) {
-  await prisma.job.update({
-    where: { id: job.id },
-    data: { startedAt: new Date(), attempts: { increment: 1 } },
-  });
+  // Retry accounting is strict: a claim never pushes attempts past the row's
+  // own limit, even if a recovered pass and a retry race each other.
+  await prisma.$executeRaw`
+    UPDATE "jobs"
+    SET "startedAt" = NOW(),
+        "heartbeatAt" = NOW(),
+        "attempts" = LEAST("attempts" + 1, "maxAttempts"),
+        "updatedAt" = NOW()
+    WHERE "id" = ${job.id}
+  `.catch(() => {});
   // The pipeline, not the device, owns what kind of page a note is. A rerun
   // after a client-side mismatch therefore self-corrects on the next attempt.
   const noteKind = job.kind === "course_reference" ? "reference" : "note";
@@ -225,6 +257,8 @@ function courseContextOf(note) {
 function noteDeps(job, documentExtraction, deadline = null) {
   return {
     record: (step, result) => recordAiCall(job.id, step, result),
+    recordFailure: (step, error, durationMs) =>
+      recordAiFailure(job.id, step, error, durationMs),
     readBytes: (asset) => fetchAssetBytes(asset),
     saveAssetText: (asset, value) =>
       withUser(job.user.clerkId, (tx) =>
@@ -418,9 +452,12 @@ export async function processStudySet(job, documentExtraction, deadline = null) 
       courseContext,
       durationMinutes: totalAudioMinutes(note),
       jobId: job.id,
+      deadline,
+      recordFailure: (step, error, ms) => recordAiFailure(job.id, step, error, ms),
     });
 
     await setStage(job, "making_cards");
+    await setStage(job, "saving");
 
     // ---- 6. Persist outputs (replace), usage, spend alert, notify --------
     // Another deletion check: the note may be gone by the time the cards exist.
@@ -441,12 +478,16 @@ export async function processStudySet(job, documentExtraction, deadline = null) 
       // re-queues the job so the next pass resumes from the checkpoint.
       throw error;
     }
-    if (await jobTargetDeleted(job, error)) {
+    let failure = error;
+    if (error?.kind === "rate_limit") {
+      failure = await rateLimitFailure(job, error);
+    }
+    if (await jobTargetDeleted(job, failure)) {
       await closeDeletedJob(job);
       return;
     }
-    await setFailed(job, error);
-    throw error;
+    await setFailed(job, failure);
+    throw failure;
   }
 }
 
@@ -637,6 +678,7 @@ export async function processReference(job, documentExtraction, deadline = null)
     if (await guardRerun(job, hash)) return;
 
     const written = await writeNote({ prepared, kind: job.kind, courseContext });
+    await setStage(job, "saving");
     await assertNoteAlive(job);
     await withUser(user.clerkId, (tx) =>
       tx.note.update({
@@ -659,12 +701,16 @@ export async function processReference(job, documentExtraction, deadline = null)
       // re-queues the job so the next pass resumes from the checkpoint.
       throw error;
     }
-    if (await jobTargetDeleted(job, error)) {
+    let failure = error;
+    if (error?.kind === "rate_limit") {
+      failure = await rateLimitFailure(job, error);
+    }
+    if (await jobTargetDeleted(job, failure)) {
       await closeDeletedJob(job);
       return;
     }
-    await setFailed(job, error);
-    throw error;
+    await setFailed(job, failure);
+    throw failure;
   }
 }
 
@@ -683,7 +729,9 @@ async function runLongFileJob(job, note, courseContext, deps, chunks) {
     kind: job.kind,
     clerkId: job.user.clerkId,
     deps,
+    source: chunks,
   });
+  await setStage(job, "saving");
   // The note may be gone by the time the last part lands.
   await assertNoteAlive(job);
   await bumpUsage(job.userId, job.kind, Math.max(1, result.meta.partsCount));
@@ -697,6 +745,43 @@ async function runLongFileJob(job, note, courseContext, deps, chunks) {
  * errors (rate limits, timeouts, stack traces) become the standard retry line:
  * the app promises not to charge a failed run, so it must not leak internals.
  */
+async function bumpRateLimitPasses(jobId) {
+  const rows = await prisma
+    .$queryRaw`
+      UPDATE "jobs"
+      SET "checkpoint" = jsonb_set(
+            COALESCE("checkpoint", '{}'::jsonb),
+            '{rateLimitPasses}',
+            to_jsonb(COALESCE(("checkpoint"->>'rateLimitPasses')::int, 0) + 1),
+            true
+          ),
+          "heartbeatAt" = NOW(),
+          "updatedAt" = NOW()
+      WHERE "id" = ${jobId}
+      RETURNING ("checkpoint"->>'rateLimitPasses')::int AS passes
+    `
+    .catch(() => []);
+  return rows?.[0]?.passes ?? 1;
+}
+
+/**
+ * A 429 is not a failed attempt: finished batches are checkpointed, so the job
+ * is parked and resumed after the provider's Retry-After (bounded). Only after
+ * a few quiet passes does the student see the quota message.
+ */
+async function rateLimitFailure(job, error) {
+  const passes = await bumpRateLimitPasses(job.id);
+  if (passes <= 3) {
+    throw new JobYieldError("rate_limit", {
+      retryAfterMs: error?.retryAfterMs ?? null,
+      reason: "rate_limit",
+    });
+  }
+  return new UserFacingError(
+    "The AI service hit its rate limit or daily quota. Wait a few minutes and tap Try again — finished pages are kept.",
+  );
+}
+
 async function setFailed(job, error) {
   const message = isUserFacing(error)
     ? error.message
@@ -795,21 +880,32 @@ export async function generateStudySet({
   durationMinutes,
   jobId,
   reduceNote,
+  deadline = null,
   record = (step, result) => recordAiCall(jobId, step, result),
+  recordFailure = null,
 }) {
   const prompt = studySetPrompt({ courseContext, durationMinutes, reduceNote });
   const attempt = async (stricter, priorProblem = null) => {
-    const result = await chatCompletion({
-      system: stricter
-        ? "You are Sua, an exam-focused study assistant for African university students. Output ONLY valid JSON matching the requested study pack schema exactly — no prose, no code fences."
-        : "You are Sua, an exam-focused study assistant for African university students. Use only the student's notes provided. Write clearly in simple English. Output only valid JSON.",
-      user: `${prompt}\n\n=== LECTURE MATERIAL ===\n${cleaned}`,
-      model: bulkModel(),
-      json: true,
-      maxTokens: notePipeline.studySetMaxTokens,
-      temperature: stricter ? 0 : 0.2,
-    });
-    await record(stricter ? "generate_study_set_retry" : "generate_study_set", result);
+    const step = stricter ? "generate_study_set_retry" : "generate_study_set";
+    const started = Date.now();
+    let result;
+    try {
+      result = await chatCompletion({
+        system: stricter
+          ? "You are Sua, an exam-focused study assistant for African university students. Output ONLY valid JSON matching the requested study pack schema exactly — no prose, no code fences."
+          : "You are Sua, an exam-focused study assistant for African university students. Use only the student's notes provided. Write clearly in simple English. Output only valid JSON.",
+        user: `${prompt}\n\n=== LECTURE MATERIAL ===\n${cleaned}`,
+        model: bulkModel(),
+        json: true,
+        maxTokens: notePipeline.studySetMaxTokens,
+        temperature: stricter ? 0 : 0.2,
+        timeoutMs: timeoutForDeadline(deadline),
+      });
+    } catch (error) {
+      await recordFailure?.(step, error, Date.now() - started);
+      throw error;
+    }
+    await record(step, result);
     const parsed = parseStudySetJson(result.text);
     const validation = validateStudyPack(parsed);
     return {

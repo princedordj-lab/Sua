@@ -102,6 +102,7 @@ export type AiState =
   | "checking"
   | "summarising"
   | "making_cards"
+  | "saving"
   | "ready"
   | "failed";
 
@@ -251,6 +252,11 @@ export type ServerJob = {
   // Long-file progress counter ("Reading pages 41 of 212"); 0/0 for short jobs.
   progressDone?: number;
   progressTotal?: number;
+  // Server-computed progress sentence and unit ("Combining batch 2 of 5").
+  progressUnit?: "pages" | "sections" | "digests" | "batches" | "parts" | null;
+  stageDetail?: string | null;
+  // Last proof of life; lets the UI tell processing from a stalled job.
+  heartbeatAt?: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   createdAt: string;

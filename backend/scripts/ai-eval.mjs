@@ -496,7 +496,16 @@ async function longEval(sectionsArg, courseContext, mock = false) {
       calls.push({ step, promptTokens: result?.promptTokens ?? 0, completionTokens: result?.completionTokens ?? 0 });
     },
     onCheckpoint: async (checkpoint) => {
-      capturedCheckpoint = checkpoint;
+      capturedCheckpoint = { ...capturedCheckpoint, ...checkpoint };
+    },
+    saveMapCheckpoint: async (patch) => {
+      capturedCheckpoint = { ...capturedCheckpoint, ...patch };
+    },
+    saveReduceEntry: async (key, value) => {
+      capturedCheckpoint = {
+        ...capturedCheckpoint,
+        reduce: { ...(capturedCheckpoint.reduce ?? {}), [key]: value },
+      };
     },
   };
   const job = {

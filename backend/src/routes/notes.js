@@ -5,6 +5,7 @@ import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { maybeEnqueueGeneration } from "../lib/pipeline.js";
 import { triggerExtraction } from "../lib/extraction.js";
+import { triggerRunner } from "../lib/queue.js";
 
 export const notesRouter = Router();
 
@@ -110,9 +111,9 @@ notesRouter.get("/tombstones", async (req, res) => {
 // no local SQLite row to read from, so deep links need this lookup.
 notesRouter.get("/:noteId", async (req, res) => {
   const identity = await identityFromRequest(req);
-  const note = await withUser(identity.clerkId, async (tx) => {
+  const loaded = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
-    return tx.note.findFirst({
+    const note = await tx.note.findFirst({
       where: { id: req.params.noteId, userId: user.id },
       include: {
         assets: {
@@ -130,7 +131,16 @@ notesRouter.get("/:noteId", async (req, res) => {
         },
       },
     });
+    if (!note) return null;
+    // A note view is also a resume signal for long jobs, not just extraction.
+    const latestJob = await tx.job.findFirst({
+      where: { noteId: note.id },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, state: true, lockedUntil: true },
+    });
+    return { note, latestJob };
   });
+  const note = loaded?.note ?? null;
   if (!note) return res.status(404).json({ error: "Note not found" });
   // Opportunistic resume for uploads without a generation job: a provider
   // parse parked as pending is continued by the next note read. The claim
@@ -141,6 +151,15 @@ notesRouter.get("/:noteId", async (req, res) => {
       ["pending", "partial"].includes(asset.extractState ?? "none"),
   );
   if (stuck) triggerExtraction(stuck.id);
+  const latest = loaded.latestJob;
+  if (
+    latest &&
+    (latest.state === "queued" ||
+      (latest.state === "running" &&
+        (!latest.lockedUntil || latest.lockedUntil.getTime() <= Date.now())))
+  ) {
+    triggerRunner(latest.id);
+  }
   res.json(shapeNote(note));
 });
 

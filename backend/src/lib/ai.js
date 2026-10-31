@@ -39,6 +39,54 @@ const XKIRO_BASE_URL = (
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+/**
+ * Provider failures keep their class instead of becoming substrings. Callers
+ * decide the retry policy: quota/auth are terminal, rate limits are scheduled,
+ * too-large inputs are split, and only transient/timeouts use backoff.
+ */
+export class AiError extends Error {
+  constructor(kind, message, { status = null, retryAfterMs = null, retryable = false } = {}) {
+    super(message);
+    this.name = "AiError";
+    this.kind = kind;
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+    this.retryable = retryable;
+  }
+}
+
+export function isAiError(error, kind = null) {
+  return Boolean(error?.name === "AiError" && (!kind || error.kind === kind));
+}
+
+export function classifyStatus(status) {
+  if (status === 401 || status === 403) return ["auth", false];
+  if (status === 402) return ["quota", false];
+  if (status === 413) return ["too_large", false];
+  if (status === 408) return ["timeout", true];
+  if (status === 429) return ["rate_limit", true];
+  if (status >= 500) return ["transient", true];
+  return ["bad_request", false];
+}
+
+/** Retry-After is either delta seconds or an HTTP date. */
+export function parseRetryAfter(value, now = Date.now()) {
+  if (value == null || value === "") return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const date = Date.parse(String(value));
+  return Number.isFinite(date) ? Math.max(0, date - now) : null;
+}
+
+/**
+ * A call must finish before the invocation does. Keep a safety margin for the
+ * checkpoint write and the runner's release/complete update.
+ */
+export function timeoutForDeadline(deadline, maxMs = DEFAULT_TIMEOUT_MS, reserveMs = 10_000) {
+  if (!deadline) return maxMs;
+  return Math.max(5_000, Math.min(maxMs, deadline - Date.now() - reserveMs));
+}
+
 export function aiConfigured() {
   return Boolean(
     process.env.GEMINI_API_KEY &&
@@ -540,13 +588,18 @@ export async function chatCompletion({
   maxTokens,
   json = false,
   temperature,
+  timeoutMs,
 }) {
+  const startedAt = Date.now();
   if (aiMock) {
-    return aiMock({ system, user, model, maxTokens, json, temperature });
+    const result = await aiMock({ system, user, model, maxTokens, json, temperature });
+    return { ...result, durationMs: Date.now() - startedAt };
   }
   if (!process.env.XKIRO_API_KEY) {
-    throw new Error("XKIRO_API_KEY is not set");
+    throw new AiError("auth", "XKIRO_API_KEY is not set");
   }
+
+  const budgetMs = Math.max(5_000, Math.min(timeoutMs ?? DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS));
   const request = (withJsonMode) => ({
     model,
     max_tokens: maxTokens ?? 4096,
@@ -570,7 +623,8 @@ export async function chatCompletion({
   });
 
   const send = async (withJsonMode) => {
-    const { signal, done } = withTimeout(DEFAULT_TIMEOUT_MS * 2);
+    const remaining = Math.max(5_000, budgetMs - (Date.now() - startedAt));
+    const { signal, done } = withTimeout(remaining);
     try {
       const response = await fetch(`${XKIRO_BASE_URL}/chat/completions`, {
         method: "POST",
@@ -584,7 +638,12 @@ export async function chatCompletion({
       return { response, done };
     } catch (error) {
       done();
-      throw error;
+      if (error?.name === "AbortError" || error?.name === "TimeoutError") {
+        throw new AiError("timeout", `provider timed out after ${remaining}ms`, {
+          retryable: true,
+        });
+      }
+      throw new AiError("transient", "provider request failed", { retryable: true });
     }
   };
 
@@ -604,26 +663,41 @@ export async function chatCompletion({
   }
   try {
     if (!response.ok) {
-      throw new Error(
+      const [kind, retryable] = classifyStatus(response.status);
+      const retryAfterMs = parseRetryAfter(response.headers?.get?.("retry-after"));
+      const error = new AiError(
+        kind,
         `Xkiro call failed (${response.status}): ${payload.slice(0, 300)}`,
+        { status: response.status, retryAfterMs, retryable },
       );
+      console.warn(
+        `[ai] status=${response.status} kind=${kind} ms=${Date.now() - startedAt} model=${model}`,
+      );
+      throw error;
     }
     let data;
     try {
       data = JSON.parse(payload);
     } catch {
-      throw new Error("Xkiro returned an unreadable response");
+      throw new AiError("invalid_output", "Xkiro returned an unreadable response");
     }
     const message = data?.choices?.[0]?.message?.content ?? "";
-    if (!String(message).trim()) throw new Error("Model returned an empty response");
+    if (!String(message).trim()) {
+      throw new AiError("invalid_output", "Model returned an empty response");
+    }
     const usage = data?.usage ?? {};
     const cost = billableCostUsd(data);
+    const durationMs = Date.now() - startedAt;
+    if (durationMs > 15_000) {
+      console.log(`[ai] slow step model=${model} ms=${durationMs} tokens=${usage.completion_tokens ?? "?"}`);
+    }
     return {
       text: message,
       model: data?.model ?? model,
       promptTokens: usage.prompt_tokens ?? estimateTokens(system + user),
       completionTokens: usage.completion_tokens ?? estimateTokens(message),
       usdMicros: cost != null ? Math.round(cost * 1_000_000) : null,
+      durationMs,
     };
   } finally {
     done();

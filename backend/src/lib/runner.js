@@ -3,6 +3,11 @@ import { processJob } from "./pipeline.js";
 import { extractDocument, isRenderedPageBlank, renderPdfPage } from "./extract.js";
 import { extractNext } from "./extraction.js";
 import { isUserFacing, isJobYield, USER_MESSAGES, longDoc } from "../config/ai-pipeline.js";
+import {
+  nextYieldState,
+  progressSignal,
+  yieldDelayMs,
+} from "./job-recovery.js";
 
 export const ALLOWED_JOB_KINDS = [
   "study_set",
@@ -24,6 +29,14 @@ export function isTransient(error) {
   if (!error) return false;
   if (isUserFacing(error)) return false;
   if (error.name === "NoteDeletedError" || error.code === "P2025") return false;
+
+  // Typed provider errors decide their own policy. Rate limits are scheduled
+  // as yields by the pipeline; a 5xx/timeout gets the bounded attempts below.
+  const kind = error.kind;
+  if (kind === "rate_limit" || kind === "timeout" || kind === "transient" || kind === "invalid_output") {
+    return true;
+  }
+  if (kind) return false;
 
   const msg = String(error.message ?? error).toLowerCase();
   if (msg.includes("too short") || msg.includes("disallowed")) return false;
@@ -98,6 +111,16 @@ export function errorCodeFor(error) {
   if (error.name === "NoteDeletedError" || error.code === "P2025") return "NOTE_DELETED";
   if (isUserFacing(error)) return "USER_FACING";
 
+  const kind = error.kind;
+  if (kind === "rate_limit") return "RATE_LIMIT";
+  if (kind === "timeout") return "TIMEOUT";
+  if (kind === "too_large") return "INPUT_TOO_LARGE";
+  if (kind === "auth") return "AI_AUTH";
+  if (kind === "quota") return "AI_QUOTA";
+  if (kind === "invalid_output") return "PARSE_ERROR";
+  if (kind === "transient") return "AI_TRANSIENT";
+  if (kind === "bad_request") return "AI_BAD_REQUEST";
+
   const msg = String(error.message ?? error).toLowerCase();
   if (msg.includes("too short")) return "NOTE_TOO_SHORT";
   if (msg.includes("disallowed")) return "DISALLOWED_KIND";
@@ -146,6 +169,21 @@ export async function claimJob({ leaseMs = DEFAULT_LEASE_MS, targetJobId = null 
         AND "attempts" >= "maxAttempts"
     `.catch(() => {});
 
+    // A queued row past its retry budget can never be claimed; close it now so
+    // it does not sit in the queue forever after an attempt-accounting change.
+    await tx.$executeRaw`
+      UPDATE "jobs"
+      SET "state" = 'failed',
+          "stage" = 'failed',
+          "error" = 'Job exhausted its retry attempts',
+          "errorCode" = 'RETRIES_EXHAUSTED',
+          "finishedAt" = NOW(),
+          "updatedAt" = NOW()
+      WHERE "state" = 'queued'
+        AND "attempts" >= "maxAttempts"
+        AND "runAfter" <= NOW()
+    `.catch(() => {});
+
     // 2. Select next claimable candidate
     let rows;
     if (targetJobId) {
@@ -154,7 +192,7 @@ export async function claimJob({ leaseMs = DEFAULT_LEASE_MS, targetJobId = null 
         FROM "jobs"
         WHERE "id" = ${targetJobId}
           AND (
-            ("state" = 'queued' AND "runAfter" <= NOW())
+            ("state" = 'queued' AND "runAfter" <= NOW() AND "attempts" < "maxAttempts")
             OR (
               "state" = 'running'
               AND (
@@ -172,7 +210,7 @@ export async function claimJob({ leaseMs = DEFAULT_LEASE_MS, targetJobId = null 
       rows = await tx.$queryRaw`
         SELECT "id", "attempts", "maxAttempts", "kind", "noteId", "userId", "state", "stage", "lockedUntil"
         FROM "jobs"
-        WHERE ("state" = 'queued' AND "runAfter" <= NOW())
+        WHERE ("state" = 'queued' AND "runAfter" <= NOW() AND "attempts" < "maxAttempts")
            OR (
              "state" = 'running'
              AND (
@@ -237,13 +275,14 @@ export async function releaseJob(jobId) {
  * attempt is returned (a big file may legitimately need many invocations) and
  * the job is queued again for the next poll/tick to continue.
  */
-export async function releaseJobForResume(jobId) {
+export async function releaseJobForResume(jobId, delayMs = 2_000) {
+  const seconds = Math.max(2, Math.round(Number(delayMs) / 1000));
   await prisma
     .$executeRaw`
       UPDATE "jobs"
       SET "state" = 'queued',
           "lockedUntil" = NULL,
-          "runAfter" = NOW() + interval '2 seconds',
+          "runAfter" = NOW() + (${`${seconds} seconds`})::interval,
           "attempts" = GREATEST("attempts" - 1, 0),
           "updatedAt" = NOW()
       WHERE "id" = ${jobId} AND "state" = 'running'
@@ -251,6 +290,79 @@ export async function releaseJobForResume(jobId) {
     .catch((error) => {
       console.warn(`could not re-queue yielded job ${jobId}: ${error?.message ?? error}`);
     });
+}
+
+/**
+ * A yield is safe only while the job is still making progress. Finished work
+ * is durable, so the attempt is refunded — but a wave that repeatedly fails
+ * without adding a digest or a reduce entry is a stall, and is failed honestly
+ * instead of looping on "Combining" forever.
+ */
+async function handleYield(job, error, passStarted) {
+  const fresh = await prisma.job
+    .findUnique({
+      where: { id: job.id },
+      select: { state: true, progressDone: true, checkpoint: true, stage: true },
+    })
+    .catch(() => null);
+  if (!fresh || fresh.state !== "running") return;
+
+  const state = nextYieldState(fresh.checkpoint?.recovery ?? {}, {
+    signal: progressSignal(fresh),
+    elapsedMs: Date.now() - passStarted,
+    stage: fresh.stage,
+    maxRuntimeMs: longDoc.maxJobRuntimeMs,
+  });
+  await prisma
+    .$executeRaw`
+      UPDATE "jobs"
+      SET "checkpoint" = jsonb_set(
+            COALESCE("checkpoint", '{}'::jsonb),
+            '{recovery}',
+            ${JSON.stringify(state)}::jsonb,
+            true
+          ),
+          "heartbeatAt" = NOW(),
+          "updatedAt" = NOW()
+      WHERE "id" = ${job.id} AND "state" = 'running'
+    `
+    .catch((errorWrite) => {
+      console.warn(`could not record yield for job ${job.id}: ${errorWrite?.message ?? errorWrite}`);
+    });
+
+  if (state.fail) {
+    const message =
+      state.fail === "stalled"
+        ? "This file is stuck on one step. Tap Try again — finished pages are kept, or upload it in chapters."
+        : "This file took too long to process. Tap Try again — finished pages are kept.";
+    await prisma.job
+      .updateMany({
+        where: { id: job.id, state: "running" },
+        data: {
+          state: "failed",
+          stage: "failed",
+          error: message,
+          errorCode: state.fail === "stalled" ? "PIPELINE_STALLED" : "JOB_RUNTIME_EXCEEDED",
+          errorStage: fresh.stage ?? job.stage ?? null,
+          lockedUntil: null,
+          finishedAt: new Date(),
+        },
+      })
+      .catch(() => {});
+    await prisma.note
+      .updateMany({ where: { id: job.noteId }, data: { aiState: "failed" } })
+      .catch(() => {});
+    console.warn(
+      `[yield] job=${job.id} failed reason=${state.fail} runtimeMs=${state.runtimeMs} yields=${state.yields} stalled=${state.stalled}`,
+    );
+    return;
+  }
+
+  const delayMs = yieldDelayMs(error);
+  await releaseJobForResume(job.id, delayMs);
+  console.log(
+    `[yield] job=${job.id} stage=${error?.stage ?? "-"} reason=${error?.reason ?? "budget"} delayMs=${delayMs} runtimeMs=${state.runtimeMs} yields=${state.yields} stalled=${state.stalled}`,
+  );
 }
 
 /** Extraction failed for a document the job depends on — permanent, honest, no retry. */
@@ -458,6 +570,22 @@ async function processClaimedJob(claimed, deadline = null) {
       ["pending", "partial", "running"].includes(asset.extractState ?? "none"),
     );
     if (unfinished.length) {
+      const pagesBefore = unfinished.reduce((sum, asset) => sum + (asset.pagesDone ?? 0), 0);
+      const pagesTotal = unfinished.reduce((sum, asset) => sum + (asset.pagesTotal ?? 0), 0);
+      await prisma.job
+        .updateMany({
+          where: { id: job.id, state: "running" },
+          data: {
+            stage: "reading",
+            heartbeatAt: new Date(),
+            ...(pagesTotal ? { progressDone: pagesBefore, progressTotal: pagesTotal } : {}),
+          },
+        })
+        .catch(() => {});
+      await prisma.note
+        .updateMany({ where: { id: job.noteId }, data: { aiState: "reading" } })
+        .catch(() => {});
+
       for (const asset of unfinished) {
         await extractNext({
           targetAssetId: asset.id,
@@ -468,8 +596,22 @@ async function processClaimedJob(claimed, deadline = null) {
       }
       const states = await prisma.asset.findMany({
         where: { id: { in: unfinished.map((asset) => asset.id) } },
-        select: { extractState: true },
+        select: { extractState: true, pagesDone: true, pagesTotal: true },
       }).catch(() => []);
+      const pagesDone = states.reduce((sum, asset) => sum + (asset.pagesDone ?? 0), 0);
+      const totalPages = states.reduce((sum, asset) => sum + (asset.pagesTotal ?? 0), 0);
+      if (totalPages) {
+        await prisma.job
+          .updateMany({
+            where: { id: job.id, state: "running" },
+            data: {
+              progressDone: pagesDone,
+              progressTotal: totalPages,
+              heartbeatAt: new Date(),
+            },
+          })
+          .catch(() => {});
+      }
       const failedNow = states.find((asset) => asset.extractState === "failed");
       if (failedNow) return failJobExtraction(job, { extractErrorCode: null, ...failedNow });
       if (states.some((asset) => asset.extractState !== "done")) {
@@ -481,6 +623,7 @@ async function processClaimedJob(claimed, deadline = null) {
             UPDATE "jobs"
             SET "runAfter" = NOW() + interval '60 seconds',
                 "startedAt" = COALESCE("startedAt", NOW()),
+                "heartbeatAt" = NOW(),
                 "updatedAt" = NOW()
             WHERE "id" = ${job.id} AND "state" = 'queued'
           `
@@ -494,10 +637,10 @@ async function processClaimedJob(claimed, deadline = null) {
   }
 
   // 4. Run pipeline
-  const started = Date.now();
+  const passStarted = Date.now();
   try {
     await processJob(jobId, { extractDocument, renderPdfPage, isRenderedPageBlank }, deadline);
-    console.log(`Job ${jobId} completed in ${Date.now() - started}ms`);
+    console.log(`Job ${jobId} completed in ${Date.now() - passStarted}ms`);
     // Release lock upon success
     await prisma.job.updateMany({
       where: { id: jobId },
@@ -505,10 +648,7 @@ async function processClaimedJob(claimed, deadline = null) {
     }).catch(() => {});
   } catch (error) {
     if (isJobYield(error)) {
-      await releaseJobForResume(jobId);
-      console.log(
-        `Job ${jobId} yielded at ${error?.stage ?? "stage"} after ${Date.now() - started}ms; re-queued to resume from checkpoint`,
-      );
+      await handleYield(job, error, passStarted);
       return;
     }
     console.warn(`Job ${jobId} failed: ${error?.message ?? error}`);

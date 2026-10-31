@@ -34,6 +34,29 @@ function jobMeta(job) {
 }
 
 // What the client reads to drive status UI.
+const PROGRESS_UNITS = {
+  reading: "pages",
+  reading_scans: "pages",
+  digesting: "sections",
+  merging: "batches",
+  writing: "parts",
+};
+
+function stageDetail(job) {
+  const unit = PROGRESS_UNITS[job.stage];
+  const total = job.progressTotal ?? 0;
+  const done = job.progressDone ?? 0;
+  if (!unit || total <= 0) return null;
+  const current = Math.max(1, Math.min(done || 1, total));
+  if (job.stage === "reading" || job.stage === "reading_scans") {
+    return `Reading pages ${Math.min(done, total)} of ${total}`;
+  }
+  if (job.stage === "digesting") return `Analyzing section ${current} of ${total}`;
+  if (job.stage === "merging") return `Combining batch ${current} of ${total}`;
+  if (job.stage === "writing") return `Writing part ${current} of ${total}`;
+  return null;
+}
+
 function shapeJob(job) {
   return {
     id: job.id,
@@ -47,6 +70,11 @@ function shapeJob(job) {
     // Long-file progress (additive): "Reading pages 41 of 212".
     progressDone: job.progressDone ?? 0,
     progressTotal: job.progressTotal ?? 0,
+    progressUnit: PROGRESS_UNITS[job.stage] ?? null,
+    // Server-computed sentence so mobile and web cannot disagree about units.
+    stageDetail: stageDetail(job),
+    // Proof of life: a running job with an old heartbeat is not progressing.
+    heartbeatAt: job.heartbeatAt ?? job.updatedAt ?? null,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     createdAt: job.createdAt,
@@ -67,7 +95,10 @@ function isStale(job) {
     return now - job.createdAt.getTime() > STALE_QUEUED_MS;
   }
   if (job.state === "running" && job.startedAt) {
-    return now - job.startedAt.getTime() > STALE_RUNNING_MS;
+    // A worker proves liveness with heartbeats; startedAt only marks the first
+    // attempt and is reset by every resumed pass.
+    const aliveAt = job.heartbeatAt ?? job.startedAt;
+    return now - aliveAt.getTime() > STALE_RUNNING_MS;
   }
   return false;
 }

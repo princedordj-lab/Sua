@@ -17,7 +17,7 @@
 import { createHash } from "node:crypto";
 import { prisma } from "../config/prisma.js";
 import { withUser } from "./db.js";
-import { bulkModel, strongModel, chatCompletion } from "./ai.js";
+import { bulkModel, strongModel, chatCompletion, timeoutForDeadline, AiError } from "./ai.js";
 import {
   digestChunk,
   digestToText,
@@ -278,12 +278,17 @@ export function mergeCheckpoint(current, patch) {
   return { ...base, ...(patch ?? {}) };
 }
 
-async function patchCheckpoint(jobId, patch, { progressIncrement = 0 } = {}) {
+async function patchCheckpoint(jobId, patch, { progressIncrement = 0 } = {}, deps = null) {
+  if (deps?.saveMapCheckpoint) {
+    await deps.saveMapCheckpoint(patch, progressIncrement);
+    return;
+  }
   await prisma
     .$executeRaw`
       UPDATE "jobs"
       SET "checkpoint" = COALESCE("checkpoint", '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb,
           "progressDone" = "progressDone" + ${Math.max(0, Math.round(progressIncrement))},
+          "heartbeatAt" = NOW(),
           "updatedAt" = NOW()
       WHERE "id" = ${jobId}
     `
@@ -311,6 +316,7 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   const failures = { ...(job.checkpoint?.digestFailures ?? {}) };
   let calls = 0;
   let rateLimited = false;
+  let rateLimitError = null;
   let yielded = false;
 
   // Refuse pathological sources before spending a single model call: the
@@ -334,11 +340,16 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   };
 
   const persistMapState = async () => {
-    await patchCheckpoint(job.id, {
-      digests: saved,
-      digestFailures: failures,
-      mapCalls: (job.checkpoint?.mapCalls ?? 0) + calls,
-    });
+    await patchCheckpoint(
+      job.id,
+      {
+        digests: saved,
+        digestFailures: failures,
+        mapCalls: (job.checkpoint?.mapCalls ?? 0) + calls,
+      },
+      {},
+      deps,
+    );
     await emitCheckpoint();
   };
 
@@ -361,11 +372,6 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
     }
     const checkpoint = await prisma.job.findUnique({ where: { id: job.id }, select: { checkpoint: true } }).catch(() => null);
     const mapCalls = checkpoint?.checkpoint?.mapCalls ?? (job.checkpoint?.mapCalls ?? 0) + calls;
-    if (Date.now() - new Date(job.startedAt ?? job.createdAt).getTime() > longDoc.maxJobRuntimeMs) {
-      throw new UserFacingError(
-        "This file took too long to process. Tap Try again — finished pages are kept.",
-      );
-    }
     if (mapCalls >= longDoc.maxAiCallsPerJob) {
       failures[group.hash] = { label: group.labelRange, code: "AI_CALL_BUDGET" };
       return;
@@ -383,12 +389,14 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
         job.id,
         { digests: saved, digestFailures: failures, mapCalls },
         { progressIncrement: 1 },
+        deps,
       );
       await emitCheckpoint();
     } catch (error) {
       if (error instanceof UserFacingError) throw error;
-      if (RATE_LIMIT_RE.test(error?.message ?? "")) {
+      if (error?.kind === "rate_limit" || RATE_LIMIT_RE.test(error?.message ?? "")) {
         rateLimited = true;
+        rateLimitError = error;
         failures[group.hash] = { label: group.labelRange, code: "RATE_LIMITED" };
       } else {
         failures[group.hash] = { label: group.labelRange, code: "DIGEST_FAILED" };
@@ -418,7 +426,6 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
     for (const group of retryList) {
       const mapCalls = (job.checkpoint?.mapCalls ?? 0) + calls;
       if (mapCalls >= longDoc.maxAiCallsPerJob) break;
-      if (Date.now() - new Date(job.startedAt ?? job.createdAt).getTime() > longDoc.maxJobRuntimeMs) break;
       calls += 1;
       try {
         const digest = await digestChunk(
@@ -432,11 +439,13 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
           job.id,
           { digests: saved, digestFailures: failures, mapCalls },
           { progressIncrement: 1 },
+          deps,
         );
         await emitCheckpoint();
       } catch (error) {
-        if (RATE_LIMIT_RE.test(error?.message ?? "")) {
+        if (error?.kind === "rate_limit" || RATE_LIMIT_RE.test(error?.message ?? "")) {
           rateLimited = true;
+          rateLimitError = error;
           failures[group.hash] = { label: group.labelRange, code: "RATE_LIMITED" };
           break;
         }
@@ -447,8 +456,10 @@ export async function mapDigests({ job, groups, courseContext, sourceType, deps 
   }
 
   if (rateLimited) {
-    throw new UserFacingError(
+    throw new AiError(
+      "rate_limit",
       "The AI service hit its rate limit or daily quota. Wait a few minutes and tap Try again — finished pages are kept.",
+      { retryable: true, retryAfterMs: rateLimitError?.retryAfterMs ?? null },
     );
   }
 
@@ -526,38 +537,112 @@ function slimDigest(digest, budget) {
   return copy;
 }
 
+class ReduceSplitError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ReduceSplitError";
+    this.splittable = true;
+  }
+}
+
+/**
+ * A merge returns roughly the same shape it receives, so the wave must fit the
+ * model's OUTPUT budget as well as REDUCE_MAX_CHARS. At ~4 chars/token and an
+ * 8192-token cap, half the budget is a safe expected output; the rest is
+ * headroom for prompt overhead and JSON structure.
+ */
+function reduceBudget(promptChars = 0) {
+  const fromChars = Math.floor(longDoc.reduceMaxChars * 0.85);
+  const fromTokens = Math.floor(notePipeline.studySetMaxTokens * 4 * 0.55);
+  return Math.max(4_000, Math.min(fromChars, fromTokens) - Math.max(0, promptChars));
+}
+
+function reduceWaveKey(scope, level, index, items, model) {
+  return `${scope}:L${level}:W${index}:${sha1(JSON.stringify(items))}:${PROMPT_VERSION}:${model}`;
+}
+
+function isSplittableReduceError(error) {
+  if (!error) return false;
+  if (error.splittable) return true;
+  if (error.kind === "too_large" || error.kind === "invalid_output") return true;
+  return /validation|unparseable|code fence|json/i.test(String(error.message ?? ""));
+}
+
+/**
+ * Persist one wave by path instead of rewriting the whole reduce map. The
+ * checkpoint can hold hundreds of waves on a long file; only this key changes
+ * per call, and the heartbeat proves the pass is alive.
+ */
+async function patchReduceEntry(job, key, value, deps) {
+  if (deps.saveReduceEntry) {
+    await deps.saveReduceEntry(key, value);
+    return;
+  }
+  await prisma
+    .$executeRaw`
+      UPDATE "jobs"
+      SET "checkpoint" = jsonb_set(
+            COALESCE("checkpoint", '{}'::jsonb),
+            ${`{reduce,${key}}`}::text[],
+            ${JSON.stringify(value)}::jsonb,
+            true
+          ),
+          "heartbeatAt" = NOW(),
+          "updatedAt" = NOW()
+      WHERE "id" = ${job.id}
+    `
+    .catch((error) => {
+      console.warn(`reduce checkpoint write failed for job ${job.id}: ${error?.message ?? error}`);
+    });
+}
+
 /**
  * Merge several digests into one summary of the same shape. Retries once at
  * temperature 0. Inputs are wave-sized by partitionWaves; a lone oversized
- * digest is compacted (slimDigest), never truncated.
+ * digest is compacted (slimDigest), never truncated. A continued failure is a
+ * split signal for the hierarchy, not a dead end.
  */
 async function mergeDigests({ digests, prompt, step, deps }) {
-  const budget = Math.floor(longDoc.reduceMaxChars * 0.85);
+  const budget = reduceBudget(prompt.length);
   let payload = JSON.stringify(digests);
   if (payload.length > budget) {
     const share = Math.floor(budget / Math.max(1, digests.length));
     payload = JSON.stringify(digests.map((digest) => slimDigest(digest, share)));
   }
-  const attempt = async (stricter) => {
-    const result = await chatCompletion({
-      system:
-        "You merge structured study material for a university student revising for exams. " +
-        "Output ONLY valid JSON matching the requested shape — no prose, no code fences." +
-        (stricter ? " Schema exactly as instructed. No extra keys." : ""),
-      user: `${prompt}\n\n=== DIGESTS ===\n${payload}`,
-      model: mergeModel(),
-      json: true,
-      temperature: stricter ? 0 : 0.2,
-      maxTokens: notePipeline.studySetMaxTokens,
-    });
+  const attempt = async (stricter, cutOff = false) => {
+    const started = Date.now();
+    let result;
+    try {
+      result = await chatCompletion({
+        system:
+          "You merge structured study material for a university student revising for exams. " +
+          "Output ONLY valid JSON matching the requested shape — no prose, no code fences." +
+          (stricter ? " Schema exactly as instructed. No extra keys." : ""),
+        user:
+          `${prompt}\n\n` +
+          (cutOff
+            ? "Your previous answer was cut off. Return a shorter JSON object: at most 6 topics, at most 5 points per topic.\n\n"
+            : "") +
+          `=== DIGESTS ===\n${payload}`,
+        model: mergeModel(),
+        json: true,
+        temperature: stricter ? 0 : 0.2,
+        maxTokens: notePipeline.studySetMaxTokens,
+        timeoutMs: timeoutForDeadline(deps.deadline),
+      });
+    } catch (error) {
+      await deps.recordFailure?.(step, error, Date.now() - started);
+      throw error;
+    }
     await deps.record(stricter ? `${step}_retry` : step, result);
     const parsed = parseJsonObject(result.text);
     const problem = parsed ? validateDigest(parsed) : "unparseable JSON";
-    return { parsed, problem };
+    const endedCleanly = /\}\s*$/.test(String(result.text).trim());
+    return { parsed, problem, cutOff: Boolean(problem) && !endedCleanly };
   };
   let outcome = await attempt(false);
-  if (outcome.problem) outcome = await attempt(true);
-  if (outcome.problem) throw new Error(`Merge failed validation (${outcome.problem})`);
+  if (outcome.problem) outcome = await attempt(true, outcome.cutOff);
+  if (outcome.problem) throw new ReduceSplitError(`Merge failed validation (${outcome.problem})`);
   return {
     range: String(outcome.parsed.range ?? ""),
     topics: outcome.parsed.topics.map((topic) => ({
@@ -571,7 +656,7 @@ async function mergeDigests({ digests, prompt, step, deps }) {
         expression: String(formula?.expression ?? "").trim(),
         symbols: (formula?.symbols ?? []).map((symbol) => ({
           symbol: String(symbol?.symbol ?? ""),
-          meaning: String(symbol?.meaning ?? ""),
+          meaning: String(symbol?.meaning ?? "").trim(),
           unit: String(symbol?.unit ?? ""),
         })),
         context: String(formula?.context ?? ""),
@@ -585,82 +670,200 @@ async function mergeDigests({ digests, prompt, step, deps }) {
 }
 
 /**
- * Group digests by outline section (~reduceGroupSize per wave, cascading
- * waves when a section has more), then build the document-level overview.
- * Every checkpoint is written to job.checkpoint.reduce keyed by section +
- * wave + prompt version + model.
+ * Reduce a list of digest-shaped items to ONE summary through as many levels as
+ * needed. A wave is either merged, taken as-is when it has a single item, or
+ * split (with the children cached) when the provider rejects its size/output.
+ */
+async function reduceLevel({
+  items,
+  level,
+  scope,
+  sourceType,
+  courseContext,
+  deps,
+  job,
+  saved,
+  promptFor,
+  stepFor = null,
+  depth = 0,
+}) {
+  const list = items.filter(Boolean);
+  if (!list.length) return null;
+  if (list.length === 1) return list[0];
+  if (depth > 8 || level > 16) {
+    // The provider cannot merge even two small items. Concatenating preserves
+    // every fact and lets the caller continue; failing here would lose a
+    // complete document to one stubborn response.
+    return list.reduce((acc, item) => (acc ? mergeSummaries(acc, item) : item), null);
+  }
+
+  const model = mergeModel();
+  let waves = partitionWaves(list, reduceBudget());
+  // Every item can exceed the wave budget (dense digests). Returning them as
+  // single-item waves would never shrink the list, so force pairs; mergeDigests
+  // compacts each payload with slimDigest instead of slicing JSON.
+  if (waves.length > 1 && waves.every((wave) => wave.length === 1)) {
+    waves = [];
+    for (let index = 0; index < list.length; index += 2) {
+      waves.push(list.slice(index, index + 2));
+    }
+  }
+  const total = waves.length;
+  const results = [];
+
+  for (const [index, wave] of waves.entries()) {
+    if (!wave.length) continue;
+    if (wave.length === 1) {
+      results.push(wave[0]);
+      await deps.setStage("merging", { done: index + 1, total });
+      continue;
+    }
+    const key = reduceWaveKey(scope, level, index, wave, model);
+    const cached = saved[key];
+    if (!cached && deps.deadline && Date.now() > deps.deadline) {
+      throw new JobYieldError("merging");
+    }
+    let result = cached;
+    if (!result) {
+      const prompt = promptFor(index, total, level);
+      const step = stepFor ? stepFor(level, index) : level === 0 ? "reduce" : "reduce_wave";
+      try {
+        result = await withStage(deps, "merging", () =>
+          mergeDigests({ digests: wave, prompt, step, deps }),
+        );
+      } catch (error) {
+        if (!isSplittableReduceError(error) || wave.length < 2) throw error;
+        console.warn(
+          `[reduce] job=${job.id} scope=${scope} level=${level} wave=${index} split=${wave.length} code=${error?.kind ?? error?.name ?? "error"}`,
+        );
+        const mid = Math.ceil(wave.length / 2);
+        const left = await reduceLevel({
+          items: wave.slice(0, mid),
+          level: level + 1,
+          scope: `${scope}:S${index}a`,
+          sourceType,
+          courseContext,
+          deps,
+          job,
+          saved,
+          promptFor,
+          stepFor,
+          depth: depth + 1,
+        });
+        const right = await reduceLevel({
+          items: wave.slice(mid),
+          level: level + 1,
+          scope: `${scope}:S${index}b`,
+          sourceType,
+          courseContext,
+          deps,
+          job,
+          saved,
+          promptFor,
+          stepFor,
+          depth: depth + 1,
+        });
+        result =
+          left && right
+            ? await reduceLevel({
+                items: [left, right],
+                level: level + 1,
+                scope: `${scope}:S${index}m`,
+                sourceType,
+                courseContext,
+                deps,
+                job,
+                saved,
+                promptFor,
+                stepFor,
+                depth: depth + 1,
+              })
+            : (left ?? right);
+      }
+      if (result) {
+        saved[key] = result;
+        await patchReduceEntry(job, key, result, deps);
+      }
+    }
+    results.push(result);
+    await deps.setStage("merging", { done: index + 1, total });
+  }
+
+  // One wave covers the level. More than one needs another level.
+  return reduceLevel({
+    items: results,
+    level: level + 1,
+    scope,
+    sourceType,
+    courseContext,
+    deps,
+    job,
+    saved,
+    promptFor,
+    stepFor,
+    depth,
+  });
+}
+
+/**
+ * Group digests by outline section, reduce each section hierarchically, then
+ * reduce the section summaries into ONE document overview. Every successful
+ * wave is checkpointed under a stable key, so a resumed pass pays only for the
+ * waves that have not finished yet.
  */
 export async function reduceDigests({ job, digests, groups, sections, sourceType, courseContext, deps }) {
-  const reduceKey = (id, waveIndex, model) => `${id}:${waveIndex}:${PROMPT_VERSION}:${model}`;
   const saved = { ...(job.checkpoint?.reduce ?? {}) };
-
+  const digestKey = (group) => digestCacheKey(group, bulkModel());
   const summariesFor = {};
 
+  const sectionPrompt = (index, count) =>
+    reducePrompt({ course: courseContext, sourceType, groupIndex: index, groupCount: count });
   for (const section of sections) {
     const entries = groups
       .filter((group) => group.sectionId === section.id)
-      .map((group) => digests[digestCacheKey(group, bulkModel())])
+      .map((group) => digests[digestKey(group)])
       .filter(Boolean);
     if (!entries.length) continue;
 
-    const waves = partitionWaves(entries, longDoc.reduceMaxChars);
-    let merged = null;
-    for (const [waveIndex, wave] of waves.entries()) {
-      const cacheKey = reduceKey(section.id, waveIndex, mergeModel());
-      const cached = saved[cacheKey];
-      if (!cached && deps.deadline && Date.now() > deps.deadline) {
-        throw new JobYieldError("merging");
-      }
-      const waveResult = cached ?? (await withStage(deps, "merging", () =>
-        mergeDigests({
-          digests: wave,
-          prompt: reducePrompt({ course: courseContext, sourceType, groupIndex: waveIndex, groupCount: waves.length }),
-          step: waveIndex === 0 ? "reduce" : "reduce_wave",
-          deps,
-        })));
-      if (!cached) {
-        saved[cacheKey] = waveResult;
-        // Reduce owns only `reduce`: merging the patch keeps the digest map
-        // (and every other stage's keys) that earlier writes put on the row.
-        await patchCheckpoint(job.id, { reduce: saved });
-      }
-      merged = merged ? mergeSummaries(merged, waveResult) : waveResult;
-    }
-    summariesFor[section.id] = { summary: merged, section };
+    const summary = await reduceLevel({
+      items: entries,
+      level: 0,
+      scope: `section:${section.id}`,
+      sourceType,
+      courseContext,
+      deps,
+      job,
+      saved,
+      promptFor: sectionPrompt,
+      stepFor: (level) => (level === 0 ? "reduce" : "reduce_wave"),
+    });
+    if (summary) summariesFor[section.id] = { summary, section };
   }
 
   const summaryList = Object.values(summariesFor);
   const overviewKey = `overview:${PROMPT_VERSION}:${mergeModel()}`;
-  let overview = saved[`overview:${PROMPT_VERSION}:${mergeModel()}`];
+  let overview = saved[overviewKey];
   if (!overview && summaryList.length) {
-    // Capacity-based waves over the section summaries; oversized summaries
-    // cascade instead of overflowing the merge prompt.
-    const waves = partitionWaves(
-      summaryList.map((item) => item.summary),
-      longDoc.reduceMaxChars,
-    );
-    let merged = null;
-    for (const [waveIndex, wave] of waves.entries()) {
-      const cacheKey = reduceKey("overview", waveIndex, mergeModel());
-      if (!saved[cacheKey] && deps.deadline && Date.now() > deps.deadline) {
-        throw new JobYieldError("overview");
-      }
-      const waveResult = saved[cacheKey] ?? (await withStage(deps, "merging", () =>
-        mergeDigests({
-          digests: wave,
-          prompt: overviewPrompt({ course: courseContext, sourceType, sectionCount: summaryList.length }),
-          step: "overview",
-          deps,
-        })));
-      if (!saved[cacheKey]) {
-        saved[cacheKey] = waveResult;
-        await patchCheckpoint(job.id, { reduce: saved });
-      }
-      merged = merged ? mergeSummaries(merged, waveResult) : waveResult;
+    const overviewPromptFor = (index, count, level) =>
+      level === 0
+        ? overviewPrompt({ course: courseContext, sourceType, sectionCount: summaryList.length })
+        : reducePrompt({ course: courseContext, sourceType, groupIndex: index, groupCount: count });
+    overview = await reduceLevel({
+      items: summaryList.map((item) => item.summary),
+      level: 0,
+      scope: "overview",
+      sourceType,
+      courseContext,
+      deps,
+      job,
+      saved,
+      promptFor: overviewPromptFor,
+      stepFor: (level) => (level === 0 ? "overview" : "overview_wave"),
+    });
+    if (overview) {
+      saved[overviewKey] = overview;
+      await patchReduceEntry(job, overviewKey, overview, deps);
     }
-    overview = merged;
-    saved[overviewKey] = overview;
-    await patchCheckpoint(job.id, { reduce: saved });
   }
 
   return { summariesFor, summaryList, overview };
@@ -759,17 +962,26 @@ Rules:
 Return ONLY the JSON object.`;
 
   const attempt = async (stricter) => {
-    const result = await chatCompletion({
-      system: stricter
-        ? "You are Sua. Output ONLY valid JSON matching the requested study pack schema exactly — no prose, no code fences."
-        : "You are Sua, an exam-focused study assistant for African university students. Use only the material provided. Write clearly in simple English. Output only valid JSON.",
-      user: `${prompt}\n\n=== LECTURE MATERIAL ===\n${material}`,
-      model: bulkModel(),
-      json: true,
-      maxTokens: notePipeline.studySetMaxTokens,
-      temperature: stricter ? 0 : 0.2,
-    });
-    await deps.record(stricter ? "generate_study_set_retry" : "generate_study_set", result);
+    const step = stricter ? "generate_study_set_retry" : "generate_study_set";
+    const started = Date.now();
+    let result;
+    try {
+      result = await chatCompletion({
+        system: stricter
+          ? "You are Sua. Output ONLY valid JSON matching the requested study pack schema exactly — no prose, no code fences."
+          : "You are Sua, an exam-focused study assistant for African university students. Use only the material provided. Write clearly in simple English. Output only valid JSON.",
+        user: `${prompt}\n\n=== LECTURE MATERIAL ===\n${material}`,
+        model: bulkModel(),
+        json: true,
+        maxTokens: notePipeline.studySetMaxTokens,
+        temperature: stricter ? 0 : 0.2,
+        timeoutMs: timeoutForDeadline(deps.deadline),
+      });
+    } catch (error) {
+      await deps.recordFailure?.(step, error, Date.now() - started);
+      throw error;
+    }
+    await deps.record(step, result);
     const parsed = parseJsonObject(result.text);
     return parsed;
   };
@@ -846,14 +1058,23 @@ async function writeBody({ system, material, deps, step }) {
         ? `This is part ${index + 1}/${parts.length} of one long material. Continue the note seamlessly: keep one coherent heading structure and do not repeat a heading.` +
           (tail ? `\nThe previous part ended with:\n"""\n${tail}\n"""\nContinue from there.` : "")
         : "";
-    const result = await chatCompletion({
-      system,
-      user: `${continuation}\n\n=== MATERIAL ===\n${part}`,
-      model: strongModel(),
-      temperature: 0.2,
-      maxTokens: notePipeline.writeMaxTokens,
-    });
-    await deps.record(index === 0 ? step : `${step}_part`, result);
+    const stepName = index === 0 ? step : `${step}_part`;
+    const started = Date.now();
+    let result;
+    try {
+      result = await chatCompletion({
+        system,
+        user: `${continuation}\n\n=== MATERIAL ===\n${part}`,
+        model: strongModel(),
+        temperature: 0.2,
+        maxTokens: notePipeline.writeMaxTokens,
+        timeoutMs: timeoutForDeadline(deps.deadline),
+      });
+    } catch (error) {
+      await deps.recordFailure?.(stepName, error, Date.now() - started);
+      throw error;
+    }
+    await deps.record(stepName, result);
     const body = String(result.text ?? "").trim();
     if (body) written.push(body);
   }
@@ -971,11 +1192,13 @@ async function withUserAliveCheck(job) {
  * Whole long-file flow for one job. Returns { meta, parts } where meta feeds
  * job.payload diagnostics exactly like the short pipeline's meta.
  */
-export async function runLongDocJob({ job, note, kind, clerkId, deps }) {
+export async function runLongDocJob({ job, note, kind, clerkId, deps, source: providedSource = null }) {
   const startedMs = Date.now();
 
   await deps.assertAlive();
-  const source = await loadChunkedSource(clerkId, note);
+  // The caller already loaded the chunk rows; re-reading them doubled the
+  // first query of every long pass.
+  const source = providedSource ?? (await loadChunkedSource(clerkId, note));
   if (!source) throw new Error("long-doc invoked without extracted chunks");
 
   const courseContext = [note.course?.name, note.course?.code ? `course code ${note.course.code}` : ""]

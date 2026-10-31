@@ -18,6 +18,7 @@ import {
   geminiTranscribe,
   chatCompletion,
   strongModel,
+  timeoutForDeadline,
 } from "./ai.js";
 // extract.js pulls in @napi-rs/canvas (a native .node binary) and pdf-parse,
 // neither of which can be bundled into a Cloudflare Worker. Both functions are
@@ -67,6 +68,27 @@ function mimeFor(asset) {
 
 function text(value) {
   return String(value ?? "").trim();
+}
+
+/**
+ * One model call with the invocation deadline applied and a durable record for
+ * failures. A stage must never start a call it cannot finish before the runner
+ * deadline; the caller sees the typed AiError and decides whether to retry,
+ * split or surface it.
+ */
+async function callChat(deps, step, args) {
+  const started = Date.now();
+  try {
+    const result = await chatCompletion({
+      ...args,
+      timeoutMs: args.timeoutMs ?? timeoutForDeadline(deps?.deadline),
+    });
+    await deps?.record?.(step, result);
+    return result;
+  } catch (error) {
+    await deps?.recordFailure?.(step, error, Date.now() - started);
+    throw error;
+  }
 }
 
 export function activeAssets(note) {
@@ -526,13 +548,12 @@ async function aiCleanup(segments, courseContext, deps) {
   const cleaned = [];
   for (const chunk of chunks) {
     const input = chunk.map(labelOf).join("\n\n");
-    const result = await chatCompletion({
+    const result = await callChat(deps, "cleanup", {
       system: cleanupPrompt({ course: courseContext }),
       user: input,
       model: bulkModel(),
       temperature: 0,
     });
-    await deps.record("cleanup", result);
     const parsed = parseTranscript(result.text);
     if (parsed.length === chunk.length) {
       cleaned.push(...parsed);
@@ -682,7 +703,7 @@ export { digestChunk, digestToText, rangeLabel, mapWithLimit, parseJsonObject };
 
 async function digestChunk(chunk, context, deps) {
   const attempt = async (suffix) => {
-    const result = await chatCompletion({
+    const result = await callChat(deps, suffix ? "digest_retry" : "digest", {
       system: digestPrompt({
         course: context.courseContext,
         sourceType: context.sourceType,
@@ -695,7 +716,6 @@ async function digestChunk(chunk, context, deps) {
       temperature: 0,
       maxTokens: notePipeline.digestMaxTokens,
     });
-    await deps.record(suffix ? "digest_retry" : "digest", result);
     const parsed = parseJsonObject(result.text);
     const problem = parsed ? validateDigest(parsed) : "unparseable JSON";
     // A response that stops mid-object was cut off by the output budget; asking
@@ -801,14 +821,13 @@ async function writeParts({ system, material, context, deps, step }) {
           "keep one coherent heading structure and do not repeat a heading." +
           (tail ? `\nThe previous part ended with:\n"""\n${tail}\n"""\nContinue from there.` : "")
         : "";
-    const result = await chatCompletion({
+    const result = await callChat(deps, index === 0 ? step : `${step}_part`, {
       system,
       user: `${context}\n${continuation}\n\n=== MATERIAL ===\n${part}`,
       model: strongModel(),
       temperature: 0.2,
       maxTokens: notePipeline.writeMaxTokens,
     });
-    await deps.record(index === 0 ? step : `${step}_part`, result);
     const body = text(result.text);
     if (body) written.push(body);
   }

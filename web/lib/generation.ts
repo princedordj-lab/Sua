@@ -24,6 +24,7 @@ export const AI_ACTIVE_STATES: ReadonlySet<AiState> = new Set<AiState>([
   "checking",
   "summarising",
   "making_cards",
+  "saving",
 ]);
 
 export function isAiActive(state: AiState | null | undefined): boolean {
@@ -39,11 +40,14 @@ export function aiStageLabel(
   {
     sourceType,
     progress,
+    detail,
   }: {
     sourceType?: ServerNote["sourceType"];
     progress?: { done: number; total: number } | null;
+    detail?: string | null;
   } = {},
 ): string {
+  if (detail) return detail;
   const progressSuffix =
     progress && progress.total > 1 && progress.done > 0
       ? ` (${Math.min(progress.done, progress.total)} of ${progress.total})`
@@ -64,9 +68,8 @@ export function aiStageLabel(
     case "digesting":
       return "Pulling out the important parts…" + progressSuffix;
     case "merging":
-      // Long-file reduce stage; the server counter is in digest groups, so no
-      // "(x of y)" suffix here.
-      return "Combining the important parts…";
+      // Reduce reports completed waves, so the counter is meaningful here.
+      return "Combining the important parts…" + progressSuffix;
     case "writing":
       return (
         (kind === "course_reference"
@@ -79,6 +82,8 @@ export function aiStageLabel(
       return "Writing your summary…";
     case "making_cards":
       return "Making flashcards and a quiz…";
+    case "saving":
+      return "Saving your study materials…";
     case "marking":
       return "Marking your quiz…";
     default:

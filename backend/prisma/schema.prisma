@@ -234,6 +234,8 @@ model Job {
   // Hash of the cleaned source; identical requests reuse existing outputs.
   sourceHash  String?
   startedAt   DateTime?
+  // Last proof of life from a worker pass (stage, progress or checkpoint write).
+  heartbeatAt DateTime?
   finishedAt  DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -244,6 +246,7 @@ model Job {
   @@index([noteId])
   @@index([state, runAfter])
   @@index([lockedUntil])
+  @@index([state, heartbeatAt])
   @@map("jobs")
 }
 
@@ -274,6 +277,11 @@ model AiCall {
   promptTokens     Int      @default(0)
   completionTokens Int      @default(0)
   usdMicros        Int      @default(0)
+  // Diagnostics for slow/failed calls. Rows are written for failures too, so a
+  // stalled reduce wave is visible without reading note content.
+  durationMs       Int?
+  status           Int?
+  errorCode        String?
   createdAt        DateTime @default(now())
 
   @@index([jobId])

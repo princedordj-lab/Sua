@@ -214,11 +214,13 @@ export function isUserFacing(error) {
  * Kept out of the student-facing vocabulary on purpose.
  */
 export class JobYieldError extends Error {
-  constructor(stage = "run") {
+  constructor(stage = "run", { retryAfterMs = null, reason = null } = {}) {
     super(`Job yielded at ${stage}`);
     this.name = "JobYieldError";
     this.yield = true;
     this.stage = stage;
+    this.retryAfterMs = retryAfterMs;
+    this.reason = reason;
   }
 }
 
