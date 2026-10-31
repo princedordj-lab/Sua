@@ -1,6 +1,6 @@
 import { prisma } from "../config/prisma.js";
 import { processJob } from "./pipeline.js";
-import { extractDocument, renderPdfPage } from "./extract.js";
+import { extractDocument, isRenderedPageBlank, renderPdfPage } from "./extract.js";
 import { extractNext } from "./extraction.js";
 import { isUserFacing, isJobYield, USER_MESSAGES, longDoc } from "../config/ai-pipeline.js";
 
@@ -484,7 +484,7 @@ async function processClaimedJob(claimed, deadline = null) {
   // 4. Run pipeline
   const started = Date.now();
   try {
-    await processJob(jobId, { extractDocument, renderPdfPage }, deadline);
+    await processJob(jobId, { extractDocument, renderPdfPage, isRenderedPageBlank }, deadline);
     console.log(`Job ${jobId} completed in ${Date.now() - started}ms`);
     // Release lock upon success
     await prisma.job.updateMany({

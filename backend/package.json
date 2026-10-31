@@ -7,6 +7,8 @@
     "start": "tsx src/index.js",
     "dev": "tsx watch src/index.js",
     "eval": "tsx scripts/ai-eval.mjs",
+    "test:extraction": "tsx scripts/test-extraction-pipeline.mjs",
+    "test:pdf": "tsx scripts/test-pdf-extraction.mjs",
     "migrate:cloudinary-assets": "tsx scripts/migrate-cloudinary-assets.js",
     "check:neon-storage": "tsx scripts/check-neon-storage.js",
     "setup:neon-storage": "tsx scripts/create-neon-bucket.js",

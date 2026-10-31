@@ -1,9 +1,15 @@
 import JSZip from "jszip";
+import { normalizePageText } from "./page-text.js";
+
+// Page quality rules live in a dependency-free module so the note pipeline can
+// share them without pulling the native canvas/PDF stack into its bundle.
+export { classifyPageText, normalizePageText } from "./page-text.js";
 
 // Server-side text extraction for uploaded documents. Audio transcription and
 // image OCR belong to the AI pipeline — everything here is pure JS, and the
-// PDF path renders pages to images only when the pipeline explicitly asks for
-// an OCR fallback.
+// PDF path renders pages to images only for the fallback that reads a page with
+// no usable text layer (a scan). Ordinary text PDFs never render, never OCR and
+// never reach a model.
 //
 // Failures return null instead of throwing: an upload must succeed even when
 // a file turns out to be unparseable, the note simply has no source text.
@@ -168,12 +174,7 @@ export async function renderPdfPage(buffer, pageNumber, scale = 2) {
 }
 
 function normalizeText(value) {
-  return String(value ?? "")
-    .replace(/^\uFEFF/, "")
-    .replace(/\r\n/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return normalizePageText(value);
 }
 
 // pdf-parse transfers typed arrays to its worker, so each parse gets its own
@@ -246,17 +247,28 @@ export async function pdfOutline(buffer) {
   }
 }
 
+let canvasModule;
 let canvasGlobals;
+
+// Literal specifier so Vercel's Node File Trace (NFT) traces the prebuilt
+// `.node` binary into the deployment bundle. Lazy on purpose: a missing binary
+// must degrade PDF work to null, never crash the API at import time.
+async function loadCanvas() {
+  if (!canvasModule) {
+    canvasModule = import("@napi-rs/canvas").catch((error) => {
+      console.warn(
+        `Canvas unavailable (@napi-rs/canvas): ${error?.message ?? error}`,
+      );
+      return null;
+    });
+  }
+  return canvasModule;
+}
 
 async function installCanvasGlobals() {
   if (!canvasGlobals) {
     canvasGlobals = Promise.all([
-      import("@napi-rs/canvas").catch((error) => {
-        console.warn(
-          `Canvas globals unavailable (@napi-rs/canvas): ${error?.message ?? error}`,
-        );
-        return null;
-      }),
+      loadCanvas(),
       // Literal specifier so Vercel's Node File Trace (NFT) traces pdf.worker.mjs into the deployment bundle
       import("pdfjs-dist/legacy/build/pdf.worker.mjs").catch(() => null),
     ]).then(([canvas]) => canvas);
@@ -265,6 +277,67 @@ async function installCanvasGlobals() {
   if (!canvas) return;
   for (const name of ["DOMMatrix", "ImageData", "Path2D"]) {
     if (!globalThis[name] && canvas[name]) globalThis[name] = canvas[name];
+  }
+}
+
+// Below this share of non-white pixels a rendered page is treated as blank. A
+// scanned page — the case the fallback exists for — is an order of magnitude
+// above it, while a lone page number or a hairline rule stays far below.
+const BLANK_PAGE_INK_RATIO = Number(process.env.PDF_BLANK_INK_RATIO ?? 0.001);
+// A pixel darker than this is ink rather than paper (or a white margin).
+const INK_LUMA = 235;
+// Blankness is a coarse property: sampling ~100k pixels is plenty for A4 at
+// OCR scale and keeps a 300-page probe cheap.
+const BLANK_PROBE_SAMPLES = 100_000;
+
+/**
+ * True when a rendered page carries no visible content.
+ *
+ * This is what keeps the blank pages of an ordinary PDF from spending a model
+ * OCR call — a page with nothing on it has nothing to read — while a page that
+ * is only a photograph of paper (a scan) is not blank and still gets read.
+ *
+ * Returns false when the pixels cannot be inspected: "unknown" must never
+ * cancel a legitimate fallback.
+ */
+export async function isRenderedPageBlank(imageBytes) {
+  const bytes =
+    Buffer.isBuffer(imageBytes) || imageBytes instanceof Uint8Array ? imageBytes : null;
+  // Unknown input is not evidence of a blank page: never cancel a fallback.
+  if (!bytes) return false;
+  if (!bytes.length) return true;
+  try {
+    const canvas = await loadCanvas();
+    if (!canvas) return false;
+    const image = await canvas.loadImage(bytes);
+    const width = image.width ?? 0;
+    const height = image.height ?? 0;
+    if (!width || !height) return false;
+    const probe = canvas.createCanvas(width, height);
+    const context = probe.getContext("2d");
+    context.drawImage(image, 0, 0);
+    const { data } = context.getImageData(0, 0, width, height);
+    const step = Math.max(
+      1,
+      Math.floor(Math.sqrt((width * height) / BLANK_PROBE_SAMPLES)),
+    );
+    let sampled = 0;
+    let ink = 0;
+    for (let y = 0; y < height; y += step) {
+      for (let x = 0; x < width; x += step) {
+        const offset = (y * width + x) * 4;
+        sampled += 1;
+        if (data[offset + 3] === 0) continue;
+        const luma =
+          0.299 * data[offset] + 0.587 * data[offset + 1] + 0.114 * data[offset + 2];
+        if (luma < INK_LUMA) ink += 1;
+      }
+    }
+    if (!sampled) return false;
+    return ink / sampled < BLANK_PAGE_INK_RATIO;
+  } catch (error) {
+    console.warn(`Blank-page probe failed: ${error?.message ?? error}`);
+    return false;
   }
 }
 

@@ -210,6 +210,10 @@ const evalDeps = {
     const { renderPdfPage } = await import("../src/lib/extract.js");
     return renderPdfPage(bytes, page, scale);
   },
+  isRenderedPageBlank: async (image) => {
+    const { isRenderedPageBlank } = await import("../src/lib/extract.js");
+    return isRenderedPageBlank(image);
+  },
 };
 
 function depsFor(bytes) {
