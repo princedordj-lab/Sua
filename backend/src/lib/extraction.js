@@ -302,8 +302,11 @@ export async function runExtractionPass(
     );
     // Nothing readable anywhere in the file: this is a scan. One model read of
     // the whole document beats OCR'ing it page by page, and a failure only
-    // costs the page-wise fallback below — never the upload.
-    if (localPdf.ok && localPdf.usablePages === 0) {
+    // costs the page-wise fallback below — never the upload. First pass only: a
+    // resumed pass finishes with the page-wise fallback it already started
+    // instead of replacing the pages it recovered with a second full read.
+    const firstPass = (asset.nextPage ?? 1) <= 1 && (asset.pagesDone ?? 0) === 0;
+    if (localPdf.ok && localPdf.usablePages === 0 && firstPass) {
       const native = await tryNativeRead(asset, bytes, format, started + budgetMs, deps);
       if (native) {
         console.log(
@@ -323,7 +326,7 @@ export async function runExtractionPass(
     ? ` usable=${localPdf.usablePages} fallback=${localPdf.fallbackPages.length}`
     : "";
   console.log(
-    `[extract] summary asset=${assetId} format=${format} source=local pages=${outcome.pagesDone ?? 0}/${outcome.pagesTotal ?? 0}${localFields} ocr=${outcome.ocrPages ?? 0} blank=${outcome.blankPages ?? 0} unrecovered=${outcome.unrecoveredPages ?? 0} state=${outcome.state ?? "failed"} code=${outcome.errorCode ?? "-"} ms=${Date.now() - started}`,
+    `[extract] summary asset=${assetId} format=${format} source=local pages=${outcome.pagesDone ?? 0}/${outcome.pagesTotal ?? 0}${localFields} ocr=${outcome.ocrPages ?? 0} blank=${outcome.blankPages ?? 0} skipped=${outcome.skippedPages ?? 0} unrecovered=${outcome.unrecoveredPages ?? 0} state=${outcome.state ?? "failed"} code=${outcome.errorCode ?? "-"} ms=${Date.now() - started}`,
   );
   return outcome;
 }
@@ -698,7 +701,7 @@ async function extractIntoChunks(asset, bytes, format, deadline, deps = extracti
         ocrPagesDone: asset.ocrPages,
         deps,
       })
-    : { ocrPages: 0, blankPages: 0, unrecoveredPages: 0 };
+    : { ocrPages: 0, blankPages: 0, unrecoveredPages: 0, skippedPages: 0 };
 
   const storedCount = await db.sourceChunk.count({
     where: { assetId: asset.id, index: { gt: 0 } },
@@ -707,7 +710,8 @@ async function extractIntoChunks(asset, bytes, format, deadline, deps = extracti
   // genuinely finished everything the caps allow.
   const handledAll = storedCount >= Math.min(pagesTotal, cap) && !stoppedByBudget;
   const finalState = handledAll || cappedByLimit ? "done" : "partial";
-  const truncated = cappedByLimit || stoppedByBudget || asset.truncated;
+  // Pages the OCR cap could not reach are content the student is told about.
+  const truncated = cappedByLimit || stoppedByBudget || ocrResult.skippedPages > 0 || asset.truncated;
 
   // Compat: maintain the flat extracted-text column for legacy readers, with
   // the same 100k cap extract.js always applied.
@@ -744,6 +748,7 @@ async function extractIntoChunks(asset, bytes, format, deadline, deps = extracti
     ocrPages: (asset.ocrPages || 0) + ocrResult.ocrPages,
     blankPages: ocrResult.blankPages,
     unrecoveredPages: ocrResult.unrecoveredPages,
+    skippedPages: ocrResult.skippedPages,
     fallbackPages: needsFallback,
     truncated,
   };
@@ -780,6 +785,9 @@ async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, de
   let processed = 0;
   let blankPages = 0;
   let unrecoveredPages = 0;
+  // Pages the file-level OCR cap did not let us touch: they stay pending and
+  // the asset is flagged truncated instead of silently losing content.
+  const touched = new Set();
   for (let start = 0; start < candidates.length && processed < remaining; start += longDoc.ocrBatchPages) {
     if (Date.now() > deadline) break;
     const slice = candidates.slice(start, start + Math.min(longDoc.ocrBatchPages, remaining - processed));
@@ -792,6 +800,7 @@ async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, de
       if (await deps.isRenderedPageBlank(image)) {
         // Blank page: there is nothing to read, so nothing to spend on.
         blankPages += 1;
+        touched.add(row.index);
         continue;
       }
       pages.push({ index: row.index, image });
@@ -817,6 +826,7 @@ async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, de
         }
       }
       processed += 1;
+      touched.add(page.index);
       const usable = String(text ?? "").trim();
       if (!usable) unrecoveredPages += 1;
       await db.sourceChunk.update({
@@ -833,8 +843,9 @@ async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, de
       .update({ where: { id: asset.id }, data: { ocrPages: (ocrPagesDone || 0) + processed } })
       .catch(() => {});
   }
+  const skippedPages = candidates.filter((row) => !touched.has(row.index)).length;
   console.log(
-    `[extract] stage=pdf_fallback asset=${asset.id} candidates=${candidates.length} rendered=${processed} blank=${blankPages} unrecovered=${unrecoveredPages} ms=${Date.now() - started}`,
+    `[extract] stage=pdf_fallback asset=${asset.id} candidates=${candidates.length} rendered=${processed} blank=${blankPages} skipped=${skippedPages} unrecovered=${unrecoveredPages} ms=${Date.now() - started}`,
   );
-  return { ocrPages: processed, blankPages, unrecoveredPages };
+  return { ocrPages: processed, blankPages, unrecoveredPages, skippedPages };
 }

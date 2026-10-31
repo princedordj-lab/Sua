@@ -390,6 +390,7 @@ async function runPass({ pdf, providers, budgetMs = longDoc.extractBudgetMs, for
   assert.equal(providers.calls.ocrSingle, 0);
   assert.equal(providers.calls.nativeRead, 0);
   assert.equal(providers.calls.renders, 1, "the blank page is rendered locally to prove it is blank");
+  assert.equal(state.asset.truncated, false, "a blank page is not reported as missing content");
   console.log("✓ 3. Blank page: proved blank locally, no model call, extraction still settles");
 }
 // ---------------------------------------------------------------------------
@@ -493,8 +494,9 @@ async function runPass({ pdf, providers, budgetMs = longDoc.extractBudgetMs, for
   });
   const deps = { ...providers.deps, db: fake.db, readAssetBytes: async () => pdf };
 
-  // First pass: the budget is already spent, so it stops mid-file.
-  const first = await runExtractionPass(fake.state.asset.id, 0, deps);
+  // First pass: the budget is already spent, so it stops mid-file. A negative
+  // budget guarantees the deadline is in the past on the first page.
+  const first = await runExtractionPass(fake.state.asset.id, -1, deps);
   assert.equal(first.state, "partial", "an out-of-budget pass stays resumable");
   const afterFirst = fake.rows().length;
   assert.ok(afterFirst >= 1 && afterFirst < 12, "partial work is checkpointed");
@@ -603,6 +605,53 @@ async function runPass({ pdf, providers, budgetMs = longDoc.extractBudgetMs, for
   assert.equal(providers.calls.nativeRead, 0);
   assert.equal(providers.calls.ocrBatch, 0);
   console.log("✓ 11. DOCX still extracted locally with its original chunk status");
+}
+
+// ---------------------------------------------------------------------------
+// 12. A resumed scan finishes page-wise instead of re-reading the whole file
+// ---------------------------------------------------------------------------
+{
+  const scan = await scannedPageJpeg("Scanned lecture 1");
+  const pdf = buildPdf(Array.from({ length: 6 }, () => ({ image: scan })));
+
+  // A resumed pass: page 1 already has its (empty) row from an earlier pass.
+  const fake = createFakeDb({ format: "pdf", nextPage: 2, pagesDone: 1 });
+  await fake.db.sourceChunk.create({
+    data: {
+      assetId: "asset-1",
+      userId: "user-1",
+      index: 1,
+      label: "p. 1",
+      startPage: 1,
+      endPage: 1,
+      text: "",
+      hash: "sha1-empty",
+      status: "pending",
+    },
+  });
+  const providers = createProviders({
+    native: {
+      ok: true,
+      model: "fake-reader",
+      pageCount: 6,
+      aligned: true,
+      pages: [{ page: 1, label: "p. 1", text: "whole-file read" }],
+      digest: null,
+      ms: 5,
+    },
+    ocr: ({ pages }) => pages.map((page) => ({ text: `Recovered scan page ${page.index}` })),
+  });
+  const deps = { ...providers.deps, db: fake.db, readAssetBytes: async () => pdf };
+
+  const outcome = await runExtractionPass(fake.state.asset.id, longDoc.extractBudgetMs, deps);
+  assert.equal(outcome.state, "done");
+  assert.equal(providers.calls.nativeRead, 0, "a resumed scan is not re-read as a whole file");
+  assert.ok(providers.calls.ocrBatch >= 1, "the page-wise fallback did the recovery");
+  const rows = fake.rows().filter((row) => row.index > 0);
+  assert.deepEqual(rows.map((row) => row.index), [1, 2, 3, 4, 5, 6]);
+  assert.ok(rows.every((row) => row.status === "done" && row.text.length));
+  assert.equal(fake.state.asset.truncated, false);
+  console.log("✓ 12. Resumed scan: page-wise recovery, whole-file read not repeated");
 }
 
 console.log("\nAll PDF extraction checks passed.");
