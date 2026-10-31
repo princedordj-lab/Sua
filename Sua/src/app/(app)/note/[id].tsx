@@ -31,6 +31,7 @@ import {
 } from "lucide-react-native";
 import { BottomSheet } from "../../../components/sheets";
 import { Markdown, type MarkdownScale } from "../../../components/markdown";
+import { SectionReader } from "../../../components/note/section-reader";
 import {
   AiFailedCard,
   AiProgressCard,
@@ -47,10 +48,12 @@ import {
   enqueueGeneration,
   getLastGeneration,
   getNote,
+  getSetting,
   isNotePendingSync,
   listFlashcards,
   listQuizzes,
   pullCourseNotes,
+  setSetting,
   type LastGeneration,
   type LocalFlashcard,
   type LocalQuiz,
@@ -73,6 +76,28 @@ import { useApp } from "../../../state/AppContext";
 import type { JobMeta } from "../../../lib/types";
 
 type ReaderTab = "notes" | "summary" | "cards" | "quiz";
+
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+function createdLabel(iso: string | null | undefined) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${MONTHS[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+}
 
 // The pipeline's wording for failures it did not classify lives in lib/generate
 // as GENERIC_FAILURE; every terminal failure renders through userFacingMessage.
@@ -107,6 +132,10 @@ export default function NoteView() {
   );
   const [tab, setTab] = useState<ReaderTab>("notes");
   const [showOriginal, setShowOriginal] = useState(false);
+  // Where this device stopped reading; the reader restores it on open.
+  const [savedSectionId, setSavedSectionId] = useState<string | null>(null);
+  const [positionReady, setPositionReady] = useState(false);
+  const scrollRef = useRef<ScrollView>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
@@ -174,6 +203,35 @@ export default function NoteView() {
       };
     }, [load]),
   );
+
+  // Reading position is device-local UI state: it never touches the note row
+  // or sync, so paging cannot create or modify a Note record.
+  useEffect(() => {
+    let cancelled = false;
+    void getSetting(db, `note_section:${id}`)
+      .then((value) => {
+        if (!cancelled) setSavedSectionId(value || null);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setPositionReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [db, id]);
+
+  const saveSection = useCallback(
+    (sectionId: string) => {
+      setSavedSectionId(sectionId);
+      void setSetting(db, `note_section:${id}`, sectionId).catch(() => {});
+    },
+    [db, id],
+  );
+
+  const scrollTop = useCallback(() => {
+    scrollRef.current?.scrollTo({ y: 0, animated: true });
+  }, []);
 
   // Opening a note is the last chance to notice work the server finished while
   // this device was closed: the stage poll below only runs while a generation
@@ -361,6 +419,23 @@ export default function NoteView() {
     original && body && original !== body.trim(),
   );
 
+  // The paged reader only mounts once the saved position is known, so the
+  // first page shown is the page this device was reading.
+  const notesContent = showOriginal ? (
+    <Markdown text={original} scale={noteScaleValue} />
+  ) : positionReady ? (
+    <SectionReader
+      text={body}
+      scale={noteScaleValue}
+      initialSectionId={savedSectionId}
+      courseId={note?.courseId ?? null}
+      onSectionChange={saveSection}
+      onRequestScrollTop={scrollTop}
+    />
+  ) : (
+    <Markdown text={body} scale={noteScaleValue} />
+  );
+
   const tabs = useMemo<SegmentOption<ReaderTab>[]>(
     () => [
       { key: "notes", label: "Notes" },
@@ -435,6 +510,7 @@ export default function NoteView() {
   return (
     <SafeAreaView className="flex-1 bg-cream">
       <ScrollView
+        ref={scrollRef}
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 40 }}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={pullToRefresh} />
@@ -457,9 +533,14 @@ export default function NoteView() {
             >
               {note?.title || "Untitled note"}
             </Text>
-            {course ? (
+            {course || note?.createdAt ? (
               <Text numberOfLines={1} className="text-caption text-ink-faint">
-                {course.code || course.name}
+                {[
+                  course ? course.code || course.name : "",
+                  createdLabel(note?.createdAt),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
               </Text>
             ) : null}
           </View>
@@ -555,10 +636,7 @@ export default function NoteView() {
                       ) : undefined
                     }
                   >
-                    <Markdown
-                      text={showOriginal ? original : body}
-                      scale={noteScaleValue}
-                    />
+                    {notesContent}
                     {showOriginal ? null : (
                       <Text className="mt-3 text-caption text-ink-faint">
                         AI study aid — verify important facts against your
@@ -612,10 +690,7 @@ export default function NoteView() {
                         ) : undefined
                       }
                     >
-                      <Markdown
-                        text={showOriginal ? original : body}
-                        scale={noteScaleValue}
-                      />
+                      {notesContent}
                       {showOriginal ? null : (
                         <Text className="mt-3 text-caption text-ink-faint">
                           AI study aid — verify important facts against your

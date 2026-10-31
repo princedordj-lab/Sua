@@ -38,6 +38,7 @@ import {
   StatusBadge,
 } from "@/components/ui";
 import { Markdown } from "@/components/markdown";
+import { SectionReader } from "@/components/note/section-reader";
 import { ReportButton, ReportMistake } from "@/components/report-mistake";
 import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
@@ -96,6 +97,7 @@ export default function NoteViewPage() {
     () => splitNotices(note?.body ?? note?.summary ?? ""),
     [note?.body, note?.summary],
   );
+  const body = note ? notesBody(note) : "";
   const cards = study?.flashcards ?? [];
   const quizzes = study?.quizzes ?? [];
   const quiz = quizzes[0] ?? null;
@@ -224,7 +226,9 @@ export default function NoteViewPage() {
             ) : null}
             <span>{reference ? "Course reference" : "Study note"}</span>
             <span>·</span>
-            <span>{relativeDate(note.updatedAt)}</span>
+            <span>Created {relativeDate(note.createdAt)}</span>
+            <span>·</span>
+            <span>Updated {relativeDate(note.updatedAt)}</span>
             {note.sourceType === "audio" ? (
               <span className="note-source">
                 <Volume2 size={13} /> Recording
@@ -408,8 +412,14 @@ export default function NoteViewPage() {
           ) : null}
 
           <Card className="note-reader-card">
-            {notesBody(note) ? (
-              <Markdown text={notesBody(note)} scale={prefs.noteTextScale} />
+            {body ? (
+              <SectionReader
+                text={body}
+                scale={prefs.noteTextScale}
+                noteId={note.id}
+                courseId={note.courseId}
+                title={note.title || "Untitled note"}
+              />
             ) : (
               <p className="note-empty-copy">
                 {active

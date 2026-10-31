@@ -85,6 +85,16 @@
   --text-timer--line-height: 60px;
 }
 
+/* Scroll without a visible bar. Used by the Notes Detail reader only. */
+@utility scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 :root {
   --cream: rgb(255 248 232);
   --surface: rgb(255 255 255);
@@ -2362,4 +2372,9 @@
   .main-nav .nav-secondary {
     display: none;
   }
+
+  ::-webkit-scrollbar{
+    display: none;
+  }
 }
+

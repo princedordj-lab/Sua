@@ -660,6 +660,11 @@ export async function processReference(job, documentExtraction, deadline = null)
     let presetSource = null;
     if (chunks && chunks.rows.length) {
       presetSource = singlePassSource(note, chunks);
+      // A chunked reference above the one-page cap is built as ONE sectioned
+      // reference note by the long path instead of failing "upload by chapter".
+      if (presetSource && presetSource.pageCount > notePipeline.maxReferencePages) {
+        presetSource = null;
+      }
       if (!presetSource) presetSource = await assembledShortSource(note, deps, chunks);
       if (!presetSource) {
         await runLongFileJob(job, note, courseContext, deps, chunks);
@@ -716,9 +721,8 @@ export async function processReference(job, documentExtraction, deadline = null)
 
 /**
  * Long-file persistence wrapper shared by processStudySet/processReference:
- * rerun guard -> generate -> usage (once, per delivered part; the overview is
- * free) -> finish + notify. The original note carries partIndex 0 (overview),
- * parts get partIndex 1..N under the same groupId.
+ * rerun guard -> one sectioned note -> usage (once) -> finish + notify.
+ * The job's own note is the only Note row written.
  */
 async function runLongFileJob(job, note, courseContext, deps, chunks) {
   const hash = chunkedSourceHash(chunks);

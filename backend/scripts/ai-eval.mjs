@@ -16,6 +16,7 @@
  * Raw outputs go to .tmp/eval/, one line per sample on the console.
  */
 import "../src/config/env.js";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
@@ -23,13 +24,18 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { geminiTranscribe, setAiMock } from "../src/lib/ai.js";
 import { assembleSource, prepareMaterial, sourceFromText, writeNote } from "../src/lib/note-pipeline.js";
 import { generateStudySet, validateStudySet } from "../src/lib/pipeline.js";
-import { notePipeline, longDoc, isJobYield } from "../src/config/ai-pipeline.js";
+import { notePipeline, longDoc, isJobYield, SECTION_PROMPT_VERSION } from "../src/config/ai-pipeline.js";
 import {
   buildSections,
   groupRowsIntoChunks,
   mapDigests,
   reduceDigests,
   mergeCheckpoint,
+  planSectionWrites,
+  writeSectionBodies,
+  assembleSectionedNote,
+  enforceSectionHeadings,
+  chunkedSourceHash,
 } from "../src/lib/long-doc.js";
 import { digestToText } from "../src/lib/note-pipeline.js";
 
@@ -168,10 +174,39 @@ function mockStudySet(user) {
   );
 }
 
+function mockSection(system, user) {
+  const list = (system.match(/Write ONLY these sections, in this order: (.*)/) ?? [])[1] ?? "";
+  const titles = [...list.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  const material = user.split("=== MATERIAL ===\n")[1] ?? user;
+  if (UNREADABLE_RE.test(material)) {
+    return { text: "I could not read this part of the source.", promptTokens: 12, completionTokens: 9 };
+  }
+  const lines = material
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^===/.test(line));
+  const sections = (titles.length ? titles : ["Section 1"]).map((title, index) => {
+    const slice = lines.slice(index * 4, index * 4 + 4);
+    const points = (slice.length ? slice : lines.slice(0, 4)).map((line) => `- ${line}`);
+    return `## ${title}\n\n${points.join("\n")}`;
+  });
+  const needle = material.match(NEEDLE_RE)?.[0];
+  if (needle && !sections[0].includes(needle)) sections[0] += `\n\n- ${needle}`;
+  const text = sections.join("\n\n");
+  return {
+    text,
+    promptTokens: Math.ceil((system.length + user.length) / 4),
+    completionTokens: Math.ceil(text.length / 4),
+  };
+}
+
 export function mockHandler({ system = "", user = "" }) {
   if (system.startsWith("You extract structured study material")) return mockDigest(user);
   if (system.startsWith("You merge structured study material")) return mockMerge(user, "Merged sections");
   if (system.startsWith("You build a document-level overview")) return mockMerge(user, "Overview");
+  if (system.startsWith("You write part of one study note")) return mockSection(system, user);
+  if (system.startsWith("You write part of a quick-reference sheet")) return mockSection(system, user);
   if (system.startsWith("You are Sua")) return mockStudySet(user);
   throw new Error(`mock provider: unrecognised prompt family — ${system.slice(0, 60)}`);
 }
@@ -564,6 +599,189 @@ async function longEval(sectionsArg, courseContext, mock = false) {
     }
   }
 
+  // 2b. Sectioned single-note writing: one note, resumable, assembly.
+  let sectionReport = null;
+  if (reduce) {
+    const writes = planSectionWrites({
+      sections: structure,
+      summaryList: reduce.summaryList,
+      groups,
+      kind: "lecture_note",
+      pagesUsed: rows.length,
+      defaultTitle: "Lecture note",
+    });
+    const sectionCalls = [];
+    let sectionCheckpoint = {};
+    const sectionJob = {
+      ...job,
+      id: "eval-sections",
+      checkpoint: {},
+      startedAt: new Date(),
+    };
+    const sectionDeps = {
+      ...evalDeps,
+      assertJobActive: async () => {},
+      record: async (step) => sectionCalls.push(step),
+      setStage: async () => {},
+      saveMapCheckpoint: async (patch) => {
+        sectionCheckpoint = { ...sectionCheckpoint, ...patch };
+      },
+      onCheckpoint: async (checkpoint) => {
+        sectionCheckpoint = { ...sectionCheckpoint, ...checkpoint };
+      },
+    };
+    const writeAll = (extraDeps = {}) =>
+      writeSectionBodies({
+        job: sectionJob,
+        writes,
+        kind: "lecture_note",
+        courseContext,
+        sourceType: "file",
+        deps: { ...sectionDeps, ...extraDeps },
+      });
+
+    let sectionResult = null;
+    let sectionProblem = null;
+    try {
+      sectionResult = await writeAll();
+    } catch (error) {
+      sectionProblem = error?.message ?? String(error);
+    }
+    const checkpointAfterFirstRun = { ...sectionCheckpoint };
+
+    const assembled = sectionResult
+      ? assembleSectionedNote({
+          overviewText: "Overview of the whole document.",
+          bodies: sectionResult.bodies,
+          takeaways: "- keep the key idea\n- revise the examples",
+        })
+      : null;
+    const assembledSections = assembled ? (assembled.body.match(/^##\s/gm) ?? []).length : 0;
+    const noH1 = assembled ? !/^#\s/m.test(assembled.body) : false;
+    const needleInNote = Boolean(assembled && /28 hours|dubnium/i.test(assembled.body));
+    const uniqueHashes = new Set(writes.map((write) => write.hash)).size === writes.length;
+    const sectionsCovered = sectionResult?.written ?? 0;
+
+    // Resume: a second pass over the captured checkpoint makes zero calls.
+    let sectionResumeClean = false;
+    const resumeSectionCalls = [];
+    if (sectionResult) {
+      try {
+        await writeSectionBodies({
+          job: { ...sectionJob, id: "eval-sections-resume", checkpoint: sectionCheckpoint },
+          writes,
+          kind: "lecture_note",
+          courseContext,
+          sourceType: "file",
+          deps: { ...sectionDeps, record: async (step) => resumeSectionCalls.push(step) },
+        });
+        sectionResumeClean = resumeSectionCalls.length === 0;
+      } catch {
+        sectionResumeClean = false;
+      }
+    }
+
+    // Deadline: stop after three calls, yield, then pay only for the rest.
+    const budget = { deadline: Date.now() + 60_000 };
+    const yieldCalls = [];
+    let yieldCheckpoint = {};
+    let sectionYielded = false;
+    try {
+      await writeSectionBodies({
+        job: { ...sectionJob, id: "eval-sections-yield", checkpoint: {} },
+        writes,
+        kind: "lecture_note",
+        courseContext,
+        sourceType: "file",
+        deps: {
+          ...sectionDeps,
+          get deadline() {
+            return budget.deadline;
+          },
+          record: async (step) => {
+            yieldCalls.push(step);
+            if (yieldCalls.length === 3) budget.deadline = Date.now() - 1;
+          },
+          saveMapCheckpoint: async (patch) => {
+            yieldCheckpoint = { ...yieldCheckpoint, ...patch };
+          },
+        },
+      });
+    } catch (error) {
+      sectionYielded = isJobYield(error) && error.stage === "sections";
+    }
+    let resumedCalls = 0;
+    if (sectionYielded) {
+      await writeSectionBodies({
+        job: { ...sectionJob, id: "eval-sections-yield-resume", checkpoint: yieldCheckpoint },
+        writes,
+        kind: "lecture_note",
+        courseContext,
+        sourceType: "file",
+        deps: {
+          ...sectionDeps,
+          record: async () => {
+            resumedCalls += 1;
+          },
+        },
+      }).catch(() => {
+        resumedCalls = -1;
+      });
+    }
+    const resumeAfterYield =
+      sectionYielded && resumedCalls >= 0 && yieldCalls.length + resumedCalls === writes.length;
+
+    // A genuinely unreadable write must fail honestly, not disappear.
+    let sectionFailureReported = false;
+    if (writes.length) {
+      const failureWrite = {
+        ...writes[0],
+        hash: "eval-section-failure",
+        material: "\u0000\u0001\u0002".repeat(500),
+        rawText: "garbage",
+      };
+      try {
+        await writeSectionBodies({
+          job: { ...sectionJob, id: "eval-sections-failure", checkpoint: {} },
+          writes: [failureWrite],
+          kind: "lecture_note",
+          courseContext,
+          sourceType: "file",
+          deps: { ...sectionDeps, record: async () => {} },
+        });
+      } catch (error) {
+        sectionFailureReported = Boolean(error?.userFacing);
+      }
+    }
+
+    const legacyHash = createHash("sha1")
+      .update(rows.map((row) => row.hash ?? row.text ?? "").join("|"))
+      .digest("hex");
+    const hashRevision =
+      chunkedSourceHash({ rows }) !== legacyHash &&
+      chunkedSourceHash({ rows }) === chunkedSourceHash({ rows });
+
+    sectionReport = {
+      writes: writes.length,
+      sectionCalls: sectionCalls.length,
+      sectionProblem,
+      sectionsCovered,
+      outlineSections: structure.length,
+      uniqueHashes,
+      assembledSections,
+      noH1,
+      needleInNote,
+      sectionResumeClean,
+      sectionYielded,
+      yieldCalls: yieldCalls.length,
+      resumedCalls,
+      resumeAfterYield,
+      checkpointKeepsStages: Object.keys(checkpointAfterFirstRun.sectionBodies ?? {}).length > 0,
+      sectionFailureReported,
+      hashRevision,
+    };
+  }
+
   // 3. Resume: a second map run over the checkpoint must make ZERO new calls.
   const resumeCalls = [];
   try {
@@ -738,6 +956,7 @@ async function longEval(sectionsArg, courseContext, mock = false) {
     mainFailure,
     cards: set?.flashcards?.length ?? 0,
     quiz: set?.quiz?.length ?? 0,
+    section: sectionReport,
   };
   const problems = [];
   if (mainFailure) {
@@ -748,6 +967,31 @@ async function longEval(sectionsArg, courseContext, mock = false) {
     if (!needleInSummaries) problems.push("needle lost in summaries");
     if (!needleInSet) problems.push("needle lost in study set");
     if (setProblem) problems.push(`study set invalid: ${setProblem}`);
+  }
+  if (sectionReport) {
+    if (sectionReport.sectionProblem) {
+      problems.push(`section writes failed: ${sectionReport.sectionProblem}`);
+    } else {
+      if (sectionReport.writes > longDoc.maxSectionWrites) problems.push("too many section writes");
+      if (sectionReport.sectionCalls !== sectionReport.writes) {
+        problems.push(`section writes made ${sectionReport.sectionCalls} calls for ${sectionReport.writes} writes`);
+      }
+      if (!sectionReport.uniqueHashes) problems.push("section write hashes repeat");
+      if (sectionReport.sectionsCovered !== sectionReport.outlineSections) {
+        problems.push("the section plan lost outline sections");
+      }
+      if (sectionReport.assembledSections !== sectionReport.sectionsCovered + 2) {
+        problems.push("the assembled note has the wrong page count");
+      }
+      if (!sectionReport.noH1) problems.push("the assembled note has a # heading");
+      if (!sectionReport.needleInNote) problems.push("needle lost in the assembled note");
+      if (!sectionReport.sectionResumeClean) problems.push("section resume repeated work");
+      if (!sectionReport.sectionYielded) problems.push("section writes ignored the invocation deadline");
+      else if (!sectionReport.resumeAfterYield) problems.push("section yield/resume repeated work");
+      if (!sectionReport.checkpointKeepsStages) problems.push("section bodies were not checkpointed");
+      if (!sectionReport.sectionFailureReported) problems.push("a failed section was silently swallowed");
+      if (!sectionReport.hashRevision) problems.push("the long-source hash ignored the pipeline revision");
+    }
   }
   if (!resumeClean) {
     problems.push(resumeRunFailed ? "resume run failed" : `resume made ${resumeCallCount} extra calls`);

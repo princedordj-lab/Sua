@@ -6,17 +6,19 @@ export function ProgressBar({
   progress,
   showPercent = false,
   className = "",
+  label = "Upload",
 }: {
   progress: number;
   showPercent?: boolean;
   className?: string;
+  label?: string;
 }) {
   const pct = Math.max(0, Math.min(100, Math.round(progress)));
   return (
     <View className={`flex-row items-center gap-2 ${className}`}>
       <View
         className="h-2 flex-1 overflow-hidden rounded-chip bg-line"
-        accessibilityLabel={`Upload ${pct} percent complete`}
+        accessibilityLabel={`${label} ${pct} percent complete`}
         accessibilityRole="progressbar"
         accessibilityValue={{ min: 0, max: 100, now: pct }}
       >

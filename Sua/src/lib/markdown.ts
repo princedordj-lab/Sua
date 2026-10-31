@@ -44,26 +44,79 @@ export function splitNotices(text: string): {
 }
 
 export type MarkdownSection = { heading: string | null; body: string };
+export type NoteSection = { id: string; title: string; body: string };
+export type ParsedNote = { intro: string; sections: NoteSection[] };
 
-/** Split a note body on "## " headings so a long note can be read card by card. */
-export function splitMarkdownSections(text: string): MarkdownSection[] {
-  const sections: MarkdownSection[] = [];
-  let heading: string | null = null;
-  let buffer: string[] = [];
+/** Stable, duplicate-safe anchor id for a section heading. */
+export function noteSectionSlug(title: string, used?: Set<string>): string {
+  const base =
+    stripMarkdown(String(title ?? ""))
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, "")
+      .trim()
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .slice(0, 48)
+      .replace(/^-+|-+$/g, "") || "section";
+  if (!used) return base;
+  let slug = base;
+  let suffix = 2;
+  while (used.has(slug)) {
+    slug = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  used.add(slug);
+  return slug;
+}
+
+/**
+ * Split a note body into its `##` pages. `#` and `###+` stay inside the
+ * current page, fences are respected, and a body with no `##` returns its
+ * whole text as `intro` with no sections so the reader can fall back.
+ */
+export function parseNoteSections(markdown: string): ParsedNote {
+  const lines = String(markdown ?? "").split("\n");
+  const sections: NoteSection[] = [];
+  const used = new Set<string>();
+  const intro: string[] = [];
+  let current: { title: string; body: string[] } | null = null;
+  let fenced = false;
   const flush = () => {
-    const body = buffer.join("\n").trim();
-    if (heading || body) sections.push({ heading, body });
-    buffer = [];
+    if (!current) return;
+    sections.push({
+      id: noteSectionSlug(current.title, used),
+      title: current.title,
+      body: current.body.join("\n").trim(),
+    });
+    current = null;
   };
-  for (const line of String(text ?? "").split("\n")) {
-    const match = line.match(/^##\s+(.*)$/);
-    if (match) {
-      flush();
-      heading = match[1].trim();
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      (current ? current.body : intro).push(line);
       continue;
     }
-    buffer.push(line);
+    if (!fenced) {
+      const match = line.match(/^ {0,3}##\s+(.*?)\s*#*\s*$/);
+      if (match) {
+        flush();
+        const title = stripMarkdown(match[1]).trim() || `Section ${sections.length + 1}`;
+        current = { title, body: [] };
+        continue;
+      }
+    }
+    (current ? current.body : intro).push(line);
   }
   flush();
-  return sections;
+  if (!sections.length) return { intro: String(markdown ?? "").trim(), sections: [] };
+  return { intro: intro.join("\n").trim(), sections };
+}
+
+/** Split a note body on "## " headings so a long note can be read page by page. */
+export function splitMarkdownSections(text: string): MarkdownSection[] {
+  const { intro, sections } = parseNoteSections(text);
+  const result: MarkdownSection[] = [];
+  if (intro) result.push({ heading: null, body: intro });
+  for (const section of sections) result.push({ heading: section.title, body: section.body });
+  return result;
 }

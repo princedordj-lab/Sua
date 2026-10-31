@@ -1,6 +1,11 @@
 /**
  * Long-file pipeline: Structure -> Chunk -> Map (checkpointed) -> Reduce ->
- * Generate (split | single) -> Verify -> Persist.
+ * Sectioned one-note generation -> Verify -> Persist.
+ *
+ * One uploaded document always writes ONE Note row (the client-created note
+ * id). Sections are `##` Markdown pages inside that note; the writer is
+ * checkpointed per section so an interrupted job resumes without repeating
+ * finished pages.
  *
  * The resumable extraction stage (lib/extraction.js) has already stored one
  * SourceChunk row per page/slide when this module runs. Everything here reads
@@ -24,19 +29,26 @@ import {
   mapWithLimit,
   validateDigest,
   parseJsonObject,
-  normaliseHeadings,
 } from "./note-pipeline.js";
 import {
   PROMPT_VERSION,
   reducePrompt,
   overviewPrompt,
-  lectureNotePrompt,
-  referencePrompt,
+  sectionNotePrompt,
+  sectionReferencePrompt,
 } from "./prompts.js";
-import { longDoc, notePipeline, UserFacingError, JobYieldError } from "../config/ai-pipeline.js";
+import {
+  SECTION_PROMPT_VERSION,
+  LONG_DOC_REVISION,
+  longDoc,
+  notePipeline,
+  UserFacingError,
+  JobYieldError,
+} from "../config/ai-pipeline.js";
 import { validateStudyPack } from "../config/study-pack-schema.js";
 import { checkSourceFidelity, normaliseForCompare } from "./numbers.js";
 import { MAX_TEXT_CHARS } from "./extract.js";
+import { purgeNoteRows, flushStorageDeletes } from "./note-deletion.js";
 
 // ---------------------------------------------------------------------------
 // Reading chunks
@@ -85,9 +97,10 @@ const NUMBERED_HEADING =
 const RATE_LIMIT_RE = /\b429\b|rate.?limit|quota|daily.?reset/i;
 const ALL_CAPS = /^[A-Z][A-Z0-9 \-':,&]{7,63}$/;
 
-/** Stable over the file's content: the rerun-guard hash of a chunked source. */
+/** Stable over the file's content: the rerun-guard hash of a chunked source.
+ *  The revision keeps a done split-mode job from suppressing the rebuild. */
 export function chunkedSourceHash(source) {
-  return sha1(source.rows.map((row) => row.hash ?? row.text ?? "").join("|"));
+  return sha1(`${LONG_DOC_REVISION}|${source.rows.map((row) => row.hash ?? row.text ?? "").join("|")}`);
 }
 
 /**
@@ -1023,103 +1036,529 @@ function summaryToMarkdown(pack) {
 }
 
 // ---------------------------------------------------------------------------
-// Body writers for lecture_note / course_reference per part
+// Sectioned single-note writer (long files)
 // ---------------------------------------------------------------------------
 
 const WRITE_MAX_CHARS = 40_000;
 
-function splitMaterial(material) {
-  if (material.length <= WRITE_MAX_CHARS) return [material];
-  const paragraphs = material.split(/\n{2,}/);
-  const parts = [];
-  let current = "";
-  for (const paragraph of paragraphs) {
-    if (current && current.length + paragraph.length > WRITE_MAX_CHARS) {
-      parts.push(current);
-      current = paragraph;
-    } else {
-      current = current ? `${current}\n\n${paragraph}` : paragraph;
-    }
-  }
-  if (current) parts.push(current);
-  return parts;
+function cleanHeading(value) {
+  return String(value ?? "")
+    .replace(/[*_`#]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-const FENCE = /^\s*(```|~~~)/;
-const HEADING_LINE = /^(#{1,6})(\s+.*)$/;
+/** Canonical, globally unique `##` titles (Overview/Key Takeaways reserved). */
+function uniqueHeadings(titles) {
+  const reserved = new Set(["overview", "key takeaways"]);
+  const used = new Set();
+  return titles.map((raw, index) => {
+    const base = cleanHeading(raw) || `Section ${index + 1}`;
+    let title = base;
+    let suffix = 2;
+    while (reserved.has(title.toLowerCase()) || used.has(title.toLowerCase())) {
+      title = `${base} (${suffix})`;
+      suffix += 1;
+    }
+    used.add(title.toLowerCase());
+    return title;
+  });
+}
 
-async function writeBody({ system, material, deps, step }) {
-  const parts = splitMaterial(material);
-  const written = [];
-  for (const [index, part] of parts.entries()) {
-    const tail = written.length ? written[written.length - 1].slice(-900).trim() : "";
-    const continuation =
-      parts.length > 1
-        ? `This is part ${index + 1}/${parts.length} of one long material. Continue the note seamlessly: keep one coherent heading structure and do not repeat a heading.` +
-          (tail ? `\nThe previous part ended with:\n"""\n${tail}\n"""\nContinue from there.` : "")
-        : "";
-    const stepName = index === 0 ? step : `${step}_part`;
+function pagesForRows(rows) {
+  const labels = rows.map((row) => row.label).filter(Boolean);
+  if (labels.length) return rangeLabel(labels);
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  const start = first?.startPage ?? first?.index;
+  const end = last?.endPage ?? last?.startPage ?? last?.index;
+  if (!start) return "";
+  return end && end !== start ? `p. ${start}-${end}` : `p. ${start}`;
+}
+
+/** Evenly sample whole pages so the writer still sees the whole section. */
+function sampleRows(rows, maxChars) {
+  const out = [];
+  let used = 0;
+  const step = Math.max(1, Math.ceil(rows.length / 40));
+  for (let index = 0; index < rows.length && used < maxChars; index += step) {
+    const text = String(rows[index]?.text ?? "").trim();
+    if (!text) continue;
+    const room = maxChars - used;
+    if (room < 200) break;
+    const slice = text.slice(0, room);
+    out.push(slice);
+    used += slice.length + 2;
+  }
+  return out.join("\n\n");
+}
+
+function buildSectionMaterial({ rows, summaryText, maxChars }) {
+  const raw = rows.map((row) => row.text ?? "").join("\n\n");
+  if (!raw) return { material: String(summaryText ?? "").slice(0, maxChars), sampled: false };
+  if (raw.length <= maxChars) return { material: raw, sampled: false };
+  // Too much raw text: keep the reduced summary, then fill the remaining
+  // budget with evenly sampled pages. Never slice JSON mid-object.
+  const summaryBudget = Math.max(800, Math.floor(maxChars * 0.55));
+  let material = String(summaryText ?? "").slice(0, summaryBudget).trim();
+  const excerptBudget = maxChars - material.length - 60;
+  if (excerptBudget > 400) {
+    const excerpts = sampleRows(rows, excerptBudget);
+    if (excerpts) {
+      material = material ? `${material}\n\n=== SOURCE EXCERPTS ===\n${excerpts}` : excerpts;
+    }
+  }
+  if (!material) material = raw.slice(0, maxChars);
+  return { material, sampled: true };
+}
+
+function sectionBudget(kind, pagesUsed, writeCount) {
+  const total =
+    kind === "course_reference"
+      ? Math.min(
+          longDoc.referenceBodyMaxWords,
+          Math.max(notePipeline.referenceMaxWords, Math.ceil(Math.max(1, pagesUsed) / 8) * 100),
+        )
+      : Math.max(1200, Math.floor(longDoc.noteBodyMaxWords * 0.75));
+  const min = kind === "course_reference" ? longDoc.referenceSectionWordsMin : longDoc.sectionWordsMin;
+  const max = kind === "course_reference" ? longDoc.referenceSectionWordsMax : longDoc.sectionWordsMax;
+  return Math.max(min, Math.min(max, Math.floor(total / Math.max(1, writeCount))));
+}
+
+/**
+ * Plan the section-body writes. One write per outline section; very
+ * fragmented outlines are packed into at most `maxSectionWrites` writes.
+ * Titles prefer real outline headings and fall back to the reduced topic
+ * heading, so generic "Section N" windows still get meaningful pages.
+ */
+export function planSectionWrites({
+  sections,
+  summaryList,
+  groups,
+  kind,
+  pagesUsed,
+  defaultTitle = "Study notes",
+}) {
+  const summaries = new Map(summaryList.map((item) => [item.section?.id, item]));
+  const usable = sections.filter((section) => groups.some((group) => group.sectionId === section.id));
+  if (!usable.length) return [];
+
+  const rawTitles = usable.map((section, index) => {
+    const summary = summaries.get(section.id)?.summary;
+    const outline = cleanHeading(section.title);
+    const generic = !outline || /^section\s+\d+$/i.test(outline);
+    if (!generic) return outline;
+    const topic = cleanHeading(summary?.topics?.[0]?.heading);
+    return topic || outline || (sections.length === 1 ? defaultTitle : `Section ${index + 1}`);
+  });
+  const titles = uniqueHeadings(rawTitles);
+  const perWrite = Math.max(1, Math.ceil(usable.length / Math.max(1, longDoc.maxSectionWrites)));
+  const rawWrites = [];
+
+  for (let start = 0; start < usable.length; start += perWrite) {
+    const chunk = usable.slice(start, start + perWrite);
+    const chunkTitles = titles.slice(start, start + perWrite);
+    const chunkGroups = chunk.flatMap((section) =>
+      groups.filter((group) => group.sectionId === section.id),
+    );
+    const rows = chunkGroups.flatMap((group) => group.rows);
+    const summaryText = chunk
+      .map((section) => {
+        const summary = summaries.get(section.id)?.summary;
+        return summary ? digestToText(summary) : "";
+      })
+      .filter(Boolean)
+      .join("\n\n");
+    const { material, sampled } = buildSectionMaterial({
+      rows,
+      summaryText,
+      maxChars: longDoc.sectionMaterialMaxChars,
+    });
+    rawWrites.push({
+      sectionIds: chunk.map((section) => section.id),
+      titles: chunkTitles,
+      pages: chunk
+        .map((section) =>
+          pagesForRows(
+            groups.filter((group) => group.sectionId === section.id).flatMap((group) => group.rows),
+          ),
+        )
+        .filter(Boolean)
+        .join("; "),
+      material,
+      rawText: clampChars(rows.map((row) => row.text ?? "").join("\n\n"), longDoc.maxSourceChars) || material,
+      sampled,
+      sectionHashes: chunkGroups.map((group) => group.hash),
+    });
+  }
+
+  const maxWords = sectionBudget(kind, pagesUsed, rawWrites.length);
+  return rawWrites.map((write, index) => ({
+    ...write,
+    index,
+    sectionId: write.sectionIds.join("+"),
+    maxWords,
+    hash: sha1(`${write.sectionIds.join("|")}|${write.sectionHashes.join("|")}|${maxWords}`),
+  }));
+}
+
+function demoteExtraHeadings(lines) {
+  let fenced = false;
+  return lines.map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      return line;
+    }
+    if (fenced) return line;
+    const match = line.match(/^(#{1,2})(\s+.*)$/);
+    return match ? `###${match[2]}` : line;
+  });
+}
+
+/**
+ * Guarantee the generated text contains exactly the requested `##` headings,
+ * in order. Stray top-level headings are demoted to `###` so a section body
+ * can never create an extra reading page; a missing heading is reported so
+ * the caller can retry.
+ */
+export function enforceSectionHeadings(body, titles) {
+  const cleanTitles = titles.map((title) => cleanHeading(title) || "Section");
+  const titleKeys = cleanTitles.map((title) => title.toLowerCase());
+  const lines = String(body ?? "").split("\n");
+  const headings = [];
+  let fenced = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const match = line.match(/^\s{0,3}(#{1,2})\s+(.*?)\s*#*\s*$/);
+    if (!match) continue;
+    const titleIndex = titleKeys.indexOf(cleanHeading(match[2]).toLowerCase());
+    if (titleIndex >= 0 && !headings.some((heading) => heading.titleIndex === titleIndex)) {
+      headings.push({ titleIndex, lineIndex: index });
+    }
+  }
+  headings.sort((a, b) => a.lineIndex - b.lineIndex);
+  const missing = cleanTitles.filter((_, index) => !headings.some((heading) => heading.titleIndex === index));
+
+  const byTitle = new Map();
+  for (const [index, heading] of headings.entries()) {
+    const next = headings[index + 1]?.lineIndex ?? lines.length;
+    byTitle.set(
+      heading.titleIndex,
+      demoteExtraHeadings(lines.slice(heading.lineIndex + 1, next)),
+    );
+  }
+
+  if (!byTitle.size) {
+    if (cleanTitles.length !== 1) return { body: "", missing };
+    const cleaned = demoteExtraHeadings(lines).join("\n").trim();
+    return {
+      body: cleaned ? `## ${cleanTitles[0]}\n\n${cleaned}` : `## ${cleanTitles[0]}`,
+      missing: [],
+    };
+  }
+
+  const ordered = cleanTitles
+    .map((title, titleIndex) => {
+      const content = byTitle.get(titleIndex);
+      if (!content) return "";
+      const text = content.join("\n").trim();
+      return text ? `## ${title}\n\n${text}` : `## ${title}`;
+    })
+    .filter(Boolean);
+
+  const preamble = demoteExtraHeadings(
+    lines.slice(0, headings.length ? headings[0].lineIndex : 0),
+  )
+    .join("\n")
+    .trim();
+  if (preamble && ordered.length) ordered[0] = `${ordered[0]}\n\n${preamble}`;
+  return { body: ordered.join("\n\n"), missing };
+}
+
+function sectionProblems(body, maxWords) {
+  const problems = [];
+  if (/\$\$|\\frac|\\times|\\cdot|\\begin\{/.test(body)) problems.push("LaTeX");
+  const words = String(body ?? "").split(/\s+/).filter(Boolean).length;
+  if (words > Math.round(maxWords * 1.3)) problems.push(`over ${maxWords} words`);
+  if (words < 20) problems.push("too short");
+  return { problems, words };
+}
+
+async function writeSectionBody({ write, kind, courseContext, sourceType, deps }) {
+  const system =
+    kind === "course_reference"
+      ? sectionReferencePrompt({
+          course: courseContext,
+          sourceType,
+          titles: write.titles,
+          pages: write.pages,
+          maxWords: write.maxWords,
+        })
+      : sectionNotePrompt({
+          course: courseContext,
+          sourceType,
+          titles: write.titles,
+          pages: write.pages,
+          maxWords: write.maxWords,
+        });
+  const step = kind === "course_reference" ? "reference_section_write" : "section_write";
+
+  const attempt = async (suffix = "") => {
     const started = Date.now();
     let result;
     try {
       result = await chatCompletion({
         system,
-        user: `${continuation}\n\n=== MATERIAL ===\n${part}`,
+        user: `${suffix ? `${suffix}\n\n` : ""}=== MATERIAL ===\n${write.material}`,
         model: strongModel(),
-        temperature: 0.2,
+        temperature: suffix ? 0 : 0.2,
         maxTokens: notePipeline.writeMaxTokens,
         timeoutMs: timeoutForDeadline(deps.deadline),
       });
     } catch (error) {
-      await deps.recordFailure?.(stepName, error, Date.now() - started);
+      await deps.recordFailure?.(step, error, Date.now() - started);
       throw error;
     }
-    await deps.record(stepName, result);
-    const body = String(result.text ?? "").trim();
-    if (body) written.push(body);
-  }
-  return normaliseHeadings(written.join("\n\n"));
-}
+    await deps.record(suffix ? `${step}_retry` : step, result);
+    const enforced = enforceSectionHeadings(result.text, write.titles);
+    const structure = sectionProblems(enforced.body, write.maxWords);
+    const fidelity = checkSourceFidelity({
+      source: write.rawText,
+      output: enforced.body,
+      allow: courseContext,
+    });
+    const problems = [
+      ...structure.problems,
+      ...(enforced.missing.length ? [`missing heading(s): ${enforced.missing.join(", ")}`] : []),
+      ...(fidelity.failed ? ["numbers/formulas not in source"] : []),
+    ];
+    return { body: enforced.body, problems, fidelity };
+  };
 
-function structureProblems(body, kind) {
-  const problems = [];
-  if (!/^##\s/m.test(body)) problems.push("no ## sections");
-  if (/^\s*\|.*\|\s*$/m.test(body)) problems.push("markdown tables");
-  if (/\$\$|\\frac|\\times|\\cdot/.test(body)) problems.push("LaTeX");
-  const words = body.split(/\s+/).filter(Boolean).length;
-  if (kind === "course_reference" && words > Math.round(notePipeline.referenceMaxWords * 1.15)) {
-    problems.push(`over ${notePipeline.referenceMaxWords} words`);
-  }
-  return { problems, words };
-}
-
-async function writePartBody({ kind, material, rawText, courseContext, sourceType, deps }) {
-  const system =
-    kind === "course_reference"
-      ? referencePrompt({ course: courseContext, sourceType, maxWords: notePipeline.referenceMaxWords })
-      : lectureNotePrompt({ course: courseContext, sourceType });
-  const context =
-    kind === "course_reference"
-      ? "Write the reference sheet for this part of the material."
-      : "Write the complete, well-structured study note for this part of the material.";
-
-  let body = await writeBody({ system, material: `${context}\n\n${material}`, deps, step: kind === "course_reference" ? "reference_write" : "note_write" });
-  let fidelity = checkSourceFidelity({ source: rawText, output: body, allow: courseContext });
-  let structure = structureProblems(body, kind);
-  if (fidelity.failed || structure.problems.length) {
+  let outcome = await attempt();
+  if (outcome.problems.length) {
     const suffix = [
-      fidelity.failed
-        ? `Your previous answer contained numbers/formulas not in the source: ${fidelity.unsupportedFormulas.concat(fidelity.unsupportedNumbers).slice(0, 12).join(", ")}. Rewrite using only values that appear in the source.`
+      outcome.fidelity?.failed
+        ? `Your previous answer contained numbers/formulas not in the source: ${outcome.fidelity.unsupportedFormulas
+            .concat(outcome.fidelity.unsupportedNumbers)
+            .slice(0, 12)
+            .join(", ")}. Rewrite using only values that appear in the source.`
         : "",
-      structure.problems.length ? `Your previous answer had these problems: ${structure.problems.join(", ")}. Fix them.` : "",
+      `Your previous answer had these problems: ${outcome.problems.join(", ")}. Fix them and return only the requested sections with the exact headings.`,
     ]
       .filter(Boolean)
       .join("\n");
-    body = await writeBody({ system, material: `${suffix}\n\n${context}\n\n${material}`, deps, step: "write_retry" });
-    fidelity = checkSourceFidelity({ source: rawText, output: body, allow: courseContext });
-    structure = structureProblems(body, kind);
+    outcome = await attempt(suffix);
   }
-  return { body, fidelity, structure };
+  if (outcome.problems.length) {
+    throw new Error(`Section write failed: ${outcome.problems.join(", ")}`);
+  }
+  return outcome.body;
+}
+
+async function persistSectionState(job, { saved, failures, calls }, progressIncrement, deps) {
+  await patchCheckpoint(
+    job.id,
+    { sectionBodies: saved, sectionFailures: failures, sectionCalls: calls },
+    { progressIncrement },
+    deps,
+  );
+  await deps.onCheckpoint?.({
+    sectionBodies: saved,
+    sectionFailures: failures,
+    sectionCalls: calls,
+  });
+}
+
+/**
+ * Write every planned section under bounded concurrency, checkpointing each
+ * finished body. A resumed pass pays only for the sections it has not seen;
+ * deadline exhaustion yields without failing the job.
+ */
+export async function writeSectionBodies({
+  job,
+  writes,
+  kind,
+  courseContext,
+  sourceType,
+  deps,
+  onSaved = null,
+}) {
+  const model = strongModel();
+  const keyFor = (write) => `${write.hash}:${SECTION_PROMPT_VERSION}:${model}`;
+  const saved = { ...(job.checkpoint?.sectionBodies ?? {}) };
+  const failures = { ...(job.checkpoint?.sectionFailures ?? {}) };
+  let calls = Number(job.checkpoint?.sectionCalls ?? 0);
+  let yielded = false;
+  let rateLimited = false;
+  let rateLimitError = null;
+  let lastSavedCount = -1;
+  const startedAt = new Date(job.startedAt ?? job.createdAt ?? Date.now()).getTime();
+
+  for (const write of writes) {
+    if (saved[keyFor(write)]) delete failures[keyFor(write)];
+  }
+
+  const todo = writes.filter((write) => !saved[keyFor(write)]);
+  const doneBefore = writes.length - todo.length;
+  await deps.setStage("writing", { done: doneBefore, total: writes.length });
+
+  const persist = async (progressIncrement = 0) => {
+    await persistSectionState(job, { saved, failures, calls }, progressIncrement, deps);
+  };
+
+  await mapWithLimit(todo, Math.max(1, longDoc.sectionConcurrency), async (write) => {
+    if (rateLimited || yielded) return;
+    if (deps.deadline && Date.now() > deps.deadline) {
+      yielded = true;
+      return;
+    }
+    await (deps.assertJobActive ?? assertJobActive)(job);
+    const key = keyFor(write);
+    const mapCalls = Number(job.checkpoint?.mapCalls ?? 0);
+    if (mapCalls + calls >= longDoc.maxAiCallsPerJob) {
+      failures[key] = { titles: write.titles, code: "AI_CALL_BUDGET" };
+      await persist();
+      return;
+    }
+    if (Date.now() - startedAt > longDoc.maxJobRuntimeMs) {
+      throw new UserFacingError(
+        "This file took too long to process. Tap Try again — finished sections are kept.",
+      );
+    }
+
+    calls += 1;
+    try {
+      const body = await writeSectionBody({ write, kind, courseContext, sourceType, deps });
+      saved[key] = body;
+      delete failures[key];
+      await persist(1);
+      const done = writes.filter((item) => saved[keyFor(item)]).length;
+      await deps.setStage("writing", { done, total: writes.length });
+      if (onSaved && done !== lastSavedCount) {
+        lastSavedCount = done;
+        await onSaved(
+          writes.map((item) => saved[keyFor(item)]).filter(Boolean),
+        );
+      }
+    } catch (error) {
+      if (error?.cancelled || error?.yield) throw error;
+      if (error?.kind === "rate_limit" || RATE_LIMIT_RE.test(error?.message ?? "")) {
+        rateLimited = true;
+        rateLimitError = error;
+        failures[key] = { titles: write.titles, code: "RATE_LIMITED" };
+      } else {
+        failures[key] = { titles: write.titles, code: "SECTION_FAILED" };
+      }
+      await persist();
+    }
+  });
+
+  await persist();
+
+  if (rateLimited) {
+    throw new AiError(
+      "rate_limit",
+      "The AI service hit its rate limit or daily quota. Wait a few minutes and tap Try again — finished sections are kept.",
+      { retryable: true, retryAfterMs: rateLimitError?.retryAfterMs ?? null },
+    );
+  }
+  if (yielded) throw new JobYieldError("sections");
+
+  const failedWrites = writes.filter((write) => failures[keyFor(write)]);
+  if (writes.length && failedWrites.length / writes.length > longDoc.maxFailedSectionRatio) {
+    throw new UserFacingError(
+      "Too many parts of this file could not be written. Tap Try again, or upload it by chapter.",
+    );
+  }
+
+  const savedWrites = writes.filter((write) => saved[keyFor(write)]);
+  return {
+    bodies: savedWrites.map((write) => saved[keyFor(write)]),
+    failures,
+    missingTitles: failedWrites.flatMap((write) => failures[keyFor(write)]?.titles ?? write.titles),
+    sampled: writes.some((write) => write.sampled),
+    written: savedWrites.reduce((sum, write) => sum + (write.sectionIds?.length ?? 1), 0),
+    failed: failedWrites.reduce((sum, write) => sum + (write.sectionIds?.length ?? 1), 0),
+  };
+}
+
+function keyTakeaways(overview) {
+  const seen = new Set();
+  const lines = [];
+  for (const topic of overview?.topics ?? []) {
+    for (const item of topic.emphasised ?? []) {
+      const value = String(item ?? "").trim();
+      const key = normaliseForCompare(value).toLowerCase();
+      if (!value || seen.has(key)) continue;
+      seen.add(key);
+      lines.push(`- ${value}`);
+      if (lines.length >= 6) break;
+    }
+    if (lines.length >= 6) break;
+  }
+  if (lines.length >= 2) return lines.join("\n");
+  const fallback = dedupeTerms(overview)
+    .slice(0, 4)
+    .map((term) => `- **${term.term}** — ${term.definition}`);
+  return fallback.length >= 2 ? fallback.join("\n") : "";
+}
+
+function overviewParagraph({ set, overview }) {
+  const summary = String(set?.shortSummary ?? "").trim();
+  if (summary) return summary;
+  const points = [];
+  for (const topic of overview?.topics ?? []) {
+    for (const item of [...(topic.emphasised ?? []), ...(topic.points ?? [])]) {
+      const value = String(item ?? "").trim();
+      if (!value) continue;
+      points.push(value);
+      if (points.length >= 6) break;
+    }
+    if (points.length >= 6) break;
+  }
+  return clampChars(points.join(" "), 1200);
+}
+
+/** Assemble one note body: notices, overview, section pages, takeaways. */
+export function assembleSectionedNote({
+  notices = [],
+  overviewText = "",
+  bodies = [],
+  takeaways = "",
+  maxChars = notePipeline.bodyMaxChars,
+}) {
+  const noticeBlock = notices.filter(Boolean).join("\n\n");
+  const overview = String(overviewText ?? "").trim();
+  const takeawayBlock = String(takeaways ?? "").trim();
+  const build = (list, dropped) =>
+    [
+      noticeBlock,
+      overview ? `## Overview\n\n${overview}` : "",
+      ...list,
+      takeawayBlock ? `## Key Takeaways\n\n${takeawayBlock}` : "",
+      dropped
+        ? "> The rest of this note was shortened to fit. Upload the remaining chapters separately."
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+  const list = bodies.filter(Boolean);
+  let body = build(list, false);
+  let dropped = 0;
+  while (body.length > maxChars && list.length > 1) {
+    list.pop();
+    dropped += 1;
+    body = build(list, true);
+  }
+  if (body.length > maxChars) body = body.slice(0, maxChars);
+  return { body, dropped };
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,14 +1644,19 @@ export async function runLongDocJob({ job, note, kind, clerkId, deps, source: pr
     .filter(Boolean)
     .join(", ");
   const sourceType = "file";
-  const documentSourceAssetId = (note.assets ?? []).find((asset) => asset.kind === "document")?.id ?? null;
 
-  // Progress unit: chunk groups of this file.
-  const sections = buildSections({
+  // Progress unit: chunk groups of this file. Sources with fewer than four
+  // stored rows have no outline; one synthetic section still lets map/reduce
+  // see the whole blob and produce a real summary and body.
+  const lastPage = source.rows[source.rows.length - 1]?.endPage ?? source.rows.length;
+  let sections = buildSections({
     rows: source.rows,
     structureHints: source.structureHints,
-    pageCount: source.rows[source.rows.length - 1]?.endPage ?? source.rows.length,
+    pageCount: lastPage,
   });
+  if (!sections.length) {
+    sections = [{ id: "s1", title: "", startPage: 1, endPage: Math.max(1, lastPage) }];
+  }
   const groups = groupRowsIntoChunks({ rows: source.rows, sections });
   if (!groups.length) throw new UserFacingError("Couldn't read text from this file. Try a clearer PDF or re-upload.");
 
@@ -1239,7 +1683,9 @@ export async function runLongDocJob({ job, note, kind, clerkId, deps, source: pr
   await assertJobActive(job);
 
   const summaryList = reduce.summaryList.filter(Boolean);
-  const coveredSections = summaryList.length;
+  const overviewMaterial = summaryToMergeMaterial(
+    reduce.summaryList.filter((item) => item?.summary).map((item) => item.summary),
+  );
 
   const notices = buildNotices({
     truncated,
@@ -1248,235 +1694,164 @@ export async function runLongDocJob({ job, note, kind, clerkId, deps, source: pr
     lost: map.lost,
     ocrUsed,
   });
-  const coverage = coverageOf({
-    sectionsCovered: coveredSections,
-    sectionsTotal: sections.length,
+
+  // ---- Study pack (checkpointed; persisted before the section writes) ------
+  // Summary/cards/quiz survive even if a later section write yields or fails.
+  await deps.setStage("summarising");
+  const spec = buildStudyPackSchema(scaledSpec(sections.length || 3));
+  const studyMaterial = clampChars(overviewMaterial || rawTextOfAll(source.rows), WRITE_MAX_CHARS);
+  const studyKey = `studySet:${sha1(studyMaterial)}:${PROMPT_VERSION}:${bulkModel()}:${sections.length}`;
+  let set = null;
+  if (job.checkpoint?.studySet?.key === studyKey) {
+    const checked = validateStudyPack(job.checkpoint.studySet.value);
+    if (checked.success) set = { ...checked.data, summaryMarkdown: summaryToMarkdown(checked.data) };
+  }
+  if (!set) {
+    set = await generateStudySetForMaterial({ material: studyMaterial, courseContext, spec, deps });
+    await patchCheckpoint(job.id, { studySet: { key: studyKey, value: set } }, {}, deps);
+  }
+  await persistStudySet(clerkId, note, set, true);
+  await assertJobActive(job);
+
+  // ---- Section bodies -------------------------------------------------------
+  const overviewText = overviewParagraph({ set, overview: reduce.overview });
+  const takeaways = keyTakeaways(reduce.overview);
+  const defaultTitle = note.title || (kind === "course_reference" ? "Reference sheet" : "Study notes");
+  let writes = planSectionWrites({
+    sections,
+    summaryList: reduce.summaryList,
+    groups,
+    kind,
+    pagesUsed,
+    defaultTitle,
+  });
+  if (!writes.length) {
+    // Outline collapsed to nothing: one full write, still one note.
+    const material = clampChars(overviewMaterial || rawTextOfAll(source.rows), WRITE_MAX_CHARS);
+    const titles = uniqueHeadings([defaultTitle]);
+    const maxWords = sectionBudget(kind, pagesUsed, 1);
+    writes = [
+      {
+        index: 0,
+        sectionId: "s1",
+        sectionIds: ["s1"],
+        titles,
+        pages: "",
+        material,
+        rawText: rawTextOfAll(source.rows) || material,
+        sampled: false,
+        sectionHashes: [],
+        maxWords,
+        hash: sha1(`${titles[0]}|${sha1(material)}|${maxWords}`),
+      },
+    ];
+  }
+
+  const partialWriter = longDoc.persistPartialBody
+    ? async (bodies) => {
+        const partial = assembleSectionedNote({
+          notices,
+          overviewText,
+          bodies,
+          takeaways: "",
+          maxChars: notePipeline.bodyMaxChars,
+        });
+        await withUser(clerkId, (tx) =>
+          tx.note.update({ where: { id: note.id }, data: { body: partial.body } }),
+        ).catch((error) => {
+          console.warn(`partial note write failed for note ${note.id}: ${error?.message ?? error}`);
+        });
+      }
+    : null;
+
+  const sectionResult = await writeSectionBodies({
+    job,
+    writes,
+    kind,
+    courseContext,
+    sourceType,
+    deps,
+    onSaved: partialWriter,
+  });
+  await assertJobActive(job);
+
+  const sectionNotices = notices.slice();
+  if (sectionResult.sampled) {
+    sectionNotices.push(
+      "> Some sections use a sampled portion of the source to fit the AI limits. Check against the file.",
+    );
+  }
+  if (sectionResult.missingTitles.length) {
+    sectionNotices.push(
+      `> These parts could not be written: ${sectionResult.missingTitles.join(", ")}.`,
+    );
+  }
+  const assembled = assembleSectionedNote({
+    notices: sectionNotices,
+    overviewText,
+    bodies: sectionResult.bodies,
+    takeaways,
+    maxChars: notePipeline.bodyMaxChars,
   });
 
-  // ---- Mode -----------------------------------------------------------------
-  // A source fewer pages than the split threshold keeps today's single-note
-  // behaviour (the same code path, one generation, no parts). LONG_DOC_MODE
-  // forces single (layered) or split for long files.
-  const longEnough = pagesTotal > longDoc.splitPages;
-  const mode = !longEnough
-    ? "short"
-    : longDoc.mode === "single"
-      ? "single"
-      : longDoc.mode === "short"
-        ? "short"
-        : "split";
-
-  const overviewMaterial = summaryToMergeMaterial(reduce.summaryList.map((s) => s.summary));
-
-  let parts = mode === "split" ? splitParts({ sections, summaryList: reduce.summaryList, rows: source.rows }) : [];
-  let effectiveMode = mode;
-  if (mode === "split" && !parts.length) {
-    // A long file whose outline collapsed to nothing still deserves full
-    // treatment: fall back to the layered single note.
-    effectiveMode = "single";
-  }
-
-  if (effectiveMode === "split") {
-    const groupId = `grp_${job.id}`;
-    const results = [];
-    // Overview note (partIndex 0) first, so the student sees the whole picture
-    // (and its Links) while parts are still being written.
-    const overviewPersisted = await persistOverviewNote({
-      job, note, kind, clerkId, groupId,
-      overview: reduce.overview ?? summaryToMergeMaterial(reduce.summaryList.map((s) => s.summary)),
-      summaryList: reduce.summaryList,
-      notices, sourceAssetId: documentSourceAssetId,
-    });
-    results.push(overviewPersisted);
-
-    for (const [index, part] of parts.entries()) {
-      await assertJobActive(job);
-      if (deps.deadline && Date.now() > deps.deadline) throw new JobYieldError("writing");
-      await deps.setStage("writing", { done: index + 1, total: parts.length + 1 });
-      const rawText = clampChars(part.rawRows.map((row) => row.text ?? "").join("\n\n"), WRITE_MAX_CHARS);
-      const perPartNotices = notices.slice();
-      const partContext =
-        `This study pack covers part ${index + 1} of ${parts.length} of a long file: "${part.title}" ` +
-        `(${part.startLabel ? part.startLabel : `pages ${part.startPage}-${part.endPage}`}). Cite pages like (p. 12) for key facts.`;
-
-      let body = "";
-      let fidelity = null;
-      let set = null;
-      if (kind === "study_set") {
-        set = await generateStudySetForMaterial({
-          material: `${partContext}\n\n${part.material}`,
-          courseContext,
-          spec: null,
-          deps,
-        });
-        body = set.summaryMarkdown;
-      } else {
-        const written = await writePartBody({
-          kind, material: `${partContext}\n\n${part.material}`, rawText, courseContext, sourceType, deps,
-        });
-        body = written.body;
-        fidelity = { failed: written.fidelity.failed, unsupportedNumbers: written.fidelity.unsupportedNumbers };
-        if (fidelity.failed) {
-          perPartNotices.unshift(
-            "> Some numbers could not be matched to your original. Check against the file.",
-          );
-        }
-        if (kind === "course_reference") {
-          set = await generateStudySetForMaterial({
-            material: `${partContext}\n\n${part.material}`,
-            courseContext,
-            spec: null,
-            deps,
-          }).catch(() => null);
-        }
-      }
-      const noticeBlock = perPartNotices.length ? `${perPartNotices.join("\n\n")}\n\n` : "";
-      const persisted = await persistPartNote({
-        job, note, kind, clerkId, groupId, partIndex: index + 1,
-        title: `${note.title || "Study pack"} — Part ${index + 1}: ${part.title}`,
-        body: normaliseHeadings(truncateWords(noticeBlock + body, longDoc.noteBodyMaxWords)),
-        set,
-        transcript: rawText.slice(0, MAX_TEXT_CHARS),
-        sourceAssetId: documentSourceAssetId,
-      });
-      results.push(persisted);
-    }
-    return {
-      meta: longDocMeta({ mode, pagesTotal, pagesUsed, sections: sections.length, parts: parts.length, lost: map.lost, coverage, notices, fidelityNotice: notices.some((notice) => notice.includes("numbers")), startedMs, groupId, truncated }),
-      parts: results,
-      groupId,
-    };
-  }
-
-  // ---- short + single modes: the job's own note ---------------------------
-  if (deps.deadline && Date.now() > deps.deadline) throw new JobYieldError("writing");
-  await deps.setStage("writing");
-  const spec = buildStudyPackSchema(scaledSpec(sections.length || 3));
-  const material = clampChars(
-    (mode === "single" ? overviewMaterial : overviewMaterial + "\n\n" + rawTextOfAll(source.rows)),
-    WRITE_MAX_CHARS,
-  );
-  const set = await generateStudySetForMaterial({ material, courseContext, spec, deps });
-  let body = "";
-  if (kind !== "study_set") {
-    const written = await writePartBody({
-      kind,
-      material,
-      rawText: rawTextOfAll(source.rows),
-      courseContext,
-      sourceType,
-      deps,
-    });
-    body = written.body;
-    if (written.fidelity.failed) {
-      notices.unshift("> Some numbers could not be matched to your original. Check against the file.");
-    }
-    if (kind === "course_reference" && pagesTotal > 1) {
-      body = `> Condensed from ${pagesUsed} page${pagesUsed === 1 ? "" : "s"}.\n\n${body}`;
-    }
-  } else if (mode === "single") {
-    // Layered body: overview first, then one ## section per chapter group,
-    // then key terms + exam questions. study_set keeps note.body untouched;
-    // this becomes the summary's extra material via transcript context only.
-    const layered = [
-      "## Overview",
-      String(set.shortSummary ?? ""),
-      "",
-      ...reduce.summaryList.map((item) => `## ${item.section?.title ?? "Section"}\n\n${digestToText(item.summary)}`),
-    ].join("\n\n");
-    body = normaliseHeadings(truncateWords(layered, longDoc.noteBodyMaxWords));
-  }
-  const noticeBlock = notices.length ? `${notices.join("\n\n")}\n\n` : "";
-  const bodyValue = kind === "study_set"
-    ? note.body ?? ""
-    : (mode === "single" ? noticeBlock + body : truncateWords(noticeBlock + body, longDoc.noteBodyMaxWords));
-  await withUser(clerkId, async (tx) => {
+  // Old split rows from THIS job are duplicates of the note just rebuilt.
+  const legacyIds = longDoc.cleanupLegacyParts ? await findLegacyParts(clerkId, job) : [];
+  const storageKeys = await withUser(clerkId, async (tx) => {
     await tx.note.update({
       where: { id: note.id },
       data: {
+        body: assembled.body,
         summary: set.summaryMarkdown,
-        body: bodyValue.slice(0, notePipeline.bodyMaxChars),
         transcript: rawTextOfAll(source.rows).slice(0, MAX_TEXT_CHARS),
       },
     });
+    if (!legacyIds.length) return [];
+    await tx.noteTombstone.createMany({
+      data: legacyIds.map((id) => ({ id, userId: job.userId })),
+      skipDuplicates: true,
+    });
+    return purgeNoteRows(tx, { userId: job.userId, noteIds: legacyIds });
   });
-  await persistStudySet(clerkId, note, set, true);
+  if (storageKeys.length) await flushStorageDeletes(storageKeys, job.userId);
+
+  const coverage = coverageOf({
+    sectionsCovered: sectionResult.written,
+    sectionsTotal: Math.max(1, sections.length),
+  });
 
   return {
-    meta: longDocMeta({ mode, pagesTotal, pagesUsed, sections: sections.length, parts: 1, lost: map.lost, coverage, notices, fidelityNotice: notices.some((notice) => notice.includes("numbers")), startedMs, groupId: null, truncated }),
+    meta: longDocMeta({
+      mode: "sectioned",
+      pagesTotal,
+      pagesUsed,
+      sections: Math.max(1, sections.length),
+      sectionsWritten: sectionResult.written,
+      sectionsFailed: sectionResult.failed,
+      writtenNotes: [note.id],
+      lost: map.lost,
+      coverage,
+      notices: sectionNotices,
+      fidelityNotice: sectionNotices.some((notice) => notice.includes("numbers")),
+      startedMs,
+      groupId: null,
+      truncated,
+    }),
     parts: [note.id],
     groupId: null,
   };
 }
 
-// ---------------------------------------------------------------------------
-// Split parts (3.7 split mode)
-// ---------------------------------------------------------------------------
-
-/** Group outline sections into parts of ~splitPages (8-20 pages). */
-function splitParts({ sections, summaryList, rows }) {
-  const bySectionId = new Map(sections.map((section) => [section.id, section]));
-  const parts = [];
-  let current = { sectionIds: [], pages: 0 };
-  const flush = () => {
-    if (!current.sectionIds.length) return;
-    const partSections = current.sectionIds.map((id) => bySectionId.get(id)).filter(Boolean);
-    if (!partSections.length) return;
-    const partSummaries = partSections
-      .map((section) => summaryList.find((item) => item.summary && item.section?.id === section.id))
-      .filter(Boolean);
-    const startPage = Math.min(...partSections.map((section) => section.startPage ?? 1));
-    const endPage = Math.max(...partSections.map((section) => section.endPage ?? 1));
-    // Raw rows for this part: pages within the part's span, doubled back over
-    // sections that carry no page numbers (row-based spans).
-    const sectionIds = new Set(partSections.map((section) => section.id));
-    const partRows = rows.filter(
-      (row) =>
-        (row.startPage ?? 1) >= startPage && (row.endPage ?? 1) <= endPage,
-    );
-    const fillerRows = partRows.length ? partRows : rows.slice(...rowSpanOf(partSections, rows));
-    const title = partSections[0]?.title ?? `Part ${parts.length + 1}`;
-    parts.push({
-      title,
-      pages: current.pages,
-      startPage,
-      endPage,
-      startLabel: partSections[0]?.rows?.[0]?.label ?? null,
-      sectionIds: [...sectionIds],
-      // Study pack + body material: merged section summaries (the reduced
-      // view of this part), which cite pages back into the raw text.
-      material: clampChars(
-        partSummaries.map((item) => digestToText(item.summary)).join("\n\n"),
-        WRITE_MAX_CHARS,
-      ),
-      rawRows: fillerRows,
-    });
-    current = { sectionIds: [], pages: 0 };
-  };
-  for (const section of sections) {
-    const sectionPages = Math.max(1, (section.endPage ?? 1) - (section.startPage ?? 1) + 1);
-    if (current.pages + sectionPages > 2 * longDoc.splitPages && current.sectionIds.length) flush();
-    if (current.pages >= longDoc.splitPages && current.sectionIds.length) flush();
-    current.sectionIds.push(section.id);
-    current.pages += sectionPages;
-  }
-  flush();
-  return parts.map((part, index) => ({
-    ...part,
-    rawRows: part.rawRows.length ? part.rawRows : rows,
-    ordinal: index + 1,
-  }));
-}
-
-/** Row span over an outline-less part (DOCX where "pages" are spans). */
-function rowSpanOf(partSections, rows) {
-  const indexes = partSections
-    .filter((section) => Number.isFinite(section.rowStart))
-    .flatMap((section) => [section.rowStart, section.rowEnd]);
-  if (indexes.length >= 2) {
-    return [Math.min(...indexes), Math.max(...indexes)];
-  }
-  return [0, rows.length];
+async function findLegacyParts(clerkId, job) {
+  const rows = await withUser(clerkId, (tx) =>
+    tx.note.findMany({
+      where: {
+        userId: job.userId,
+        OR: [{ id: `ovw_${job.id}` }, { id: { startsWith: `part_${job.id}_` } }],
+      },
+      select: { id: true },
+    }),
+  );
+  return rows.map((row) => row.id);
 }
 
 function summaryToMergeMaterial(summaries) {
@@ -1494,13 +1869,7 @@ function clampChars(value, max) {
   return String(value ?? "").slice(0, max);
 }
 
-function truncateWords(value, maxWords) {
-  const words = String(value ?? "").split(/\s+/);
-  if (words.length <= maxWords) return String(value ?? "");
-  return `${words.slice(0, maxWords).join(" ")} …`;
-}
-
-function longDocMeta({ mode, pagesTotal, pagesUsed, sections, parts, lost, coverage, notices, fidelityNotice, startedMs, groupId, truncated }) {
+function longDocMeta({ mode, pagesTotal, pagesUsed, sections, sectionsWritten, sectionsFailed, writtenNotes, lost, coverage, notices, fidelityNotice, startedMs, groupId, truncated }) {
   return {
     promptVersion: PROMPT_VERSION,
     sourceType: "file",
@@ -1520,113 +1889,18 @@ function longDocMeta({ mode, pagesTotal, pagesUsed, sections, parts, lost, cover
     structureProblems: [],
     chain: "long-doc",
     mode,
-    partsCount: parts,
+    partsCount: 1,
     sectionsCount: sections,
+    sectionsWritten: sectionsWritten ?? 0,
+    sectionsFailed: sectionsFailed ?? 0,
+    noteIds: writtenNotes ?? [],
+    buildRevision: LONG_DOC_REVISION,
     coverage: Number(coverage.toFixed(3)),
     lostRanges: lost.slice(0, 10),
     notices: (notices ?? []).map((notice) => notice.replace(/^> /, "")).slice(0, 5),
     groupId,
     durationMs: Date.now() - startedMs,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Note persistence (split mode)
-// ---------------------------------------------------------------------------
-
-/** Create-or-update the part/overview note by its deterministic id. */
-async function upsertNoteForJob({ clerkId, job, note, id, data }) {
-  return withUser(clerkId, async (tx) => {
-    const existing = await tx.note.findFirst({ where: { id, userId: job.userId }, select: { id: true } });
-    if (existing) {
-      await tx.note.update({ where: { id }, data });
-      return false; // updated
-    }
-    await tx.note.create({
-      data: {
-        id,
-        userId: job.userId,
-        courseId: note.courseId,
-        title: data.title ?? "",
-        body: data.body ?? "",
-        sourceType: "file",
-        transcript: data.transcript ?? null,
-        summary: data.summary ?? null,
-        noteKind: kindOf(job),
-        aiState: "ready",
-        sourceAssetId: data.sourceAssetId ?? null,
-        groupId: data.groupId ?? null,
-        partIndex: data.partIndex ?? null,
-      },
-    });
-    return true; // created
-  });
-}
-
-function kindOf(job) {
-  return job.kind === "course_reference" ? "reference" : "note";
-}
-
-async function persistPartNote({
-  job, note, kind, clerkId, groupId, partIndex, title, body, set, transcript,
-  sourceAssetId, fidelity, pagesUsed,
-}) {
-  const noteId = `part_${job.id}_${partIndex}`;
-  const data = {
-    title,
-    body,
-    transcript,
-    summary: set?.summaryMarkdown ?? body,
-    groupId,
-    partIndex,
-    sourceAssetId,
-  };
-  await upsertNoteForJob({ clerkId, job, note, id: noteId, data });
-  if (set) {
-    // bodyPreserve=true keeps the AI-written part body (lecture notes / refs);
-    // for study_set parts the summary markdown becomes the readable body.
-    await persistStudySet(
-      clerkId,
-      { id: noteId, title, userId: job.userId, courseId: note.courseId },
-      set,
-      kind !== "study_set",
-    );
-  }
-  return noteId;
-}
-
-async function persistOverviewNote({
-  job, note, kind, clerkId, groupId, overview, summaryList, notices,
-  sourceAssetId,
-}) {
-  const sectionLines = summaryList
-    .map((item) => {
-      const title = item.section?.title ?? "Section";
-      return `- ${title}${item.section?.endPage ? ` (p. ${item.section.startPage ?? "?"}-${item.section.endPage ?? "?"})` : ""}`;
-    })
-    .join("\n");
-  const keyTerms = dedupeTerms(overview);
-  const body = [
-    ...(notices.length ? notices : []),
-    digestToText(overview),
-    "",
-    "## Sections",
-    sectionLines || "- (no sections detected)",
-    "",
-    "## Key Terms",
-    keyTerms.map((term) => `- **${term.term}** — ${term.definition}`).join("\n"),
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-
-  const noteId = `ovw_${job.id}`;
-  const title = `${note.title || "Study pack"} — Overview`;
-  await upsertNoteForJob({
-    clerkId, job, note, id: noteId,
-    data: { title, body, summary: digestToText(overview), groupId, partIndex: 0, sourceAssetId },
-  });
-  // The overview carries no cards/quiz by design (spec 3.7): only its body.
-  return noteId;
 }
 
 function dedupeTerms(overview) {

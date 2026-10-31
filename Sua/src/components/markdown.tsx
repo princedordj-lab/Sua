@@ -1,11 +1,12 @@
 import type { ReactNode } from "react";
-import { Text, View } from "react-native";
+import { ScrollView, Text, View } from "react-native";
 import { stripMarkdown } from "../lib/markdown";
 
 // Minimal markdown renderer for note bodies and extracted source text.
 // Deliberately a small in-house parser: it covers the subset the toolbar and
 // the AI pipeline produce (headings, bullet/numbered lists, bold, italic,
-// inline code) without pulling a third-party renderer into the bundle.
+// inline code, simple pipe tables) without pulling a third-party renderer into
+// the bundle.
 
 type Inline = { text: string; className?: string };
 
@@ -22,7 +23,8 @@ function parseInline(text: string): Inline[] {
     if (triple) parts.push({ text: triple, className: "font-sans-bold italic" });
     else if (bold) parts.push({ text: bold, className: "font-sans-bold" });
     else if (italic) parts.push({ text: italic, className: "italic" });
-    else if (code) parts.push({ text: code, className: "font-sans-medium text-brand" });
+    else if (code)
+      parts.push({ text: code, className: "rounded bg-brand/10 px-1 font-sans-medium text-brand" });
     else if (full === "[unclear]") parts.push({ text: full, className: "italic text-ink-faint" });
     else parts.push({ text: full });
     last = index + full.length;
@@ -60,14 +62,28 @@ type Block =
   | { type: "bullet"; text: string }
   | { type: "numbered"; marker: string; text: string }
   | { type: "quote"; text: string }
+  | { type: "table"; header: string[]; rows: string[][] }
   | { type: "paragraph"; line: string };
 
 // A source citation closing a paragraph: (Slide 4-6), (p. 12), (about 12:30).
 const TRAILING_CITATION = /\s*(\((?:slides?|pp?\.|pages?|about)\s*[^)]*\))\s*$/i;
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+const TABLE_SEPARATOR = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/;
+
+function splitTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
 
 function parseBlocks(text: string): Block[] {
   const blocks: Block[] = [];
-  for (const line of text.split("\n")) {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     if (!line.trim()) continue;
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
@@ -87,6 +103,18 @@ function parseBlocks(text: string): Block[] {
     const numbered = line.match(/^\s*(\d+)\.\s+(.*)$/);
     if (numbered) {
       blocks.push({ type: "numbered", marker: `${numbered[1]}.`, text: numbered[2] });
+      continue;
+    }
+    if (TABLE_ROW.test(line) && index + 1 < lines.length && TABLE_SEPARATOR.test(lines[index + 1])) {
+      const header = splitTableRow(line);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && TABLE_ROW.test(lines[index])) {
+        rows.push(splitTableRow(lines[index]));
+        index += 1;
+      }
+      index -= 1;
+      blocks.push({ type: "table", header, rows });
       continue;
     }
     blocks.push({ type: "paragraph", line });
@@ -175,6 +203,46 @@ export function Markdown({
               <Text className={`${bodyBold} text-ink`}>{block.marker}</Text>
               <Text className={`flex-1 ${body} text-ink`}>{inlineNodes(block.text)}</Text>
             </View>
+          );
+        }
+        if (block.type === "table") {
+          return (
+            <ScrollView
+              key={index}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              className={gap}
+            >
+              <View className="min-w-[240px] overflow-hidden rounded-card border border-line">
+                <View className="flex-row bg-cream">
+                  {block.header.map((cell, column) => (
+                    <View
+                      key={column}
+                      className="min-w-28 flex-1 border-r border-line px-3 py-2 last:border-r-0"
+                    >
+                      <Text className={`${bodyBold} text-ink`}>{inlineNodes(cell)}</Text>
+                    </View>
+                  ))}
+                </View>
+                {block.rows.map((row, rowIndex) => (
+                  <View key={rowIndex} className="flex-row border-t border-line">
+                    {Array.from(
+                      { length: Math.max(block.header.length, row.length) },
+                      (_, column) => (
+                        <View
+                          key={column}
+                          className="min-w-28 flex-1 border-r border-line px-3 py-2 last:border-r-0"
+                        >
+                          <Text className={`${body} text-ink`}>
+                            {inlineNodes(row[column] ?? "")}
+                          </Text>
+                        </View>
+                      ),
+                    )}
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
           );
         }
         return (

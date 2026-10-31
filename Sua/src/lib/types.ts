@@ -127,9 +127,13 @@ export type JobMeta = {
   fidelityFailed?: boolean;
   structureProblems?: string[];
   chain?: string;
-  mode?: "short" | "split" | "single" | null;
+  mode?: "short" | "split" | "single" | "sectioned" | null;
   partsCount?: number;
   sectionsCount?: number;
+  sectionsWritten?: number;
+  sectionsFailed?: number;
+  noteIds?: string[];
+  buildRevision?: string;
   coverage?: number | null;
   lostRanges?: string[];
   notices?: string[];

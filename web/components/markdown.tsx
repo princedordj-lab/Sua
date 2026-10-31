@@ -65,11 +65,26 @@ type Block =
   | { type: "bullet"; text: string }
   | { type: "numbered"; marker: string; text: string }
   | { type: "quote"; text: string }
+  | { type: "table"; header: string[]; rows: string[][] }
   | { type: "paragraph"; line: string };
+
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+const TABLE_SEPARATOR = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/;
+
+function splitTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
 
 function parseBlocks(text: string): Block[] {
   const blocks: Block[] = [];
-  for (const line of text.split("\n")) {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     if (!line.trim()) continue;
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
@@ -89,6 +104,18 @@ function parseBlocks(text: string): Block[] {
     const numbered = line.match(/^\s*(\d+)\.\s+(.*)$/);
     if (numbered) {
       blocks.push({ type: "numbered", marker: `${numbered[1]}.`, text: numbered[2] });
+      continue;
+    }
+    if (TABLE_ROW.test(line) && index + 1 < lines.length && TABLE_SEPARATOR.test(lines[index + 1])) {
+      const header = splitTableRow(line);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && TABLE_ROW.test(lines[index])) {
+        rows.push(splitTableRow(lines[index]));
+        index += 1;
+      }
+      index -= 1;
+      blocks.push({ type: "table", header, rows });
       continue;
     }
     blocks.push({ type: "paragraph", line });
@@ -170,6 +197,33 @@ export function Markdown({
                 {block.marker}
               </span>
               <span>{inlineNodes(block.text)}</span>
+            </div>
+          );
+        }
+        if (block.type === "table") {
+          return (
+            <div key={index} className={`${gap} md-table-wrap scrollbar-hidden`}>
+              <table className="md-table">
+                <thead>
+                  <tr>
+                    {block.header.map((cell, column) => (
+                      <th key={column}>{inlineNodes(cell)}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex}>
+                      {Array.from(
+                        { length: Math.max(block.header.length, row.length) },
+                        (_, column) => (
+                          <td key={column}>{inlineNodes(row[column] ?? "")}</td>
+                        ),
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           );
         }

@@ -18,6 +18,12 @@ function ratio(name, fallback) {
 }
 
 export const PROMPT_VERSION = "notes-v2";
+// Section-body prompts get their own version so tuning them never invalidates
+// the (expensive) digests, and a digest change never reuses stale sections.
+export const SECTION_PROMPT_VERSION = "sections-v1";
+// Stamped into the long-source hash: an old split-mode job must never no-op a
+// run that now has to rebuild the note as one sectioned note.
+export const LONG_DOC_REVISION = "sectioned-v1";
 
 /**
  * Long-source (many-page / many-segment) knobs. Extraction and AI cost caps
@@ -27,13 +33,8 @@ export const PROMPT_VERSION = "notes-v2";
  */
 const minutesToMs = (min) => min * 60_000;
 export const longDoc = {
-  // Above this page/slide count a document goes to split mode (one note per
-  // section group plus an overview) unless LONG_DOC_MODE=short would keep it
-  // as a single note below LONG_DOC_SPLIT_PAGES.
-  splitPages: int("LONG_DOC_SPLIT_PAGES", 40),
-  // split | single | short. split = parts generated, single = one layered
-  // note with scaled limits, short = below the split threshold.
-  mode: process.env.LONG_DOC_MODE === "single" ? "single" : "split",
+  // Long chunked sources are built as ONE note with `##` section pages; the
+  // page count only decides whether the single-pass shortcut is used.
   // Hard extraction caps. The extractor stops at these bounds and records the
   // skipped range so the student is told.
   maxPages: int("MAX_PAGES", 300),
@@ -66,6 +67,26 @@ export const longDoc = {
   minCoverage: ratio("MIN_COVERAGE", 0.85),
   // Generate-stage word caps for long outputs.
   noteBodyMaxWords: int("NOTE_BODY_MAX_WORDS", 12_000),
+  // Sectioned single-note generation. One write per outline section (or a
+  // small pack of sections when the outline is very fragmented), each
+  // checkpointed so a resumed job never pays for a finished section twice.
+  sectionWordsMin: int("SECTION_WORDS_MIN", 180),
+  sectionWordsMax: int("SECTION_WORDS_MAX", 900),
+  sectionMaterialMaxChars: int("SECTION_MATERIAL_MAX_CHARS", 34_000),
+  maxSectionWrites: int("MAX_SECTION_WRITES", 24),
+  maxFailedSectionRatio: ratio("MAX_FAILED_SECTION_RATIO", 0.25),
+  get sectionConcurrency() {
+    return int("SECTION_CONCURRENCY", this.aiConcurrency);
+  },
+  // Long references are condensed per section, not to a single 700-word page.
+  referenceBodyMaxWords: int("REFERENCE_BODY_MAX_WORDS", 6_000),
+  referenceSectionWordsMin: int("REFERENCE_SECTION_WORDS_MIN", 90),
+  referenceSectionWordsMax: int("REFERENCE_SECTION_WORDS_MAX", 300),
+  // Persist the body after each finished section so a late failure still
+  // leaves a readable partial note (the checkpoint remains the resume source).
+  persistPartialBody: process.env.PERSIST_PARTIAL_BODY !== "0",
+  // Tombstone + purge ovw_/part_ rows left by a pre-sectioned run of THIS job.
+  cleanupLegacyParts: process.env.CLEANUP_LEGACY_PARTS !== "0",
 };
 
 /**

@@ -2693,7 +2693,11 @@
 }
 
 .note-reader-card {
-  padding: 24px 28px;
+  --reader-pad-x: 28px;
+  --reader-pad-y: 24px;
+  padding: var(--reader-pad-y) var(--reader-pad-x);
+  box-shadow: none;
+  container: note-reader / inline-size;
 }
 
 .note-empty-copy {
@@ -2701,6 +2705,583 @@
   color: var(--ink-faint);
   font-size: 13px;
   line-height: 1.7;
+}
+
+/* ------------------------------------------------ paginated note reader */
+
+/* The notes view owns the document scroll, so hide its bar only while this
+   page is mounted. Wheel, trackpad, touch and keyboard scrolling are untouched. */
+html:has(.note-view) {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+html:has(.note-view)::-webkit-scrollbar {
+  display: none;
+}
+
+.note-reader-paged {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.note-reading-head {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: grid;
+  gap: 10px;
+  margin: calc(-1 * var(--reader-pad-y, 24px)) calc(-1 * var(--reader-pad-x, 28px)) 0;
+  padding: 14px var(--reader-pad-x, 28px);
+  border-bottom: 1px solid var(--line);
+  border-radius: 23px 23px 0 0;
+  background: var(--surface);
+}
+
+.note-reading-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.note-reading-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.note-reading-note {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-reading-count {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.note-final-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--color-success-soft);
+  color: var(--color-brand);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.note-reading-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.note-toc-trigger,
+.note-nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 48px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--color-brand);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.note-toc-trigger:hover,
+.note-nav-toggle:hover {
+  border-color: var(--line);
+  background: var(--cream);
+}
+
+.note-toc-trigger:focus-visible,
+.note-nav-toggle:focus-visible,
+.note-toc-link:focus-visible,
+.note-section-nav .btn:focus-visible,
+.note-complete-actions .btn:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+.note-nav-toggle {
+  display: none;
+}
+
+.note-reading-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.note-reading-progress-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.note-reading-progress-label {
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.note-reading-progress-pct {
+  color: var(--color-brand);
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.note-reading-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  min-width: 0;
+}
+
+/* Narrow screens use a collapsible drawer instead of a permanent sidebar. */
+.note-sections-toc {
+  display: none;
+  min-width: 0;
+}
+
+.note-sections-toc.is-open {
+  display: grid;
+  gap: 3px;
+  max-height: 46vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 4px 2px 0;
+}
+
+.note-toc-heading {
+  padding: 2px 12px 6px;
+  color: var(--ink-faint);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.note-toc-link {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.note-toc-link:hover {
+  background: var(--cream);
+  color: var(--ink);
+}
+
+.note-toc-link.is-active {
+  border-color: color-mix(in srgb, var(--color-brand) 42%, var(--line));
+  background: color-mix(in srgb, var(--color-brand) 8%, var(--surface));
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.note-toc-number {
+  flex: 0 0 22px;
+  padding-top: 2px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.4;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.note-toc-link.is-active .note-toc-number {
+  color: var(--color-brand);
+}
+
+.note-toc-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.note-toc-check {
+  display: inline-grid;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-top: 2px;
+  place-items: center;
+  color: var(--color-brand);
+}
+
+.note-section-page {
+  width: 100%;
+  min-width: 0;
+  animation: note-section-fade 150ms ease both;
+}
+
+.note-section-intro {
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px dashed var(--line);
+  color: var(--ink-soft);
+}
+
+.note-section-page-head {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.note-section-kicker {
+  color: var(--color-brand);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.note-section-page-head h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.4px;
+  line-height: 1.3;
+}
+
+/* Reading typography, scoped to the note body so summaries and previews keep
+   their denser layout. */
+.note-prose {
+  color: var(--ink);
+}
+
+.note-prose .md-p,
+.note-prose .md-li,
+.note-prose .md-quote {
+  line-height: 1.8;
+}
+
+.note-prose .md-gap {
+  margin-top: 14px;
+}
+
+.note-prose .md-heading {
+  margin-top: 24px;
+  letter-spacing: -0.2px;
+}
+
+.note-prose > .md-heading:first-child {
+  margin-top: 0;
+}
+
+.note-prose .md-heading-3 {
+  color: var(--ink);
+  font-size: 1.06em;
+}
+
+.note-prose .md-heading-4 {
+  color: var(--ink);
+  font-size: 1em;
+}
+
+.note-prose .md-heading-5,
+.note-prose .md-heading-6 {
+  color: var(--ink-soft);
+  font-size: 0.92em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.note-prose .md-li {
+  margin-top: 7px;
+}
+
+.note-prose .md-bullet {
+  color: var(--color-brand);
+}
+
+.note-prose .md-code {
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--color-brand) 24%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--color-brand) 8%, transparent);
+  color: var(--color-brand);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  white-space: break-spaces;
+}
+
+.note-prose .md-quote {
+  padding: 10px 14px;
+  border-left: 3px solid var(--color-brand);
+  border-radius: 0 10px 10px 0;
+  background: color-mix(in srgb, var(--color-brand) 5%, transparent);
+  color: var(--ink-soft);
+}
+
+/* Section-level callouts only where the pipeline's own headings ask for one. */
+.note-section-body.is-overview {
+  font-size: 1.02em;
+}
+
+.note-section-body.is-definitions,
+.note-section-body.is-examples,
+.note-section-body.is-formulas,
+.note-section-body.is-takeaways {
+  padding: 14px 16px;
+  border-left: 3px solid var(--line);
+  border-radius: 0 14px 14px 0;
+  background: color-mix(in srgb, var(--cream) 55%, var(--surface));
+}
+
+.note-section-body.is-definitions {
+  border-left-color: var(--color-brand);
+  background: color-mix(in srgb, var(--color-brand) 5%, var(--surface));
+}
+
+.note-section-body.is-examples {
+  border-left-color: var(--color-brand-light);
+}
+
+.note-section-body.is-formulas {
+  border-left-color: var(--color-gold);
+  background: color-mix(in srgb, var(--color-gold-soft) 28%, var(--surface));
+}
+
+.note-section-body.is-takeaways {
+  border-left-color: var(--color-gold);
+  background: color-mix(in srgb, var(--color-gold-soft) 34%, var(--surface));
+}
+
+.note-section-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.note-section-nav .btn {
+  min-width: 168px;
+  flex: 0 1 auto;
+}
+
+.note-complete {
+  display: grid;
+  gap: 8px;
+  margin-top: 22px;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--color-brand) 24%, var(--line));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--color-brand) 5%, var(--surface));
+}
+
+.note-complete-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-brand);
+}
+
+.note-complete-head h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.note-complete p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.note-complete-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.note-complete-actions .btn {
+  min-height: 48px;
+}
+
+@keyframes note-section-fade {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 900px) {
+  .note-reading-head {
+    top: 64px;
+  }
+}
+
+@media (max-width: 640px) {
+  .note-reading-top {
+    gap: 8px;
+  }
+
+  .note-reading-note {
+    font-size: 13px;
+  }
+
+  .note-section-page-head h2 {
+    font-size: 20px;
+  }
+
+  .note-section-nav .btn {
+    min-width: 0;
+    flex: 1 1 140px;
+  }
+
+  .note-complete-actions .btn {
+    flex: 1 1 140px;
+  }
+}
+
+@container note-reader (min-width: 860px) {
+  .note-reading-body {
+    grid-template-columns: 260px minmax(0, 1fr);
+    align-items: start;
+    gap: 28px;
+  }
+
+  .note-reading-body.is-nav-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .note-reading-body.is-nav-collapsed .note-sections-toc {
+    display: none;
+  }
+
+  .note-sections-toc,
+  .note-sections-toc.is-open {
+    position: sticky;
+    top: 128px;
+    display: grid;
+    gap: 3px;
+    max-height: calc(100vh - 154px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0 4px 0 0;
+  }
+
+  .note-toc-trigger {
+    display: none;
+  }
+
+  .note-nav-toggle {
+    display: inline-flex;
+  }
+
+  .note-section-page {
+    max-width: 780px;
+    margin-inline: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .note-section-page {
+    animation: none;
+  }
+
+  .note-reading-progress .progress-fill,
+  .note-toc-link,
+  .note-toc-trigger,
+  .note-nav-toggle {
+    transition: none;
+  }
+}
+
+/* Simple pipe tables emitted by section writes. */
+.md-table-wrap {
+  max-width: 100%;
+  margin: 10px 0;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.md-table {
+  width: 100%;
+  min-width: 240px;
+  border-collapse: collapse;
+  font-size: 0.92em;
+  line-height: 1.5;
+}
+
+.md-table th,
+.md-table td {
+  padding: 8px 12px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.md-table th {
+  background: var(--cream);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.md-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.md-table th:last-child,
+.md-table td:last-child {
+  border-right: 0;
 }
 
 .note-empty-card {
@@ -6739,7 +7320,9 @@
   }
 
   .note-reader-card {
-    padding: 18px 17px;
+    --reader-pad-x: 17px;
+    --reader-pad-y: 18px;
+    padding: var(--reader-pad-y) var(--reader-pad-x);
   }
 
   .note-tabs {
