@@ -201,6 +201,9 @@ export default function PreferencesPage() {
             </p>
           </div>
           <div className="prefs-data-actions">
+            <Link href="/app/notifications" className="btn btn-secondary btn-sm">
+              Notifications <ChevronRight size={14} />
+            </Link>
             <Link href="/app/profile" className="btn btn-secondary btn-sm">
               Open profile <ChevronRight size={14} />
             </Link>

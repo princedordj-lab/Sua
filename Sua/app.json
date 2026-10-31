@@ -17,7 +17,8 @@
         "foregroundImage": "./assets/images/icons/icon.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.pdordj.Sua"
+      "package": "com.pdordj.Sua",
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "output": "static",
@@ -49,7 +50,14 @@
           "cameraPermission": "Allow $(PRODUCT_NAME) to photograph the board or your notes."
         }
       ],
-      "expo-notifications",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icons/notification-icon.png",
+          "color": "#005B45",
+          "defaultChannel": "study"
+        }
+      ],
       "expo-asset"
     ],
     "experiments": {

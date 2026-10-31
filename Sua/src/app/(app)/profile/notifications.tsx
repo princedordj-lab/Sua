@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Alert, AppState, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { ArrowLeft, Bell, Clock3 } from "lucide-react-native";
 import { router } from "expo-router";
 import { useSQLiteContext } from "expo-sqlite";
@@ -11,8 +11,11 @@ import { usePalette } from "../../../state/appearance";
 import { getSetting, setSetting } from "../../../lib/notes";
 import {
   cancelDailyReviewReminder,
+  getPushPermissionState,
+  openNotificationSettings,
   registerForPushAndReport,
   scheduleDailyReviewReminder,
+  type PushPermissionState,
 } from "../../../lib/notifications";
 import { profileApi, pushApi } from "../../../lib/api";
 
@@ -27,6 +30,35 @@ export default function NotificationSettings() {
   const pushEnabled = useBooleanSetting(db, "push_enabled");
   const reminderOn = useBooleanSetting(db, "review_reminder_enabled");
   const [time, setTime] = useState(DEFAULT_TIME);
+  const [permission, setPermission] = useState<PushPermissionState>("undetermined");
+  const [testing, setTesting] = useState(false);
+  const [testMessage, setTestMessage] = useState<string | null>(null);
+
+  const refreshPermission = useCallback(async () => {
+    setPermission(await getPushPermissionState());
+  }, []);
+
+  useEffect(() => {
+    // Read the OS permission on mount and again whenever the app comes back to
+    // the foreground — that is how the "blocked" state clears after the student
+    // allows notifications in system settings.
+    let cancelled = false;
+    const read = () => {
+      getPushPermissionState()
+        .then((state) => {
+          if (!cancelled) setPermission(state);
+        })
+        .catch(() => {});
+    };
+    read();
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next === "active") read();
+    });
+    return () => {
+      cancelled = true;
+      subscription.remove();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,10 +74,11 @@ export default function NotificationSettings() {
 
   // Push opt-out removes this device's Expo token from the server so the
   // generation-finished announce stops; local pushes (the study-ready
-  // foreground banner) continue regardless. Enabling registers again from
-  // here: the app-level registration effect only runs at session start.
+  // foreground banner) continue regardless. Enabling is the only place the
+  // permission prompt is shown — nothing asks on launch.
   const togglePush = useCallback(
     async (next: boolean) => {
+      setTestMessage(null);
       await pushEnabled.update(next);
       if (next) {
         try {
@@ -53,10 +86,32 @@ export default function NotificationSettings() {
           const authToken = await getAuthToken();
           if (expoToken && authToken) {
             await setSetting(db, "expo_push_token", expoToken).catch(() => {});
-            await pushApi.registerToken(authToken, expoToken).catch(() => {});
+            await pushApi
+              .registerToken(authToken, expoToken, Platform.OS === "ios" ? "ios" : "android")
+              .catch(() => {});
+            await refreshPermission();
+            return;
           }
+          // Permission denied or the push service is unavailable: never leave
+          // the switch claiming "on" for a device that cannot receive pushes.
+          await pushEnabled.update(false);
+          const state = await getPushPermissionState();
+          setPermission(state);
+          Alert.alert(
+            state === "denied" ? "Notifications are blocked" : "Notifications unavailable",
+            state === "denied"
+              ? "Sua cannot ask again. Allow notifications for Sua in system settings, then turn this on."
+              : "This device could not get a push token. A development build with Google Play services is required.",
+            state === "denied"
+              ? [
+                  { text: "Not now", style: "cancel" },
+                  { text: "Open settings", onPress: openNotificationSettings },
+                ]
+              : [{ text: "OK" }],
+          );
         } catch {
-          // Silent: the next foreground event retries via the drain points.
+          await pushEnabled.update(false);
+          // Silent: the next attempt retries.
         }
         return;
       }
@@ -73,8 +128,26 @@ export default function NotificationSettings() {
         // sign-out unregisters the server row, so this never lingers long.
       }
     },
-    [db, getAuthToken, pushEnabled],
+    [db, getAuthToken, pushEnabled, refreshPermission],
   );
+
+  const sendTest = useCallback(async () => {
+    setTesting(true);
+    setTestMessage(null);
+    try {
+      const authToken = await getAuthToken();
+      const result = authToken ? await pushApi.test(authToken) : null;
+      setTestMessage(
+        result?.ok
+          ? "Test sent. It should arrive in a moment."
+          : "No device is registered yet. Turn the switch on first.",
+      );
+    } catch {
+      setTestMessage("Couldn't send the test. Check your connection and try again.");
+    } finally {
+      setTesting(false);
+    }
+  }, [getAuthToken]);
 
   const toggleReminder = useCallback(
     async (next: boolean) => {
@@ -148,6 +221,42 @@ export default function NotificationSettings() {
             value={pushEnabled.value}
             onChange={(next) => void togglePush(next)}
           />
+          <View className="gap-3 px-card pb-3">
+            <Text className="text-small leading-5 text-ink-soft">
+              {!pushEnabled.value
+                ? "Off. Turn on to get a push when processing finishes."
+                : permission === "denied"
+                  ? "Blocked in system settings. Sua cannot ask again on this device."
+                  : permission === "granted"
+                    ? "Registered on this device."
+                    : "Sua will ask for notification permission."}
+            </Text>
+            {permission === "denied" && pushEnabled.value ? (
+              <Pressable
+                onPress={openNotificationSettings}
+                accessibilityRole="button"
+                className="min-h-12 flex-row items-center justify-center rounded-btn border border-line bg-cream px-4 active:opacity-80"
+              >
+                <Text className="text-body font-sans-bold text-brand">Open system settings</Text>
+              </Pressable>
+            ) : null}
+            {pushEnabled.value ? (
+              <Pressable
+                onPress={() => void sendTest()}
+                disabled={testing}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: testing }}
+                className="min-h-12 flex-row items-center justify-center rounded-btn border border-line bg-cream px-4 active:opacity-80"
+              >
+                <Text className="text-body font-sans-bold text-brand">
+                  {testing ? "Sending…" : "Send test notification"}
+                </Text>
+              </Pressable>
+            ) : null}
+            {testMessage ? (
+              <Text className="text-small leading-5 text-ink-soft">{testMessage}</Text>
+            ) : null}
+          </View>
         </View>
 
         <View className="mt-4 gap-2 rounded-card bg-surface p-2 shadow-card">

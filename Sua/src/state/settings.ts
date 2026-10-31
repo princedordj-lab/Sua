@@ -11,7 +11,9 @@ import { getSetting, setSetting } from "../lib/notes";
 const DEFAULT_ON: Record<string, boolean> = {
   wifi_only: true,
   auto_generate: true,
-  push_enabled: true,
+  // Explicit opt-in: registration only happens from the notification settings
+  // screen, never on launch.
+  push_enabled: false,
   review_reminder_enabled: false,
 };
 

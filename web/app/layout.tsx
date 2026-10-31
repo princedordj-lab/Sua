@@ -24,12 +24,21 @@ export const metadata: Metadata = {
   description:
     "Sua turns lectures, slides and typed notes into summaries, flashcards and quizzes, and guides daily revision toward the exam date.",
   applicationName: "Sua",
+  manifest: "/manifest.webmanifest",
+  // iOS delivers web push only to an installed Home Screen app (16.4+), so the
+  // install metadata matters for notifications, not just for looks.
+  appleWebApp: {
+    capable: true,
+    title: "Sua",
+    statusBarStyle: "default",
+  },
   icons: {
     icon: [
       { url: "/favicon.png", sizes: "48x48", type: "image/png" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
       { url: "/icon.png", sizes: "1254x1254", type: "image/png" },
     ],
-    apple: [{ url: "/icon.png", type: "image/png" }],
+    apple: [{ url: "/icon-192.png", sizes: "192x192", type: "image/png" }],
   },
 };
 

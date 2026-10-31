@@ -6199,6 +6199,9 @@
 }
 
 .prefs-data h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   margin: 0;
   color: var(--ink);
   font-size: 15px;
@@ -6217,6 +6220,41 @@
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
+}
+
+/* --------------------------------------------------- notification settings */
+
+/* Back link to Preferences; the notifications page is reached from there and
+   from the profile list, so it needs its own way back at phone widths. */
+.prefs-back {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 3px;
+  justify-self: start;
+  padding: 0 9px 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.prefs-back:hover {
+  color: var(--color-brand);
+}
+
+/* Time picker + timezone row under the reminder toggle. */
+.prefs-notif-time {
+  display: grid;
+  gap: 11px;
+}
+
+.prefs-notif-time .prefs-row {
+  padding-top: 0;
+  border-top: 0;
 }
 
 /* ------------------------------------------------------- report a mistake */

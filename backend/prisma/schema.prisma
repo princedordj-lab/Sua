@@ -37,6 +37,8 @@ model User {
   feedbacks            Feedback[]
   usages               Usage[]
   pushTokens           PushToken[]
+  webPushSubscriptions WebPushSubscription[]
+  notificationSetting  NotificationSetting?
   chatMessages         ChatMessage[]
   reviewLogs           ReviewLog[]
   quizAttempts         QuizAttempt[]
@@ -421,10 +423,46 @@ model PushToken {
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   token     String   @unique
-  platform  String
+  // The route always sends the real platform; the default only keeps rows
+  // created before the client sent it valid.
+  platform  String   @default("android")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([userId])
   @@map("push_tokens")
+}
+
+// One row per browser push subscription (Web Push / VAPID). `endpoint` is the
+// push service URL and is unique: a browser that signs into another account
+// re-owns its subscription (same last-write-wins rule as Expo tokens).
+model WebPushSubscription {
+  id             String    @id @default(cuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint       String    @unique
+  p256dh         String
+  auth           String
+  expirationTime DateTime?
+  userAgent      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("web_push_subscriptions")
+}
+
+// Server-scheduled reminder preferences. Mobile schedules its daily reminder
+// locally (offline-first); this row drives the web push reminder.
+model NotificationSetting {
+  userId             String    @id
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  remindersEnabled   Boolean   @default(false)
+  reminderTime       String    @default("18:00")
+  timezone           String    @default("UTC")
+  lastReminderSentAt DateTime?
+  lastDueCount       Int       @default(0)
+  updatedAt          DateTime  @updatedAt
+
+  @@map("notification_settings")
 }

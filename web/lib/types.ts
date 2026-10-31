@@ -339,3 +339,31 @@ export type ChatMessagesResponse = { messages: ChatMessageView[] };
 export type ChatTranscriptResponse = { text: string };
 
 export type CardGrade = "again" | "hard" | "good" | "easy";
+
+// --------------------------------------------------------- push notifications
+
+/**
+ * Server-side reminder preferences. The phone schedules its own daily reminder
+ * locally (offline-first); this row drives the web push reminder sent by the
+ * jobs tick.
+ */
+export type NotificationSettings = {
+  remindersEnabled: boolean;
+  reminderTime: string;
+  timezone: string;
+};
+
+/** Which transports the server can deliver on, plus the current reminder prefs. */
+export type PushStatus = {
+  mobile: boolean;
+  web: boolean;
+  reminders: NotificationSettings;
+};
+
+/** The browser `PushSubscription` in the shape the API stores. */
+export type WebPushSubscriptionInput = {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  expirationTime: number | null;
+  userAgent?: string;
+};

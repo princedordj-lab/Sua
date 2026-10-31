@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useClerk, useUser } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import {
+  BellRing,
   BookOpen,
   ChevronRight,
   GraduationCap,
@@ -259,6 +260,16 @@ export default function ProfilePage() {
               <span>
                 <strong>Preferences</strong>
                 <small>Appearance, note text size, review length</small>
+              </span>
+              <ChevronRight size={17} />
+            </Link>
+            <Link href="/app/notifications" className="profile-link">
+              <span className="profile-link-icon">
+                <BellRing size={17} />
+              </span>
+              <span>
+                <strong>Notifications</strong>
+                <small>Push alerts and the daily review reminder</small>
               </span>
               <ChevronRight size={17} />
             </Link>

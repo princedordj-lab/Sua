@@ -262,10 +262,16 @@ export const studyApi = {
 };
 
 export const pushApi = {
-  registerToken: (token: string, expoPushToken: string) =>
+  registerToken: (token: string, expoPushToken: string, platform: "ios" | "android") =>
     apiRequest<PushTokenStatus>("/me/push-token", {
       method: "POST",
       token,
-      body: JSON.stringify({ token: expoPushToken }),
+      body: JSON.stringify({ token: expoPushToken, platform }),
+    }),
+  test: (token: string) =>
+    apiRequest<{ ok: boolean }>("/me/push-test", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ transport: "mobile" }),
     }),
 };

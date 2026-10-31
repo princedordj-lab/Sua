@@ -10,6 +10,7 @@ import {
   jobsApi,
   notesApi,
   profileApi,
+  pushApi,
   studyApi,
   uploadsApi,
   type AttemptInput,
@@ -96,6 +97,17 @@ export function useApi() {
         messages: (courseId: string) =>
           withToken((token) => chatApi.messages(token, courseId)),
         speech: (blob: Blob) => withToken((token) => chatApi.speech(token, blob)),
+      },
+      push: {
+        status: () => withToken(pushApi.status),
+        subscribe: (subscription: Parameters<typeof pushApi.subscribe>[1]) =>
+          withToken((token) => pushApi.subscribe(token, subscription)),
+        unsubscribe: (endpoint: string) =>
+          withToken((token) => pushApi.unsubscribe(token, endpoint)),
+        settings: () => withToken(pushApi.settings),
+        updateSettings: (changes: Parameters<typeof pushApi.updateSettings>[1]) =>
+          withToken((token) => pushApi.updateSettings(token, changes)),
+        test: () => withToken((token) => pushApi.test(token, "web")),
       },
     }),
     [withToken],

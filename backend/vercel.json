@@ -10,7 +10,7 @@
   "crons": [
     {
       "path": "/api/internal/jobs/tick?maxJobs=5&maxAssets=3",
-      "schedule": "0 3 * * *"
+      "schedule": "0 6 * * *"
     }
   ]
 }

@@ -7,6 +7,8 @@ import type {
   GenerationKind,
   HomeSummary,
   NoteSyncChange,
+  NotificationSettings,
+  PushStatus,
   ServerAsset,
   ServerAttempt,
   ServerCard,
@@ -25,6 +27,7 @@ import type {
   SignedUpload,
   SyncResult,
   UploadTask,
+  WebPushSubscriptionInput,
 } from "./types";
 
 export const API_URL = (
@@ -278,3 +281,33 @@ export const chatApi = {
 };
 
 export type { ServerQuiz };
+
+// Web Push lives beside the mobile Expo token route: the browser subscription
+// (endpoint + keys) is the credential, and reminders are server-driven here
+// because the web has no local notification scheduler.
+export const pushApi = {
+  status: (token: string) => apiRequest<PushStatus>(token, "/me/push-status"),
+  subscribe: (token: string, subscription: WebPushSubscriptionInput) =>
+    apiRequest<{ ok: boolean }>(token, "/me/push-subscription", {
+      method: "POST",
+      body: subscription,
+    }),
+  unsubscribe: (token: string, endpoint: string) =>
+    apiRequest<{ ok: boolean }>(token, "/me/push-subscription", {
+      method: "DELETE",
+      body: { endpoint },
+    }),
+  settings: (token: string) =>
+    apiRequest<NotificationSettings>(token, "/me/notification-settings"),
+  updateSettings: (token: string, changes: Partial<NotificationSettings>) =>
+    apiRequest<NotificationSettings>(token, "/me/notification-settings", {
+      method: "PATCH",
+      body: changes,
+    }),
+  test: (token: string, transport: "web" | "mobile" = "web") =>
+    apiRequest<{ ok: boolean; delivered: { mobile: number; web: number } }>(
+      token,
+      "/me/push-test",
+      { method: "POST", body: { transport } },
+    ),
+};

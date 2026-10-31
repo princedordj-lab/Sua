@@ -42,3 +42,5 @@ example
 /ios
 /android
 .neon
+
+credentials.json

@@ -14,6 +14,7 @@ import { timingSafeEqual } from "node:crypto";
 import { runJobs } from "./lib/runner.js";
 import { extractNext } from "./lib/extraction.js";
 import { pruneNoteTombstones, retryStorageDeletions } from "./lib/note-deletion.js";
+import { sendDueReminders } from "./lib/reminders.js";
 import { studyRouter } from "./routes/study.js";
 
 const app = express();
@@ -117,7 +118,16 @@ async function handleTick(req, res) {
         console.warn("Tombstone prune failed:", error?.message ?? error);
         return null;
       });
-    res.json({ ok: true, ...result, extraction, janitor: { storage, tombstones } });
+    // Web-only daily reminder; mobile schedules its own locally. Never fails
+    // the tick, and no-ops when VAPID is unset.
+    const reminders =
+      process.env.REMINDERS_ENABLED === "0"
+        ? null
+        : await sendDueReminders().catch((error) => {
+            console.warn("Reminder sweep failed:", error?.message ?? error);
+            return null;
+          });
+    res.json({ ok: true, ...result, extraction, janitor: { storage, tombstones }, reminders });
   } catch (err) {
     console.error("Tick error:", err);
     res.status(500).json({ error: "Tick failed", message: err?.message ?? String(err) });

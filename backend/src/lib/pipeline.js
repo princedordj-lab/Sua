@@ -13,6 +13,7 @@ import {
 } from "../config/ai-pipeline.js";
 import { validateStudyPack } from "../config/study-pack-schema.js";
 import { prisma } from "../config/prisma.js";
+import { notifyUser } from "./push.js";
 import {
   loadChunkedSource,
   runLongDocJob,
@@ -1014,24 +1015,14 @@ const NOTIFY_COPY = {
 
 async function notifyStudent(job, note) {
   const copy = NOTIFY_COPY[job.kind] ?? NOTIFY_COPY.study_set;
-  const tokens = await prisma.pushToken.findMany({ where: { userId: job.userId } });
-  if (!tokens.length) return;
-  const messages = tokens.slice(0, 100).map((row) => ({
-    to: row.token,
+  await notifyUser(job.userId, {
     title: copy.title,
     body: copy.body(note),
-    sound: "default",
-  }));
-  try {
-    const response = await fetch("https://exp.host/--/api/v2/push/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(messages),
-    });
-    if (!response.ok) console.warn(`Expo push failed (${response.status})`);
-  } catch (error) {
-    console.warn(`Expo push errored (job still complete): ${error?.message ?? error}`);
-  }
+    mobilePath: `/note/${job.noteId}`,
+    webPath: `/app/note/${job.noteId}`,
+    tag: `job-${job.id}`,
+    priority: "high",
+  });
 }
 
 /** Warn-only cap check; returns a warning string or null. */

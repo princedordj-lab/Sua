@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "40790696158",
+    "project_id": "sua-app-745f1",
+    "storage_bucket": "sua-app-745f1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:40790696158:android:a3219dc240c4ded1dd224f",
+        "android_client_info": {
+          "package_name": "com.pdordj.sua"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC0vPh7AmwLkwNGjmx9hahxEworlpm2f8U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

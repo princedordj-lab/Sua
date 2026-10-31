@@ -2,6 +2,7 @@ import NetInfo from "@react-native-community/netinfo";
 import {
   countPendingUploads,
   getNote,
+  getSetting,
   isNotePendingSync,
   listGenerationQueue,
   listNotesMissingStudySet,
@@ -43,6 +44,17 @@ type DrainDeps = {
   getAuthToken: () => Promise<string | null>;
   onNoteChange?: (noteId: string) => void;
 };
+
+/**
+ * Announce a finished generation locally — unless this device registered an
+ * Expo push token, in which case the server already pushes the same message
+ * when the job completes. Both firing would double-notify the student.
+ */
+async function announceReady(deps: DrainDeps, message: string) {
+  const expoToken = await getSetting(deps.db, "expo_push_token").catch(() => null);
+  if (expoToken) return;
+  showStudyReady(message);
+}
 
 /**
  * The one line every failure path ends on. Mirrors USER_MESSAGES.generic in
@@ -109,7 +121,7 @@ async function pullStudySet(
     })),
   });
   await setNoteAiState(deps.db, noteId, "ready");
-  if (notify) showStudyReady("Your study set is ready");
+  if (notify) await announceReady(deps, "Your study set is ready");
   deps.onNoteChange?.(noteId);
 }
 
@@ -123,7 +135,7 @@ async function finishReference(deps: DrainDeps, noteId: string) {
     await pullCourseNotes(deps.db, token, note.courseId).catch(() => {});
   }
   await setNoteAiState(deps.db, noteId, "ready");
-  showStudyReady("Your course reference is ready");
+  await announceReady(deps, "Your course reference is ready");
   deps.onNoteChange?.(noteId);
 }
 
@@ -137,7 +149,7 @@ async function finishLectureNote(deps: DrainDeps, noteId: string) {
     await pullCourseNotes(deps.db, token, note.courseId).catch(() => {});
   }
   await pullStudySet(deps, noteId, { notify: false });
-  showStudyReady("Your lecture note is ready");
+  await announceReady(deps, "Your lecture note is ready");
   await setNoteAiState(deps.db, noteId, "ready");
   deps.onNoteChange?.(noteId);
 }

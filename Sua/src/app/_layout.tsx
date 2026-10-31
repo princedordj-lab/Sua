@@ -8,6 +8,7 @@ import { AppearanceProvider } from "../state/appearance";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { SQLiteProvider, type SQLiteDatabase } from "expo-sqlite";
 import { migrateDb } from "../lib/notes";
+import { NotificationObserver } from "../components/notification-observer";
 
 // Hold the splash until the saved appearance preference is read, otherwise a
 // dark-mode user sees the light theme painted for a frame on every cold start.
@@ -31,6 +32,7 @@ export default function RootLayout() {
           <AppProvider>
             <AppearanceProvider>
               <Stack screenOptions={{ headerShown: false }} />
+              <NotificationObserver />
             </AppearanceProvider>
           </AppProvider>
         </SQLiteProvider>

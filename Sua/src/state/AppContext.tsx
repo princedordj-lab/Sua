@@ -11,7 +11,7 @@ import {
 import { useAuth, useClerk, useUser } from "@clerk/expo";
 import NetInfo from "@react-native-community/netinfo";
 import { useAuthVerdict, type AuthVerdict } from "../lib/auth-gate";
-import { AppState } from "react-native";
+import { AppState, Platform } from "react-native";
 import { coursesApi, profileApi, pushApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
 import {
@@ -33,7 +33,7 @@ import { writeOnboardedCache } from "../lib/onboarding-cache";
 import { flushUploads } from "../lib/uploads";
 import { drainGenerationQueue, reconcileAiOutputs } from "../lib/generate";
 import { flushStudyProgress } from "../lib/progress";
-import { registerForPushAndReport } from "../lib/notifications";
+import { addPushTokenRefreshListener, registerForPushAndReport } from "../lib/notifications";
 import type {
   Course,
   ServerCourse,
@@ -272,24 +272,48 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [db, getAuthToken, requestRefresh]);
 
-  // Register the Expo push token once per session unless the student turned
-  // server pushes off (notification settings); the stored token also powers
-  // the "off" path so re-enabling without a restart still needs the value.
-  // Needs a development build (Expo Go skips it silently).
-  const pushRegistered = useRef(false);
+  // Push registration is explicit (profile -> Notifications). Once opted in,
+  // keep the server row in step for this session: re-register if a sign-out
+  // released the token, and follow Expo token rollover without a restart.
+  // Permission is already granted, so re-registering never prompts; Expo Go and
+  // emulators without Play services simply never emit a token.
   useEffect(() => {
-    if (!signedInNow || userId || pushRegistered.current) return;
+    if (!isLoaded || !signedInNow || !userId) return;
+    let cancelled = false;
+    let subscription: { remove: () => void } | null = null;
     void (async () => {
-      if ((await getSetting(db, "push_enabled")) === "0") return;
-      const expoToken = await registerForPushAndReport();
-      if (!expoToken) return;
-      pushRegistered.current = true;
-      await setSetting(db, "expo_push_token", expoToken).catch(() => {});
-      const token = await getToken();
-      if (!token) return;
-      pushApi.registerToken(token, expoToken).catch(() => {});
+      if ((await getSetting(db, "push_enabled")) !== "1" || cancelled) return;
+      const stored = await getSetting(db, "expo_push_token").catch(() => null);
+      if (!stored && !cancelled) {
+        const expoToken = await registerForPushAndReport();
+        if (expoToken && !cancelled) {
+          await setSetting(db, "expo_push_token", expoToken).catch(() => {});
+          const token = await getToken().catch(() => null);
+          if (token) {
+            await pushApi
+              .registerToken(token, expoToken, Platform.OS === "ios" ? "ios" : "android")
+              .catch(() => {});
+          }
+        }
+      }
+      subscription = addPushTokenRefreshListener((expoToken) => {
+        void setSetting(db, "expo_push_token", expoToken).catch(() => {});
+        void getToken()
+          .then((token) => {
+            if (token) {
+              pushApi
+                .registerToken(token, expoToken, Platform.OS === "ios" ? "ios" : "android")
+                .catch(() => {});
+            }
+          })
+          .catch(() => {});
+      });
     })();
-  }, [signedInNow, userId, getToken, db]);
+    return () => {
+      cancelled = true;
+      subscription?.remove();
+    };
+  }, [db, getToken, isLoaded, signedInNow, userId]);
 
   useEffect(() => {
     let cancelled = false;
