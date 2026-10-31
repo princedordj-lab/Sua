@@ -72,6 +72,7 @@ const USER_FACING_MESSAGES = [
   "Couldn't read this file. Try a clearer photo or a text PDF.",
   "Couldn't read text from this file. Try a clearer PDF or re-upload.",
   "This .ppt file can't be parsed. Save it as .pptx and upload again.",
+  "Document reading is temporarily unavailable. Tap Try again in a few minutes.",
   "This file took too long to process. Tap Try again — finished pages are kept.",
   "Too many parts of this file could not be processed. Tap Try again, or upload it by chapter.",
   "This file is too long for one reference sheet. Upload it by chapter.",

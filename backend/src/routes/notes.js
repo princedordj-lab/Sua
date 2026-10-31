@@ -4,6 +4,7 @@ import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 import { maybeEnqueueGeneration } from "../lib/pipeline.js";
+import { triggerExtraction } from "../lib/extraction.js";
 
 export const notesRouter = Router();
 
@@ -131,6 +132,15 @@ notesRouter.get("/:noteId", async (req, res) => {
     });
   });
   if (!note) return res.status(404).json({ error: "Note not found" });
+  // Opportunistic resume for uploads without a generation job: a provider
+  // parse parked as pending is continued by the next note read. The claim
+  // gate keeps this from polling the provider more often than its backoff.
+  const stuck = note.assets?.find(
+    (asset) =>
+      asset.status === "active" &&
+      ["pending", "partial"].includes(asset.extractState ?? "none"),
+  );
+  if (stuck) triggerExtraction(stuck.id);
   res.json(shapeNote(note));
 });
 

@@ -104,6 +104,37 @@ export const documentRead = {
   maxOutputTokensPerImage: int("DOC_READ_IMAGE_MAX_TOKENS", 1_200),
 };
 
+/**
+ * LlamaParse (LlamaCloud REST) is the first extractor for PDF/DOCX/PPTX.
+ * Anything it cannot finish — disabled, auth/quota, exhausted retries, a
+ * timeout, or a parse with no usable text — falls through to the local-first
+ * PDF path or the local Office extractor in lib/extraction.js.
+ *
+ * LLAMAPARSE_FORMATS restores the free local-first PDF path by setting it to
+ * "docx,pptx"; LLAMAPARSE_ENABLED=0 disables the provider everywhere.
+ */
+export const llamaParse = {
+  enabled: process.env.LLAMAPARSE_ENABLED !== "0" && Boolean(process.env.LLAMA_CLOUD_API_KEY),
+  formats: (process.env.LLAMAPARSE_FORMATS ?? "pdf,docx,pptx")
+    .split(",")
+    .map((format) => format.trim().toLowerCase().replace(/^\./, ""))
+    .filter((format) => ["pdf", "docx", "pptx"].includes(format)),
+  // Cost Effective is the default on purpose: never switch tiers automatically.
+  tier: process.env.LLAMAPARSE_TIER ?? "cost_effective",
+  version: process.env.LLAMAPARSE_VERSION ?? "latest",
+  languages: (process.env.LLAMAPARSE_OCR_LANGUAGES ?? "en")
+    .split(",")
+    .map((language) => language.trim())
+    .filter(Boolean),
+  // Total time a submitted job may stay pending before the local path takes over.
+  timeoutMs: int("LLAMAPARSE_TIMEOUT_MS", 20 * 60_000),
+  maxAttempts: int("LLAMAPARSE_MAX_ATTEMPTS", 4),
+  uploadTimeoutMs: int("LLAMAPARSE_UPLOAD_TIMEOUT_MS", 120_000),
+  requestTimeoutMs: int("LLAMAPARSE_REQUEST_TIMEOUT_MS", 30_000),
+  // Poll backoff; the last value repeats until the job finishes or times out.
+  pollBackoffMs: [5_000, 10_000, 20_000, 30_000, 45_000, 60_000],
+};
+
 export const notePipeline = {
   // A source smaller than this skips the Split/Digest map-reduce entirely.
   shortSourcePages: int("SHORT_SOURCE_PAGES", 15),

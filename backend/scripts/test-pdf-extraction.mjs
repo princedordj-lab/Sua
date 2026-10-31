@@ -25,7 +25,7 @@ import {
   readLocalPdfPages,
   runExtractionPass,
 } from "../src/lib/extraction.js";
-import { longDoc } from "../src/config/ai-pipeline.js";
+import { llamaParse, longDoc } from "../src/config/ai-pipeline.js";
 
 console.log("=== PDF extraction (local-first) test suite ===");
 
@@ -200,6 +200,18 @@ function createFakeDb(asset) {
       truncated: false,
       ocrPages: 0,
       extractErrorCode: null,
+      extractProvider: null,
+      providerFileId: null,
+      providerJobId: null,
+      providerStatus: null,
+      providerTier: null,
+      providerCredits: null,
+      providerPagesFailed: 0,
+      providerPolls: 0,
+      providerAttempts: 0,
+      providerSubmittedAt: null,
+      providerNextPollAt: null,
+      providerError: null,
       ...asset,
     },
   };
@@ -232,6 +244,12 @@ function createFakeDb(asset) {
       updateMany: async ({ where, data }) => {
         if (state.asset.id !== where.id) return { count: 0 };
         if (where.extractState && state.asset.extractState !== where.extractState) return { count: 0 };
+        if (
+          where.providerJobId !== undefined &&
+          (state.asset.providerJobId ?? null) !== (where.providerJobId ?? null)
+        ) {
+          return { count: 0 };
+        }
         Object.assign(state.asset, data);
         return { count: 1 };
       },
@@ -279,11 +297,48 @@ function createFakeDb(asset) {
 // Fake providers: every model call and page render is counted
 // ---------------------------------------------------------------------------
 
-function createProviders({ native = null, ocr = null } = {}) {
-  const calls = { nativeRead: 0, ocrBatch: 0, ocrSingle: 0, renders: 0 };
+function createProviders({ native = null, ocr = null, llama = null } = {}) {
+  const calls = {
+    nativeRead: 0,
+    ocrBatch: 0,
+    ocrSingle: 0,
+    renders: 0,
+    llamaUpload: 0,
+    llamaCreate: 0,
+    llamaPoll: 0,
+    llamaResult: 0,
+  };
   const deps = {
     ...extractionDeps,
     nativeReadEnabled: () => true,
+    llamaParseEnabled: () => Boolean(llama),
+    llamaParseEligible: () => Boolean(llama),
+    uploadToLlamaCloud: async () => {
+      calls.llamaUpload += 1;
+      return llama?.upload ? llama.upload() : { fileId: "file-1" };
+    },
+    createParseJob: async () => {
+      calls.llamaCreate += 1;
+      if (llama?.create) return llama.create();
+      return { jobId: "job-1", status: "PENDING" };
+    },
+    getParseJob: async ({ jobId }) => {
+      calls.llamaPoll += 1;
+      if (llama?.poll) return llama.poll({ jobId });
+      return { jobId, status: "PENDING", errorMessage: null, credits: null };
+    },
+    getParseResult: async ({ jobId }) => {
+      calls.llamaResult += 1;
+      if (llama?.result) return llama.result({ jobId });
+      return {
+        jobId,
+        status: "COMPLETED",
+        credits: null,
+        errorMessage: null,
+        pages: [],
+        pagesFailed: 0,
+      };
+    },
     readDocumentNatively: async ({ format }) => {
       calls.nativeRead += 1;
       if (typeof native === "function") return native({ format });
@@ -308,12 +363,20 @@ function createProviders({ native = null, ocr = null } = {}) {
   return { deps, calls };
 }
 
-async function runPass({ pdf, providers, budgetMs = longDoc.extractBudgetMs, format = "pdf" }) {
-  const fake = createFakeDb({ format });
+async function runPass({
+  pdf,
+  providers,
+  budgetMs = longDoc.extractBudgetMs,
+  format = "pdf",
+  asset = null,
+  deps: overrideDeps = {},
+}) {
+  const fake = createFakeDb({ format, ...(asset ?? {}) });
   const deps = {
     ...providers.deps,
     db: fake.db,
     readAssetBytes: async () => pdf,
+    ...overrideDeps,
   };
   const outcome = await runExtractionPass(fake.state.asset.id, budgetMs, deps);
   return { ...fake, rows: fake.rows(), outcome, deps };
@@ -652,6 +715,226 @@ async function runPass({ pdf, providers, budgetMs = longDoc.extractBudgetMs, for
   assert.ok(rows.every((row) => row.status === "done" && row.text.length));
   assert.equal(fake.state.asset.truncated, false);
   console.log("✓ 12. Resumed scan: page-wise recovery, whole-file read not repeated");
+}
+
+// ---------------------------------------------------------------------------
+// 13. LlamaParse completion: ordered pages, failed page kept, no local work
+// ---------------------------------------------------------------------------
+{
+  const pdf = buildPdf([textPage("One"), textPage("Two", 2), textPage("Three", 3)]);
+  let localParses = 0;
+  const providers = createProviders({
+    llama: {
+      poll: async ({ jobId }) => ({ jobId, status: "COMPLETED", errorMessage: null, credits: 24 }),
+      result: async ({ jobId }) => ({
+        jobId,
+        status: "COMPLETED",
+        credits: 24,
+        errorMessage: null,
+        pages: [
+          { pageNumber: 1, success: true, markdown: "Parsed page one" },
+          { pageNumber: 2, success: false, markdown: "", error: "render failed" },
+          { pageNumber: 3, success: true, markdown: "Parsed page three" },
+        ],
+        pagesFailed: 1,
+      }),
+    },
+  });
+  const run = await runPass({
+    pdf,
+    providers,
+    asset: {
+      providerFileId: "file-1",
+      providerJobId: "job-1",
+      providerStatus: "RUNNING",
+      providerSubmittedAt: new Date(),
+      providerAttempts: 1,
+    },
+    deps: {
+      extractPdfPages: async (bytes) => {
+        localParses += 1;
+        return extractPdfPages(bytes);
+      },
+    },
+  });
+
+  assert.equal(run.outcome.state, "done");
+  assert.equal(localParses, 0, "a completed parse never runs the local extractor");
+  assert.equal(providers.calls.nativeRead, 0);
+  assert.equal(providers.calls.ocrBatch, 0, "failed pages are not OCR'd");
+  const rows = run.rows.filter((row) => row.index > 0);
+  assert.deepEqual(
+    rows.map((row) => [row.index, row.status]),
+    [
+      [1, "done"],
+      [2, "failed"],
+      [3, "done"],
+    ],
+  );
+  assert.equal(run.state.asset.extractState, "done");
+  assert.equal(run.state.asset.providerCredits, 24);
+  assert.equal(run.state.asset.providerPagesFailed, 1);
+  assert.equal(run.state.asset.truncated, true);
+
+  // Re-running the completed job replaces chunks idempotently.
+  const again = await runExtractionPass(run.state.asset.id, longDoc.extractBudgetMs, run.deps);
+  assert.equal(again.state, "done");
+  assert.equal(run.rows.filter((row) => row.index > 0).length, 3);
+  console.log("✓ 13. LlamaParse completion: ordered pages, failed page kept, no local work");
+}
+
+// ---------------------------------------------------------------------------
+// 14. Pending parse parks, resumes once, and never resubmits
+// ---------------------------------------------------------------------------
+{
+  const pdf = buildPdf([textPage("One")]);
+  let localParses = 0;
+  const providers = createProviders({ llama: {} });
+  const run = await runPass({
+    pdf,
+    providers,
+    deps: {
+      extractPdfPages: async (bytes) => {
+        localParses += 1;
+        return extractPdfPages(bytes);
+      },
+    },
+  });
+
+  assert.equal(run.outcome.state, "pending");
+  assert.equal(run.state.asset.extractState, "pending");
+  assert.equal(run.state.asset.providerJobId, "job-1");
+  assert.ok(run.state.asset.providerSubmittedAt instanceof Date);
+  assert.equal(providers.calls.llamaUpload, 1);
+  assert.equal(providers.calls.llamaCreate, 1);
+  assert.equal(localParses, 0, "a parked pass does not start local extraction");
+
+  // Next poll time reached: exactly one status check, no resubmission.
+  run.state.asset.extractState = "running";
+  run.state.asset.providerNextPollAt = new Date(Date.now() - 1000);
+  const second = await runExtractionPass(run.state.asset.id, longDoc.extractBudgetMs, run.deps);
+  assert.equal(second.state, "pending");
+  assert.equal(providers.calls.llamaPoll, 1);
+  assert.equal(providers.calls.llamaCreate, 1, "no second parse job");
+  assert.equal(run.state.asset.providerPolls, 1);
+
+  // Backoff not elapsed: no provider call at all.
+  run.state.asset.extractState = "running";
+  run.state.asset.providerNextPollAt = new Date(Date.now() + 60_000);
+  await runExtractionPass(run.state.asset.id, longDoc.extractBudgetMs, run.deps);
+  assert.equal(providers.calls.llamaPoll, 1, "backoff prevents poll spam");
+  console.log("✓ 14. Pending parse parks, resumes once, and never resubmits");
+}
+
+// ---------------------------------------------------------------------------
+// 15. Auth and quota are terminal: no silent fallback
+// ---------------------------------------------------------------------------
+for (const code of ["LLAMA_AUTH", "LLAMA_QUOTA"]) {
+  const pdf = buildPdf([textPage("One")]);
+  let localParses = 0;
+  const failure = Object.assign(new Error(`${code} from provider`), { code, retryable: false });
+  const providers = createProviders({
+    llama: {
+      create: () => {
+        throw failure;
+      },
+    },
+  });
+  const run = await runPass({
+    pdf,
+    providers,
+    deps: {
+      extractPdfPages: async (bytes) => {
+        localParses += 1;
+        return extractPdfPages(bytes);
+      },
+    },
+  });
+
+  assert.equal(run.outcome.state, "failed");
+  assert.equal(run.state.asset.extractState, "failed");
+  assert.equal(run.state.asset.extractErrorCode, code);
+  assert.equal(localParses, 0, `${code} must not fall back silently`);
+}
+console.log("✓ 15. Auth/quota failures are terminal and never touch the local path");
+
+// ---------------------------------------------------------------------------
+// 16. Exhausted retryable errors fall through to local extraction
+// ---------------------------------------------------------------------------
+{
+  const pdf = buildPdf([textPage("One"), textPage("Two", 2)]);
+  let localParses = 0;
+  const failure = Object.assign(new Error("provider 503"), {
+    code: "LLAMA_TRANSIENT",
+    retryable: true,
+  });
+  const providers = createProviders({
+    llama: {
+      create: () => {
+        throw failure;
+      },
+    },
+  });
+  const run = await runPass({
+    pdf,
+    providers,
+    asset: { providerAttempts: llamaParse.maxAttempts - 1 },
+    deps: {
+      extractPdfPages: async (bytes) => {
+        localParses += 1;
+        return extractPdfPages(bytes);
+      },
+    },
+  });
+
+  assert.equal(run.outcome.state, "done");
+  assert.equal(localParses, 1, "local extraction ran after the retry budget");
+  assert.ok(String(run.state.asset.providerError).startsWith("LLAMA_GAVE_UP"));
+  assert.equal(run.state.asset.extractProvider, "fallback");
+  assert.equal(providers.calls.nativeRead, 0);
+  console.log("✓ 16. Exhausted retryable errors fall back to local extraction");
+}
+
+// ---------------------------------------------------------------------------
+// 17. A completed parse with no usable text also falls back locally
+// ---------------------------------------------------------------------------
+{
+  const pdf = buildPdf([textPage("One")]);
+  let localParses = 0;
+  const providers = createProviders({
+    llama: {
+      poll: async ({ jobId }) => ({
+        jobId,
+        status: "COMPLETED",
+        errorMessage: null,
+        credits: 8,
+      }),
+      result: async ({ jobId }) => ({
+        jobId,
+        status: "COMPLETED",
+        credits: 8,
+        errorMessage: null,
+        pages: [{ pageNumber: 1, success: true, markdown: "" }],
+        pagesFailed: 0,
+      }),
+    },
+  });
+  const run = await runPass({
+    pdf,
+    providers,
+    asset: { providerJobId: "job-1", providerSubmittedAt: new Date() },
+    deps: {
+      extractPdfPages: async (bytes) => {
+        localParses += 1;
+        return extractPdfPages(bytes);
+      },
+    },
+  });
+
+  assert.equal(run.outcome.state, "done");
+  assert.equal(localParses, 1, "an empty provider result falls through");
+  assert.ok(String(run.state.asset.providerError).startsWith("LLAMA_EMPTY_RESULT"));
+  console.log("✓ 17. Empty parse result falls back to local extraction");
 }
 
 console.log("\nAll PDF extraction checks passed.");

@@ -255,10 +255,13 @@ export async function releaseJobForResume(jobId) {
 
 /** Extraction failed for a document the job depends on — permanent, honest, no retry. */
 function failJobExtraction(job, asset) {
+  const code = asset.extractErrorCode;
   const message =
-    asset.extractErrorCode === "UNREADABLE_PPT"
+    code === "UNREADABLE_PPT"
       ? "This .ppt file can't be parsed. Save it as .pptx and upload again."
-      : "Couldn't read text from this file. Try a clearer PDF or re-upload.";
+      : code === "LLAMA_AUTH" || code === "LLAMA_QUOTA"
+        ? "Document reading is temporarily unavailable. Tap Try again in a few minutes."
+        : "Couldn't read text from this file. Try a clearer PDF or re-upload.";
   console.warn(`Job ${job.id} failed: asset extraction ${asset.extractErrorCode ?? "failed"}`);
   return prisma.job
     .updateMany({
@@ -471,10 +474,19 @@ async function processClaimedJob(claimed, deadline = null) {
       if (failedNow) return failJobExtraction(job, { extractErrorCode: null, ...failedNow });
       if (states.some((asset) => asset.extractState !== "done")) {
         await releaseJob(job.id);
-        await prisma.job.updateMany({
-          where: { id: job.id, state: "queued" },
-          data: { runAfter: new Date(Date.now() + 60_000) },
-        }).catch(() => {});
+        // Stamp the wait: jobs.js reaps a queued job with no startedAt after
+        // 10 minutes, and a provider parse may legitimately wait longer.
+        await prisma
+          .$executeRaw`
+            UPDATE "jobs"
+            SET "runAfter" = NOW() + interval '60 seconds',
+                "startedAt" = COALESCE("startedAt", NOW()),
+                "updatedAt" = NOW()
+            WHERE "id" = ${job.id} AND "state" = 'queued'
+          `
+          .catch((error) => {
+            console.warn(`could not reschedule job ${job.id}: ${error?.message ?? error}`);
+          });
         console.log(`Job ${job.id} released: extraction still in progress (${states.map((s) => s.extractState).join(",")})`);
         return;
       }

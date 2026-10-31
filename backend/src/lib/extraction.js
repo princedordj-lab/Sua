@@ -36,7 +36,16 @@ import {
   MAX_TEXT_CHARS,
 } from "./extract.js";
 import { geminiImageText, geminiOcrBatch } from "./ai.js";
-import { longDoc, notePipeline, documentRead } from "../config/ai-pipeline.js";
+import { longDoc, notePipeline, documentRead, llamaParse } from "../config/ai-pipeline.js";
+import {
+  createParseJob,
+  getParseJob,
+  getParseResult,
+  llamaParseEligible,
+  llamaParseEnabled,
+  llamaparseMimeType,
+  uploadToLlamaCloud,
+} from "./llamaparse.js";
 import {
   nativeReadBlocked,
   nativeReadEligible,
@@ -66,6 +75,14 @@ export const extractionDeps = {
   nativeReadEnabled,
   nativeReadEligible,
   nativeReadBlocked,
+  // LlamaParse is the first extractor for PDF/DOCX/PPTX; these are injectable
+  // so the focused extraction checks can run the full state machine offline.
+  llamaParseEnabled,
+  llamaParseEligible,
+  uploadToLlamaCloud,
+  createParseJob,
+  getParseJob,
+  getParseResult,
 };
 
 
@@ -114,6 +131,7 @@ export async function claimExtractionAsset({ targetAssetId = null, db = prisma }
       ? tx.$queryRaw`
           SELECT a."id" FROM "assets" a
           WHERE a."kind" = 'document' AND a."status" = 'active' AND a."id" = ${targetAssetId}
+            AND (a."providerNextPollAt" IS NULL OR a."providerNextPollAt" <= NOW())
             AND (
               a."extractState" IN ('pending', 'partial')
               OR (a."extractState" = 'running' AND a."updatedAt" < NOW() - ${staleAfter}::interval)
@@ -123,6 +141,7 @@ export async function claimExtractionAsset({ targetAssetId = null, db = prisma }
       : tx.$queryRaw`
           SELECT a."id" FROM "assets" a
           WHERE a."kind" = 'document' AND a."status" = 'active'
+            AND (a."providerNextPollAt" IS NULL OR a."providerNextPollAt" <= NOW())
             AND (
               a."extractState" IN ('pending', 'partial')
               OR (a."extractState" = 'running' AND a."updatedAt" < NOW() - ${staleAfter}::interval)
@@ -293,6 +312,12 @@ export async function runExtractionPass(
     warn("SIGNATURE", `asset ${assetId} format=${format} content does not match its extension; trying anyway`);
   }
 
+  // LlamaParse is the first extractor for PDF/DOCX/PPTX. A null return means
+  // the provider is unavailable or gave up, and the local-first pipeline below
+  // runs exactly as before; a non-null result finishes this pass.
+  const llama = await tryLlamaParse(asset, format, bytes, started + budgetMs, deps);
+  if (llama) return llama;
+
   // ---- PDF: local text layer first, model fallback only for scans ---------
   let localPdf = null;
   if (format === "pdf") {
@@ -329,6 +354,441 @@ export async function runExtractionPass(
     `[extract] summary asset=${assetId} format=${format} source=local pages=${outcome.pagesDone ?? 0}/${outcome.pagesTotal ?? 0}${localFields} ocr=${outcome.ocrPages ?? 0} blank=${outcome.blankPages ?? 0} skipped=${outcome.skippedPages ?? 0} unrecovered=${outcome.unrecoveredPages ?? 0} state=${outcome.state ?? "failed"} code=${outcome.errorCode ?? "-"} ms=${Date.now() - started}`,
   );
   return outcome;
+}
+
+// ---------------------------------------------------------------------------
+// LlamaParse: first extractor for PDF/DOCX/PPTX
+// ---------------------------------------------------------------------------
+
+// Once one of these is recorded the provider is finished for this asset and
+// every later pass goes straight to the local pipeline.
+const LLAMA_FALLBACK_PREFIXES = [
+  "LLAMA_GAVE_UP",
+  "LLAMA_JOB_FAILED",
+  "LLAMA_EMPTY_RESULT",
+  "LLAMA_TIMEOUT",
+];
+
+function providerDetail(error) {
+  return String(error?.message ?? error ?? "")
+    .replace(/\s+/g, " ")
+    .slice(0, 400);
+}
+
+function pollDelay(attempt) {
+  const delays = llamaParse.pollBackoffMs;
+  return delays[Math.min(Math.max(attempt, 0), delays.length - 1)];
+}
+
+async function parkLlama(db, assetId, data = {}) {
+  await db.asset
+    .updateMany({
+      where: { id: assetId, extractState: "running" },
+      data: { extractState: "pending", updatedAt: new Date(), ...data },
+    })
+    .catch(() => {});
+  return { state: "pending" };
+}
+
+async function markLlamaFallback(db, assetId, code, detail, attempts = null) {
+  await db.asset
+    .updateMany({
+      where: { id: assetId },
+      data: {
+        extractProvider: "fallback",
+        providerError: `${code}: ${detail ?? ""}`.slice(0, 400),
+        // The local pipeline must be claimable immediately, not behind the
+        // provider's last poll time.
+        providerNextPollAt: null,
+        ...(attempts == null ? {} : { providerAttempts: attempts }),
+      },
+    })
+    .catch(() => {});
+}
+
+async function handleLlamaError(db, asset, error, stage, attempts) {
+  const code = error?.code ?? "LLAMA_TRANSIENT";
+  const detail = providerDetail(error);
+
+  if (code === "LLAMA_AUTH" || code === "LLAMA_QUOTA") {
+    await db.asset
+      .updateMany({
+        where: { id: asset.id },
+        data: {
+          extractState: "failed",
+          extractErrorCode: code,
+          providerStatus: "FAILED",
+          providerError: `${code}: ${detail}`.slice(0, 400),
+        },
+      })
+      .catch(() => {});
+    console.warn(`[llamaparse] asset=${asset.id} stage=${stage} code=${code} state=failed`);
+    return { state: "failed", errorCode: code };
+  }
+
+  if (error?.retryable && attempts < llamaParse.maxAttempts) {
+    const delay = pollDelay(attempts - 1);
+    console.warn(
+      `[llamaparse] asset=${asset.id} stage=${stage} code=${code} retry=${attempts}/${llamaParse.maxAttempts} in=${delay}ms`,
+    );
+    return parkLlama(db, asset.id, {
+      providerAttempts: attempts,
+      providerError: `${code}: ${detail}`.slice(0, 400),
+      providerNextPollAt: new Date(Date.now() + delay),
+    });
+  }
+
+  console.warn(`[llamaparse] asset=${asset.id} stage=${stage} code=${code} fallback=local`);
+  await markLlamaFallback(db, asset.id, "LLAMA_GAVE_UP", `${code}: ${detail}`, attempts);
+  return null;
+}
+
+/**
+ * Provider state machine. Returns an outcome when this pass is finished or
+ * deliberately parked, and null when the caller should run the local pipeline.
+ * Network calls happen outside any transaction; each write is a short update.
+ */
+export async function tryLlamaParse(asset, format, bytes, deadline, deps = extractionDeps) {
+  if (!deps.llamaParseEnabled() || !deps.llamaParseEligible(format)) return null;
+
+  const storedError = String(asset.providerError ?? "");
+  if (LLAMA_FALLBACK_PREFIXES.some((code) => storedError.startsWith(code))) return null;
+
+  const db = deps.db;
+  const submittedAt = asset.providerSubmittedAt ? new Date(asset.providerSubmittedAt) : null;
+  if (submittedAt && Date.now() - submittedAt.getTime() > llamaParse.timeoutMs) {
+    console.warn(`[llamaparse] asset=${asset.id} code=LLAMA_TIMEOUT fallback=local`);
+    await markLlamaFallback(
+      db,
+      asset.id,
+      "LLAMA_TIMEOUT",
+      "parse deadline exceeded",
+      asset.providerAttempts ?? 0,
+    );
+    return null;
+  }
+
+  if (asset.providerJobId) {
+    const nextPollAt = asset.providerNextPollAt ? new Date(asset.providerNextPollAt) : null;
+    if (nextPollAt && nextPollAt.getTime() > Date.now()) {
+      return parkLlama(db, asset.id);
+    }
+
+    let job;
+    try {
+      job = await deps.getParseJob({
+        jobId: asset.providerJobId,
+        timeoutMs: llamaParse.requestTimeoutMs,
+      });
+    } catch (error) {
+      return handleLlamaError(db, asset, error, "poll", (asset.providerAttempts ?? 0) + 1);
+    }
+
+    if (job.status === "PENDING" || job.status === "RUNNING") {
+      const polls = (asset.providerPolls ?? 0) + 1;
+      return parkLlama(db, asset.id, {
+        providerStatus: job.status,
+        providerPolls: polls,
+        providerCredits: job.credits ?? asset.providerCredits ?? null,
+        providerNextPollAt: new Date(Date.now() + pollDelay(polls - 1)),
+      });
+    }
+
+    if (job.status === "FAILED" || job.status === "CANCELLED") {
+      console.warn(
+        `[llamaparse] asset=${asset.id} code=LLAMA_JOB_FAILED status=${job.status} fallback=local`,
+      );
+      await markLlamaFallback(db, asset.id, "LLAMA_JOB_FAILED", job.errorMessage ?? job.status);
+      return null;
+    }
+
+    let result;
+    try {
+      result = await deps.getParseResult({
+        jobId: asset.providerJobId,
+        timeoutMs: llamaParse.requestTimeoutMs,
+      });
+    } catch (error) {
+      return handleLlamaError(db, asset, error, "result", (asset.providerAttempts ?? 0) + 1);
+    }
+
+    if (result.status !== "COMPLETED") {
+      // Status and result reads raced. Poll again on the next pass.
+      const polls = (asset.providerPolls ?? 0) + 1;
+      return parkLlama(db, asset.id, {
+        providerStatus: result.status,
+        providerPolls: polls,
+        providerNextPollAt: new Date(Date.now() + pollDelay(polls - 1)),
+      });
+    }
+
+    return persistLlamaPages(asset, format, result, bytes, deadline, deps);
+  }
+
+  // Submit exactly once. The conditional update is the duplicate-job guard:
+  // a resumed or concurrent pass that loses the race parks instead of paying
+  // for a second parse.
+  const attempts = (asset.providerAttempts ?? 0) + 1;
+  const claimed = await db.asset
+    .updateMany({
+      where: { id: asset.id, providerJobId: null },
+      data: {
+        extractProvider: "llamaparse",
+        providerTier: llamaParse.tier,
+        providerAttempts: attempts,
+      },
+    })
+    .catch(() => ({ count: 0 }));
+  if (!claimed?.count) {
+    console.log(`[llamaparse] asset=${asset.id} code=SUBMIT_RACE park`);
+    return parkLlama(db, asset.id);
+  }
+
+  const remaining = deadline ? deadline - Date.now() : llamaParse.uploadTimeoutMs;
+  if (remaining < NATIVE_MIN_BUDGET_MS) {
+    console.log(`[llamaparse] asset=${asset.id} code=BUDGET remaining=${remaining}ms park`);
+    return parkLlama(db, asset.id, {
+      providerNextPollAt: new Date(Date.now() + pollDelay(0)),
+    });
+  }
+
+  try {
+    let fileId = asset.providerFileId;
+    if (!fileId) {
+      const uploaded = await deps.uploadToLlamaCloud({
+        bytes,
+        filename: `${asset.id}.${format}`,
+        mimeType: llamaparseMimeType(format),
+        timeoutMs: Math.min(llamaParse.uploadTimeoutMs, Math.max(remaining, NATIVE_MIN_BUDGET_MS)),
+      });
+      fileId = uploaded.fileId;
+      await db.asset
+        .updateMany({ where: { id: asset.id }, data: { providerFileId: fileId } })
+        .catch(() => {});
+    }
+
+    const job = await deps.createParseJob({
+      fileId,
+      tier: llamaParse.tier,
+      version: llamaParse.version,
+      languages: llamaParse.languages,
+      maxPages: longDoc.maxPages,
+      timeoutMs: Math.min(llamaParse.requestTimeoutMs, Math.max(remaining, 15_000)),
+    });
+
+    console.log(
+      `[llamaparse] asset=${asset.id} submitted job=${job.jobId} status=${job.status} tier=${llamaParse.tier}`,
+    );
+    return parkLlama(db, asset.id, {
+      providerFileId: fileId,
+      providerJobId: job.jobId,
+      providerStatus: job.status,
+      providerSubmittedAt: new Date(),
+      providerPolls: 0,
+      providerNextPollAt: new Date(Date.now() + pollDelay(0)),
+    });
+  } catch (error) {
+    return handleLlamaError(db, asset, error, "submit", attempts);
+  }
+}
+
+/**
+ * Persist a completed parse as SourceChunks with the same shape the native and
+ * local paths use. Returns null when nothing usable came back so the caller can
+ * run the local extractor in the same pass.
+ */
+async function persistLlamaPages(asset, format, result, bytes, deadline, deps) {
+  const db = deps.db;
+  const cap = longDoc.maxPages;
+  const maxChars = longDoc.maxSourceChars;
+  const pages = [...(result.pages ?? [])].sort((a, b) => a.pageNumber - b.pageNumber);
+
+  const rows = [];
+  let size = 0;
+  let usable = 0;
+  let failed = 0;
+  let capped = false;
+  let lastPage = 0;
+
+  for (const page of pages) {
+    const pageNumber = Number(page.pageNumber);
+    if (!Number.isFinite(pageNumber) || pageNumber < 1) continue;
+    if (pageNumber > cap) {
+      capped = true;
+      break;
+    }
+    if (size >= maxChars) {
+      capped = true;
+      break;
+    }
+
+    const raw = String(page.markdown ?? "").trim();
+    if (!page.success) {
+      failed += 1;
+      rows.push({
+        assetId: asset.id,
+        userId: asset.userId,
+        index: pageNumber,
+        label: `p. ${pageNumber}`,
+        startPage: pageNumber,
+        endPage: pageNumber,
+        text: "",
+        hash: sha1(""),
+        status: "failed",
+        errorCode: "LLAMA_PAGE_FAILED",
+      });
+      lastPage = Math.max(lastPage, pageNumber);
+      continue;
+    }
+
+    if (!raw) {
+      // An empty PDF page is usually a scan without a text layer; keep the row
+      // so page numbers stay true and let the bounded OCR pass try it. Office
+      // pages with no text carry nothing we can render, so they are dropped.
+      if (format === "pdf") {
+        rows.push({
+          assetId: asset.id,
+          userId: asset.userId,
+          index: pageNumber,
+          label: `p. ${pageNumber}`,
+          startPage: pageNumber,
+          endPage: pageNumber,
+          text: "",
+          hash: sha1(""),
+          status: "pending",
+        });
+        lastPage = Math.max(lastPage, pageNumber);
+      }
+      continue;
+    }
+
+    const slice = raw.length > maxChars - size ? raw.slice(0, maxChars - size) : raw;
+    if (!slice) {
+      capped = true;
+      break;
+    }
+    rows.push({
+      assetId: asset.id,
+      userId: asset.userId,
+      index: pageNumber,
+      label: `p. ${pageNumber}`,
+      startPage: pageNumber,
+      endPage: pageNumber,
+      text: slice,
+      hash: sha1(slice),
+      status: "done",
+    });
+    size += slice.length;
+    usable += 1;
+    lastPage = Math.max(lastPage, pageNumber);
+  }
+
+  if (!usable) {
+    console.warn(
+      `[llamaparse] asset=${asset.id} code=LLAMA_EMPTY_RESULT pages=${pages.length} fallback=local`,
+    );
+    await markLlamaFallback(
+      db,
+      asset.id,
+      "LLAMA_EMPTY_RESULT",
+      `${pages.length} page(s), no usable text`,
+      asset.providerAttempts ?? 0,
+    );
+    return null;
+  }
+
+  const pagesTotal = Math.max(pages.length, lastPage);
+  const truncated = capped || failed > 0 || size >= maxChars;
+  const compat = rows
+    .filter((row) => row.status === "done" && row.text)
+    .map((row) => `## ${row.label}\n\n${row.text}`)
+    .join("\n\n")
+    .slice(0, MAX_TEXT_CHARS)
+    .trim();
+
+  await db.$transaction(async (tx) => {
+    await tx.sourceChunk.deleteMany({ where: { assetId: asset.id } });
+    await tx.sourceChunk.create({
+      data: {
+        assetId: asset.id,
+        userId: asset.userId,
+        index: -1,
+        text: "",
+        hash: sha1(JSON.stringify({ jobId: result.jobId, pagesTotal, failed })),
+        status: "done",
+        digest: {
+          llamaparse: {
+            jobId: result.jobId,
+            tier: llamaParse.tier,
+            version: llamaParse.version,
+            credits: result.credits ?? null,
+            pagesTotal,
+            pagesFailed: failed,
+          },
+        },
+      },
+    });
+    if (rows.length) await tx.sourceChunk.createMany({ data: rows });
+    await tx.asset.update({
+      where: { id: asset.id },
+      data: {
+        extractState: "done",
+        extractedText: compat || null,
+        pagesDone: lastPage,
+        pagesTotal,
+        nextPage: Math.min(lastPage + 1, cap + 1),
+        truncated,
+        ocrPages: 0,
+        extractErrorCode: null,
+        providerStatus: "COMPLETED",
+        providerCredits: result.credits ?? asset.providerCredits ?? null,
+        providerPagesFailed: failed,
+        providerError: null,
+      },
+    });
+  });
+
+  let ocr = { ocrPages: 0, blankPages: 0, unrecoveredPages: 0, skippedPages: 0 };
+  if (format === "pdf") {
+    ocr = {
+      ocrPages: 0,
+      blankPages: 0,
+      unrecoveredPages: 0,
+      skippedPages: 0,
+      ...(await recoverUnreadablePages({
+        asset: { ...asset, ocrPages: 0 },
+        bytes,
+        deadline,
+        ocrPagesDone: 0,
+        deps,
+      })),
+    };
+    if (ocr.ocrPages) {
+      await db.asset
+        .update({ where: { id: asset.id }, data: { ocrPages: ocr.ocrPages } })
+        .catch(() => {});
+    }
+    if (ocr.skippedPages > 0) {
+      await db.asset
+        .update({ where: { id: asset.id }, data: { truncated: true } })
+        .catch(() => {});
+    }
+  }
+
+  console.log(
+    `[extract] stage=llamaparse asset=${asset.id} format=${format} pages=${rows.length} usable=${usable} failed=${failed} credits=${result.credits ?? "-"} ocr=${ocr.ocrPages} blank=${ocr.blankPages} skipped=${ocr.skippedPages} state=done truncated=${truncated || ocr.skippedPages > 0}`,
+  );
+  return {
+    state: "done",
+    pagesDone: lastPage,
+    pagesTotal,
+    ocrPages: ocr.ocrPages,
+    blankPages: ocr.blankPages,
+    unrecoveredPages: ocr.unrecoveredPages,
+    skippedPages: ocr.skippedPages,
+    truncated: truncated || ocr.skippedPages > 0,
+    llamaparse: true,
+  };
 }
 
 /**

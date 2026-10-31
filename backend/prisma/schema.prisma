@@ -145,6 +145,20 @@ model Asset {
   truncated      Boolean  @default(false)
   ocrPages       Int      @default(0)
   extractErrorCode String?
+  // LlamaParse provider state (migration 19). The file/job ids make a parse
+  // resumable across serverless invocations; the rest is monitoring metadata.
+  extractProvider   String?
+  providerFileId    String?
+  providerJobId     String?
+  providerStatus    String?
+  providerTier      String?
+  providerCredits   Float?
+  providerPagesFailed Int    @default(0)
+  providerPolls     Int      @default(0)
+  providerAttempts  Int      @default(0)
+  providerSubmittedAt DateTime?
+  providerNextPollAt  DateTime?
+  providerError     String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -153,6 +167,8 @@ model Asset {
   @@index([userId])
   @@index([noteId])
   @@index([extractState])
+  @@index([providerNextPollAt])
+  @@index([providerJobId])
   @@map("assets")
 }
 
