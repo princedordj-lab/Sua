@@ -322,7 +322,10 @@ export type HomeSummary = {
   totalCards: number;
   reviewedToday: number;
   quizAttemptsToday: number;
+  // Server-synced daily app-open streak (same count as mobile).
   streakDays: number;
+  streakActiveToday?: boolean;
+  streakLastActiveDay?: string | null;
   weekly: { date: string; reviewed: number }[];
 };
 

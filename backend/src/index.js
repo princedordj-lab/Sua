@@ -15,6 +15,7 @@ import { runJobs } from "./lib/runner.js";
 import { extractNext } from "./lib/extraction.js";
 import { pruneNoteTombstones, retryStorageDeletions } from "./lib/note-deletion.js";
 import { sendDueReminders } from "./lib/reminders.js";
+import { sendStreakNotices } from "./lib/streak.js";
 import { studyRouter } from "./routes/study.js";
 
 const app = express();
@@ -127,7 +128,24 @@ async function handleTick(req, res) {
             console.warn("Reminder sweep failed:", error?.message ?? error);
             return null;
           });
-    res.json({ ok: true, ...result, extraction, janitor: { storage, tombstones }, reminders });
+    // Streak sweep: warn after two quiet days, reset after three. The count
+    // the app shows is computed on read, so a missed sweep cannot show stale
+    // numbers — this only drives the two notifications and the cached row.
+    const streakNotices =
+      process.env.STREAK_NOTICES === "0"
+        ? null
+        : await sendStreakNotices().catch((error) => {
+            console.warn("Streak notice sweep failed:", error?.message ?? error);
+            return null;
+          });
+    res.json({
+      ok: true,
+      ...result,
+      extraction,
+      janitor: { storage, tombstones },
+      reminders,
+      streakNotices,
+    });
   } catch (err) {
     console.error("Tick error:", err);
     res.status(500).json({ error: "Tick failed", message: err?.message ?? String(err) });

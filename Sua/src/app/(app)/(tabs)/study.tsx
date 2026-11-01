@@ -14,7 +14,6 @@ import { colors } from "../../../config/theme";
 import { usePalette } from "../../../state/appearance";
 import { useApp } from "../../../state/AppContext";
 import {
-  computeStreak,
   computeWeeklyProgress,
   countDueCards,
   getNextDueAt,
@@ -25,10 +24,9 @@ import {
 export default function Study() {
   const pv = usePalette();
   const db = useSQLiteContext();
-  const { courses } = useApp();
+  const { courses, appStreak, refreshAppStreak } = useApp();
   const [due, setDue] = useState(0);
   const [nextDue, setNextDue] = useState<string | null>(null);
-  const [streak, setStreak] = useState(0);
   const [weekly, setWeekly] = useState({
     cardsReviewed: 0,
     recallPercent: 0,
@@ -41,7 +39,6 @@ export default function Study() {
     const now = new Date().toISOString();
     setDue(await countDueCards(db, now));
     setNextDue(await getNextDueAt(db));
-    setStreak(await computeStreak(db));
     setWeekly(await computeWeeklyProgress(db));
     setSets(await listStudySetNotes(db));
   }, [db]);
@@ -57,10 +54,11 @@ export default function Study() {
     setRefreshing(true);
     try {
       await load();
+      void refreshAppStreak();
     } finally {
       setRefreshing(false);
     }
-  }, [load]);
+  }, [load, refreshAppStreak]);
 
   function nextDueLabel() {
     if (!nextDue) return null;
@@ -93,11 +91,11 @@ export default function Study() {
                 DAILY REVIEW
               </Text>
             </View>
-            {streak > 0 ? (
+            {appStreak.streakDays > 0 ? (
               <View className="flex-row items-center gap-1 rounded-chip bg-black/20 px-2.5 py-1">
                 <Flame size={13} color={colors.gold.DEFAULT} />
                 <Text className="text-caption font-sans-bold text-ink-inverse">
-                  {streak}-day streak
+                  {appStreak.streakDays}-day streak
                 </Text>
               </View>
             ) : null}

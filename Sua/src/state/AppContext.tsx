@@ -34,6 +34,16 @@ import { flushUploads } from "../lib/uploads";
 import { drainGenerationQueue, reconcileAiOutputs } from "../lib/generate";
 import { flushStudyProgress } from "../lib/progress";
 import { addPushTokenRefreshListener, registerForPushAndReport } from "../lib/notifications";
+import {
+  EMPTY_APP_STREAK,
+  localDayKey,
+  optimisticStreak,
+  readCachedStreak,
+  readPendingDays,
+  recordAppOpen,
+  syncAppStreak,
+  type AppStreak,
+} from "../lib/streak";
 import type {
   Course,
   ServerCourse,
@@ -61,6 +71,9 @@ type AppContextValue = {
   hasCompletedOnboarding: boolean;
   profile: UserProfile | null;
   courses: Course[];
+  // Server-synced daily app-open streak (same number on mobile and web).
+  appStreak: AppStreak;
+  refreshAppStreak: () => Promise<void>;
   getAuthToken: () => Promise<string | null>;
   retryHydration: () => void;
   // Push queued note changes (deletes included) now instead of waiting for the
@@ -169,6 +182,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Connectivity and foreground events bump it; a failed sync schedules one
   // bounded retry so queued edits resume without waiting for an app restart.
   const [refreshTick, setRefreshTick] = useState(0);
+  // Tagged with the account so a late response for a previous session is never
+  // displayed under the new one.
+  const [streakState, setStreakState] = useState<{
+    userId: string;
+    value: AppStreak;
+  } | null>(null);
   const [hydrationIssue, setHydrationIssue] = useState(false);
   const [hydrationError, setHydrationError] = useState<string | null>(null);
   // A hydration snapshot only describes the state it was requested for. Local
@@ -314,6 +333,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
       subscription?.remove();
     };
   }, [db, getToken, isLoaded, signedInNow, userId]);
+
+  // Daily streak: queue today's open, paint the offline estimate immediately,
+  // then adopt the server's count. `refreshTick` already covers launch,
+  // foreground and reconnect, so no extra listeners are needed here.
+  useEffect(() => {
+    if (!isLoaded || !signedInNow || !userId) return;
+    let cancelled = false;
+    void (async () => {
+      await recordAppOpen(db, userId).catch(() => {});
+      const [cache, pending] = await Promise.all([
+        readCachedStreak(db, userId),
+        readPendingDays(db, userId),
+      ]);
+      if (cancelled) return;
+      setStreakState({
+        userId,
+        value: optimisticStreak(cache, pending, localDayKey()),
+      });
+      const synced = await syncAppStreak({ db, getAuthToken, userId }).catch(
+        () => null,
+      );
+      if (!cancelled && synced) setStreakState({ userId, value: synced });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [db, getAuthToken, isLoaded, refreshTick, signedInNow, userId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -631,6 +677,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await pullTombstones(db, token).catch(() => {});
   }, [db, getToken]);
 
+  // Pull-to-refresh forces a fresh server read so another device's open (or a
+  // missed sweep) is reflected without waiting for the next day.
+  const refreshAppStreak = useCallback(async () => {
+    if (!userId) return;
+    const synced = await syncAppStreak({
+      db,
+      getAuthToken,
+      userId,
+      force: true,
+    }).catch(() => null);
+    if (synced) setStreakState({ userId, value: synced });
+  }, [db, getAuthToken, userId]);
+
+  const appStreak =
+    streakState && userId && streakState.userId === userId
+      ? streakState.value
+      : EMPTY_APP_STREAK;
+
   const profile = useMemo<UserProfile | null>(() => {
     if (active.profile) return serverProfileToLocal(active.profile);
     if (signedInNow && user) {
@@ -670,6 +734,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       hasCompletedOnboarding,
       profile,
       courses: active.courses,
+      appStreak,
+      refreshAppStreak,
       getAuthToken,
       retryHydration,
       flushNoteQueue,
@@ -684,6 +750,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [
       active.courses,
       addCourse,
+      appStreak,
       authVerdict,
       completeOnboarding,
       deleteAccount,
@@ -700,6 +767,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       isSignedOut,
       isSigningOut,
       profile,
+      refreshAppStreak,
       retryHydration,
       signOut,
       updateCourse,

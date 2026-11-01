@@ -18,6 +18,8 @@ import { Avatar, Button, ErrorState, ProgressBar, Skeleton } from "./ui";
 import { useAppData } from "./app-data";
 import { SuaChatMark, type SuaChatIconComponent } from "./sua-chat-icon";
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport";
+import { useApi } from "@/lib/use-api";
+import { ensureDailyActivity } from "@/lib/activity";
 
 const NAV: { href: string; label: string; Icon: SuaChatIconComponent; iconSize?: number }[] = [
   { href: "/app/home", label: "Home", Icon: Home },
@@ -102,6 +104,7 @@ function AppShellContent({
   const { user } = useUser();
   const { profile, courses, loading, error, refresh } = useAppData();
   const { containerRef, isKeyboardOpen } = useVisualViewportHeight<HTMLDivElement>();
+  const api = useApi();
 
   // New accounts finish onboarding before the shell becomes useful. The
   // server verdict also covers accounts created before the flag existed; the
@@ -114,6 +117,14 @@ function AppShellContent({
         : !profile.onboarded;
     if (needsOnboarding) router.replace("/onboarding");
   }, [profile, courses.length, router]);
+
+  // Records the daily app open for every /app/* page; Home and Study also
+  // await it before reading the summary so today is included.
+  const accountId = profile?.id ?? user?.id ?? null;
+  useEffect(() => {
+    if (!accountId) return;
+    void ensureDailyActivity(api, accountId).catch(() => {});
+  }, [accountId, api]);
 
   const name = profile?.name || user?.fullName || user?.firstName || "Sua student";
   const usage = profile?.usage;

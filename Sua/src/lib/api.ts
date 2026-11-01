@@ -138,6 +138,27 @@ export const profileApi = {
     apiRequest<void>("/me/delete", { method: "POST", token }),
 };
 
+export type ActivityResponse = {
+  streakDays: number;
+  activeToday: boolean;
+  lastActiveDay: string | null;
+  timezone: string;
+};
+
+// App-open streak: the server owns the count; the device only reports days.
+export const streakApi = {
+  record: (
+    token: string,
+    payload: { days: string[]; timezone: string; utcOffsetMinutes?: number },
+  ) =>
+    apiRequest<ActivityResponse>("/me/activity", {
+      method: "POST",
+      token,
+      timeoutMs: 15_000,
+      body: JSON.stringify(payload),
+    }),
+};
+
 export const notesApi = {
   listForCourse: (token: string, courseId: string) =>
     apiRequest<ServerNote[]>(`/notes/course/${courseId}`, { token }),

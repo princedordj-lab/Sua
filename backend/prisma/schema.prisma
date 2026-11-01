@@ -15,52 +15,73 @@ datasource db {
 }
 
 model User {
-  id                   String    @id @default(cuid())
-  clerkId              String    @unique
-  email                String    @unique
-  name                 String?
-  imageUrl             String?
-  university           String?
-  programme            String?
-  level                String?
-  plan                 String    @default("FREE")
-  planExpiresAt        DateTime?
+  id                    String                @id @default(cuid())
+  clerkId               String                @unique
+  email                 String                @unique
+  name                  String?
+  imageUrl              String?
+  university            String?
+  programme             String?
+  level                 String?
+  plan                  String                @default("FREE")
+  planExpiresAt         DateTime?
   onboardingCompletedAt DateTime?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
-  courses              Course[]
-  notes                Note[]
-  assets               Asset[]
-  jobs                 Job[]
-  flashcards           Flashcard[]
-  quizzes              Quiz[]
-  feedbacks            Feedback[]
-  usages               Usage[]
-  pushTokens           PushToken[]
-  webPushSubscriptions WebPushSubscription[]
-  notificationSetting  NotificationSetting?
-  chatMessages         ChatMessage[]
-  reviewLogs           ReviewLog[]
-  quizAttempts         QuizAttempt[]
-  noteTombstones       NoteTombstone[]
-  sourceChunks         SourceChunk[]
+  // Server-authoritative app-open streak. `streakDays`/`lastActiveDay` are a
+  // cache of the last recompute from user_active_days; `lastActiveDay` is null
+  // after the inactivity sweep resets the streak.
+  streakDays            Int                   @default(0)
+  lastActiveDay         String?
+  streakTimezone        String                @default("UTC")
+  streakWarningSentFor  String?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  courses               Course[]
+  notes                 Note[]
+  assets                Asset[]
+  jobs                  Job[]
+  flashcards            Flashcard[]
+  quizzes               Quiz[]
+  feedbacks             Feedback[]
+  usages                Usage[]
+  pushTokens            PushToken[]
+  webPushSubscriptions  WebPushSubscription[]
+  notificationSetting   NotificationSetting?
+  chatMessages          ChatMessage[]
+  reviewLogs            ReviewLog[]
+  quizAttempts          QuizAttempt[]
+  noteTombstones        NoteTombstone[]
+  sourceChunks          SourceChunk[]
+  activeDays            UserActiveDay[]
 
   @@map("users")
 }
 
-model Course {
+// One row per user per local day the app was opened. This is the source of
+// truth for the streak; User.streakDays is a cached recompute.
+model UserActiveDay {
   id        String   @id @default(cuid())
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name      String
-  code      String?
-  examDate  DateTime?
-  colour    String   @default("#7C5CFC")
-  lecturer  String?
-  archived  Boolean  @default(false)
+  day       String
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  notes     Note[]
+
+  @@unique([userId, day])
+  @@map("user_active_days")
+}
+
+model Course {
+  id           String        @id @default(cuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  code         String?
+  examDate     DateTime?
+  colour       String        @default("#7C5CFC")
+  lecturer     String?
+  archived     Boolean       @default(false)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  notes        Note[]
   chatMessages ChatMessage[]
 
   @@index([userId])
@@ -116,53 +137,53 @@ model NoteTombstone {
 }
 
 model Asset {
-  id           String   @id @default(cuid())
-  userId       String
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  kind         String
-  publicId     String
-  storageProvider String @default("cloudinary")
-  cloudinaryCleanupPending Boolean @default(false)
-  secureUrl    String?
-  bytes        Int      @default(0)
-  format       String?
-  resourceType String   @default("raw")
-  status       String   @default("pending")
-  noteId       String?
+  id                       String    @id @default(cuid())
+  userId                   String
+  user                     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind                     String
+  publicId                 String
+  storageProvider          String    @default("cloudinary")
+  cloudinaryCleanupPending Boolean   @default(false)
+  secureUrl                String?
+  bytes                    Int       @default(0)
+  format                   String?
+  resourceType             String    @default("raw")
+  status                   String    @default("pending")
+  noteId                   String?
   // Cascade: the file (and its extracted text) belongs to the note and must not
   // outlive it. Storage bytes are deleted separately (StorageDeletion retries).
-  note         Note?    @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  note                     Note?     @relation(fields: [noteId], references: [id], onDelete: Cascade)
   // none = plain upload; lecture_note / course_reference = auto AI conversion
-  task         String   @default("none")
-  extractedText String?
+  task                     String    @default("none")
+  extractedText            String?
   // Resumable page-wise extraction (long-file pipeline).
   // none = legacy asset / not a document; pending = /complete verified the
   // object and queued extraction; running | done | partial | failed follow.
-  extractState   String   @default("none")
-  pagesDone      Int      @default(0)
-  pagesTotal     Int      @default(0)
-  nextPage       Int      @default(1)
-  truncated      Boolean  @default(false)
-  ocrPages       Int      @default(0)
-  extractErrorCode String?
+  extractState             String    @default("none")
+  pagesDone                Int       @default(0)
+  pagesTotal               Int       @default(0)
+  nextPage                 Int       @default(1)
+  truncated                Boolean   @default(false)
+  ocrPages                 Int       @default(0)
+  extractErrorCode         String?
   // LlamaParse provider state (migration 19). The file/job ids make a parse
   // resumable across serverless invocations; the rest is monitoring metadata.
-  extractProvider   String?
-  providerFileId    String?
-  providerJobId     String?
-  providerStatus    String?
-  providerTier      String?
-  providerCredits   Float?
-  providerPagesFailed Int    @default(0)
-  providerPolls     Int      @default(0)
-  providerAttempts  Int      @default(0)
-  providerSubmittedAt DateTime?
-  providerNextPollAt  DateTime?
-  providerError     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  extractProvider          String?
+  providerFileId           String?
+  providerJobId            String?
+  providerStatus           String?
+  providerTier             String?
+  providerCredits          Float?
+  providerPagesFailed      Int       @default(0)
+  providerPolls            Int       @default(0)
+  providerAttempts         Int       @default(0)
+  providerSubmittedAt      DateTime?
+  providerNextPollAt       DateTime?
+  providerError            String?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
 
-  chunks     SourceChunk[]
+  chunks SourceChunk[]
 
   @@index([userId])
   @@index([noteId])
@@ -208,37 +229,37 @@ model SourceChunk {
 }
 
 model Job {
-  id         String    @id @default(cuid())
-  userId     String
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  noteId     String
-  note       Note      @relation(fields: [noteId], references: [id], onDelete: Cascade)
-  kind       String    @default("study_set")
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  noteId        String
+  note          Note      @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  kind          String    @default("study_set")
   // queued | running | failed | done
-  state      String    @default("queued")
+  state         String    @default("queued")
   // queued | transcribing | summarising | making_cards — mirrored to note.aiState
-  stage      String    @default("queued")
+  stage         String    @default("queued")
   // JSON payload for kinds that carry extra inputs (quiz_marking answers).
-  payload    String?   @db.Text
-  attempts    Int       @default(0)
-  maxAttempts Int       @default(3)
+  payload       String?   @db.Text
+  attempts      Int       @default(0)
+  maxAttempts   Int       @default(3)
   // Client progress: what stage fraction is done, e.g. "Reading pages 41 of 212".
-  progressDone  Int     @default(0)
-  progressTotal Int     @default(0)
-  error       String?
-  errorCode   String?
-  errorStage  String?
-  checkpoint  Json?
-  runAfter    DateTime  @default(now())
-  lockedUntil DateTime?
+  progressDone  Int       @default(0)
+  progressTotal Int       @default(0)
+  error         String?
+  errorCode     String?
+  errorStage    String?
+  checkpoint    Json?
+  runAfter      DateTime  @default(now())
+  lockedUntil   DateTime?
   // Hash of the cleaned source; identical requests reuse existing outputs.
-  sourceHash  String?
-  startedAt   DateTime?
+  sourceHash    String?
+  startedAt     DateTime?
   // Last proof of life from a worker pass (stage, progress or checkpoint write).
-  heartbeatAt DateTime?
-  finishedAt  DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  heartbeatAt   DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   aiCalls AiCall[]
 
@@ -254,15 +275,15 @@ model Job {
 // The tick janitor retries with backoff; a row is removed once the object is
 // gone, so a transient storage error never leaves student files behind.
 model StorageDeletion {
-  id            String    @id @default(cuid())
+  id            String   @id @default(cuid())
   userId        String
-  provider      String    @default("cloudinary")
+  provider      String   @default("cloudinary")
   publicId      String
-  resourceType  String    @default("raw")
-  attempts      Int       @default(0)
+  resourceType  String   @default("raw")
+  attempts      Int      @default(0)
   lastError     String?
-  nextAttemptAt DateTime  @default(now())
-  createdAt     DateTime  @default(now())
+  nextAttemptAt DateTime @default(now())
+  createdAt     DateTime @default(now())
 
   @@index([nextAttemptAt])
   @@map("storage_deletions")
@@ -290,24 +311,24 @@ model AiCall {
 }
 
 model Flashcard {
-  id           String   @id @default(cuid())
+  id           String      @id @default(cuid())
   userId       String
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   noteId       String
-  note         Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  note         Note        @relation(fields: [noteId], references: [id], onDelete: Cascade)
   courseId     String
   front        String
   back         String
-  dueAt        DateTime @default(now())
-  ease         Float    @default(2.5)
-  intervalDays Float    @default(0)
-  reps         Int      @default(0)
+  dueAt        DateTime    @default(now())
+  ease         Float       @default(2.5)
+  intervalDays Float       @default(0)
+  reps         Int         @default(0)
   // Set when a regeneration no longer produces this card. Soft-retired cards
   // keep review history in review_logs intact but are excluded from study.
   retiredAt    DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  reviewLogs  ReviewLog[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  reviewLogs   ReviewLog[]
 
   @@index([userId, updatedAt])
   @@index([noteId])
@@ -334,9 +355,9 @@ model Quiz {
 }
 
 model QuizQuestion {
-  id          String @id @default(cuid())
+  id          String   @id @default(cuid())
   quizId      String
-  quiz        Quiz   @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  quiz        Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
   ordinal     Int
   // mcq | true_false | short_answer
   type        String
@@ -352,9 +373,9 @@ model QuizQuestion {
 }
 
 model ReviewLog {
-  id               String   @id
+  id               String    @id
   userId           String
-  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   cardId           String
   card             Flashcard @relation(fields: [cardId], references: [id], onDelete: Cascade)
   // again | hard | good | easy
@@ -362,7 +383,7 @@ model ReviewLog {
   reviewedAt       DateTime
   prevIntervalDays Float
   newIntervalDays  Float
-  createdAt        DateTime @default(now())
+  createdAt        DateTime  @default(now())
 
   @@index([userId, reviewedAt])
   @@index([cardId])
@@ -370,22 +391,22 @@ model ReviewLog {
 }
 
 model QuizAttempt {
-  id        String   @id
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  quizId    String
-  quiz      Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
-  startedAt DateTime
+  id         String   @id
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  quizId     String
+  quiz       Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  startedAt  DateTime
   finishedAt DateTime
-  total     Int
-  correct   Int      @default(0)
+  total      Int
+  correct    Int      @default(0)
   // local | pending_marking | marked | marking_failed
-  state     String   @default("local")
+  state      String   @default("local")
   // details Per-question results: [{questionId, answer, correct, comment}]
-  details   Json?
-  error     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  details    Json?
+  error      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   @@index([userId, finishedAt])
   @@index([quizId])

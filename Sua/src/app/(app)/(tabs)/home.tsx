@@ -114,7 +114,7 @@ function cardsLabel(count: number) {
 }
 
 export default function Home() {
-  const { profile, courses, retryHydration } = useApp();
+  const { profile, courses, retryHydration, appStreak, refreshAppStreak } = useApp();
   const pv = usePalette();
   const { user } = useUser();
   const db = useSQLiteContext();
@@ -157,12 +157,13 @@ export default function Home() {
       await load();
       // Pull the server profile (and its usage counters) back in while online.
       retryHydration();
+      void refreshAppStreak();
     } catch {
       // The local data already on screen stays usable offline.
     } finally {
       setRefreshing(false);
     }
-  }, [load, retryHydration]);
+  }, [load, refreshAppStreak, retryHydration]);
 
   // Scope the global card aggregates to notes the student can still see (an
   // archived course's decks no longer count toward Home).
@@ -195,7 +196,7 @@ export default function Home() {
 
   const reviewedToday = stats?.reviewedToday ?? 0;
   const quizAttemptsToday = stats?.quizAttemptsToday ?? 0;
-  const streak = stats?.streakDays ?? 0;
+  const streak = appStreak.streakDays;
   const weekly = stats?.weekly ?? [];
   const weekTotal = weekly.reduce((sum, day) => sum + day.reviewed, 0);
   const weekPeak = Math.max(1, ...weekly.map((day) => day.reviewed));
@@ -279,8 +280,8 @@ export default function Home() {
             accessibilityRole="button"
             accessibilityLabel={
               streak > 0
-                ? `${streak}-day study streak. Open the study tab`
-                : "No study streak yet. Open the study tab to start one"
+                ? `${streak}-day streak. Open the study tab`
+                : "No streak yet. Open the study tab to start one"
             }
           >
             <Flame size={16} color={pv.warning} />

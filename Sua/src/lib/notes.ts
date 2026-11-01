@@ -2340,39 +2340,6 @@ function dayKey(iso: string) {
   return `${date.getFullYear()}-${month}-${date.getDate()}`;
 }
 
-/** Consecutive study days ending today or yesterday, from reviews + attempts. */
-export async function computeStreak(db: SQLiteDatabase) {
-  const reviewRows = await db.getAllAsync<{ reviewed_at: string }>(
-    "SELECT reviewed_at FROM reviews",
-  );
-  const attemptRows = await db.getAllAsync<{ finished_at: string }>(
-    "SELECT finished_at FROM quiz_attempts WHERE state IN ('marked', 'pending_marking')",
-  );
-  const days = new Set<string>();
-  for (const row of reviewRows) {
-    const key = dayKey(row.reviewed_at);
-    if (key) days.add(key);
-  }
-  for (const row of attemptRows) {
-    const key = dayKey(row.finished_at);
-    if (key) days.add(key);
-  }
-  let streak = 0;
-  const cursor = new Date();
-  // A streak survives until yesterday; today only breaks it if it passes.
-  for (let index = 0; index < 365; index += 1) {
-    const month = String(cursor.getMonth() + 1).padStart(2, "0");
-    const key = `${cursor.getFullYear()}-${month}-${String(cursor.getDate()).padStart(2, "0")}`;
-    if (days.has(key)) {
-      streak += 1;
-    } else if (index > 0) {
-      break;
-    }
-    cursor.setDate(cursor.getDate() - 1);
-  }
-  return streak;
-}
-
 /** Last-7-days cards reviewed and recall rate (non-lapse grades / graded). */
 export async function computeWeeklyProgress(db: SQLiteDatabase) {
   const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
@@ -2402,7 +2369,6 @@ export type HomeStats = {
   totalCards: number;
   reviewedToday: number;
   quizAttemptsToday: number;
-  streakDays: number;
   // Local-day buckets (YYYY-MM-DD) for the last seven days, oldest first.
   weekly: { date: string; reviewed: number }[];
   cardsByNote: Map<string, number>;
@@ -2413,8 +2379,8 @@ export type HomeStats = {
 
 /**
  * Everything the Home tab reports, derived from SQLite in one pass so the
- * screen stays truthful offline and matches the Study tab's streak rule.
- * Day boundaries are local, matching `computeStreak`/`computeWeeklyProgress`.
+ * screen stays truthful offline. Day boundaries are local, matching
+ * `computeWeeklyProgress`. The streak itself is server-synced (lib/streak.ts).
  */
 export async function loadHomeStats(db: SQLiteDatabase): Promise<HomeStats> {
   const now = new Date();
@@ -2434,7 +2400,6 @@ export async function loadHomeStats(db: SQLiteDatabase): Promise<HomeStats> {
     weekRows,
     cardRows,
     quizNoteRows,
-    streakDays,
   ] = await Promise.all([
     db.getFirstAsync<{ count: number }>(
       "SELECT COUNT(*) as count FROM flashcards WHERE due_at IS NULL OR due_at <= ?",
@@ -2460,7 +2425,6 @@ export async function loadHomeStats(db: SQLiteDatabase): Promise<HomeStats> {
       nowIso,
     ),
     db.getAllAsync<{ note_id: string }>("SELECT DISTINCT note_id FROM quizzes"),
-    computeStreak(db),
   ]);
 
   // Seed the buckets so a quiet day still paints a (zero-height) bar.
@@ -2489,7 +2453,6 @@ export async function loadHomeStats(db: SQLiteDatabase): Promise<HomeStats> {
     totalCards: totalRow?.count ?? 0,
     reviewedToday: todayRow?.count ?? 0,
     quizAttemptsToday: quizRow?.count ?? 0,
-    streakDays,
     weekly: [...buckets.entries()].map(([date, reviewed]) => ({ date, reviewed })),
     cardsByNote,
     dueCardsByNote,

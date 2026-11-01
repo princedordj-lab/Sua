@@ -13,6 +13,7 @@
     "test:ai": "tsx scripts/test-ai-errors.mjs",
     "test:recovery": "tsx scripts/test-job-recovery.mjs",
     "test:long-recovery": "tsx scripts/test-long-doc-recovery.mjs",
+    "test:streak": "tsx scripts/test-streak.mjs",
     "diagnose:jobs": "tsx scripts/diagnose-jobs.mjs",
     "llamaparse:check": "tsx scripts/llamaparse-check.mjs",
     "llamaparse:usage": "tsx scripts/llamaparse-usage.mjs",

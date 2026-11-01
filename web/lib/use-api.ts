@@ -11,6 +11,7 @@ import {
   notesApi,
   profileApi,
   pushApi,
+  streakApi,
   studyApi,
   uploadsApi,
   type AttemptInput,
@@ -97,6 +98,10 @@ export function useApi() {
         messages: (courseId: string) =>
           withToken((token) => chatApi.messages(token, courseId)),
         speech: (blob: Blob) => withToken((token) => chatApi.speech(token, blob)),
+      },
+      streak: {
+        record: (payload: Parameters<typeof streakApi.record>[1]) =>
+          withToken((token) => streakApi.record(token, payload)),
       },
       push: {
         status: () => withToken(pushApi.status),

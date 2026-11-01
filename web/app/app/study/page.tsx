@@ -26,14 +26,21 @@ import {
 } from "@/components/ui";
 import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
+import { ensureDailyActivity, withTimeout } from "@/lib/activity";
 import { relativeDate } from "@/lib/format";
 import { courseStyle } from "@/lib/course-style";
 import type { HomeSummary, ServerStudySet } from "@/lib/types";
 
 export default function StudyPage() {
   const api = useApi();
-  const { courses } = useAppData();
-  const summary = useResource<HomeSummary>("study-summary", () => api.study.homeSummary());
+  const { courses, profile } = useAppData();
+  // Report today's open first so the streak in the summary includes today.
+  const summary = useResource<HomeSummary>("study-summary", async () => {
+    await withTimeout(ensureDailyActivity(api, profile?.id ?? null), 4000).catch(
+      () => {},
+    );
+    return api.study.homeSummary();
+  });
   const sets = useResource<{ sets: ServerStudySet[] }>("study-sets", () => api.study.sets());
   const [courseId, setCourseId] = useState("all");
 

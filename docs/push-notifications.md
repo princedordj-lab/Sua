@@ -20,6 +20,12 @@ calls happen outside `withUser` (its transaction times out at 15s).
 - **Daily review reminder** - web only. `lib/reminders.js` runs from the jobs
   tick, counts due flashcards per student with reminders on, and pushes once
   per day. `/review` (mobile) and `/app/review` (web).
+- **Streak warning / reset** - `lib/streak.js` (`sendStreakNotices`) runs from
+  the same daily tick as the reminders. A two-day absence sends "Keep your
+  streak alive" once (`streakWarningSentFor` marks the last active day); a
+  three-day absence clears the streak and sends "Your streak was reset" once.
+  Both deep link to `/home` (mobile) and `/app/home` (web), tagged
+  `streak-warning` / `streak-reset`. `STREAK_NOTICES=0` disables the sweep.
 - **Test** - `POST /api/me/push-test` proves the credential chain without
   waiting for a generation.
 
@@ -101,6 +107,15 @@ exact minute:
 
 A zero-due day still stamps `lastReminderSentAt` (so the tick does not recount
 all day) but sends nothing: reminders never say "nothing to review".
+
+The streak sweep runs right after the reminders in the same tick. It only
+looks at students with a cached streak (`lastActiveDay` set, `streakDays > 0`),
+computes the gap in each student's `streakTimezone`, and either warns (gap 2,
+once per absence) or resets (`streakDays = 0`, `lastActiveDay = NULL`, so a
+second tick cannot notify the same absence again). The count the app displays is
+computed on read (`streakViewForUser` returns 0 once the latest active day is
+3+ days old), so a missed tick can delay the notification but never show a
+stale streak.
 
 ## Data
 

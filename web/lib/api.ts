@@ -111,6 +111,25 @@ export const profileApi = {
     apiRequest<void>(token, "/me/delete", { method: "POST" }),
 };
 
+export type ActivityResponse = {
+  streakDays: number;
+  activeToday: boolean;
+  lastActiveDay: string | null;
+  timezone: string;
+};
+
+// App-open streak ping: the server counts the days; the client reports today.
+export const streakApi = {
+  record: (
+    token: string,
+    payload: { days: string[]; timezone: string; utcOffsetMinutes?: number },
+  ) =>
+    apiRequest<ActivityResponse>(token, "/me/activity", {
+      method: "POST",
+      body: payload,
+    }),
+};
+
 export const coursesApi = {
   list: (token: string) => apiRequest<ServerCourse[]>(token, "/courses"),
   create: (token: string, course: ServerCourseCreate) =>

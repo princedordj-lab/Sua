@@ -5,6 +5,7 @@ import { identityFromRequest } from "../lib/identity.js";
 import { studyQueueConfigured, enqueueStudyJob } from "../lib/queue.js";
 import { aiConfigured } from "../lib/ai.js";
 import { nextCardState } from "../lib/srs.js";
+import { streakViewForUser } from "../lib/streak.js";
 
 export const studyRouter = Router();
 
@@ -218,25 +219,18 @@ studyRouter.get("/home-summary", async (req, res) => {
       if (byDay.has(key)) byDay.set(key, byDay.get(key) + 1);
     }
 
-    // Streak: consecutive days ending today, with yesterday allowed when the
-    // student has not reviewed yet today (so the flame survives the morning).
-    const reviewedDays = new Set(logs.map((log) => dayKey(log.reviewedAt)));
-    let cursor = new Date(startOfToday);
-    if (!reviewedDays.has(dayKey(cursor))) {
-      cursor.setUTCDate(cursor.getUTCDate() - 1);
-    }
-    let streakDays = 0;
-    while (reviewedDays.has(dayKey(cursor))) {
-      streakDays += 1;
-      cursor.setUTCDate(cursor.getUTCDate() - 1);
-    }
+    // The streak is the synced app-open streak (POST /me/activity keeps it
+    // current); the weekly chart keeps reporting actual study activity.
+    const streak = streakViewForUser(user, now);
 
     return {
       due,
       totalCards,
       reviewedToday: byDay.get(dayKey(startOfToday)) ?? 0,
       quizAttemptsToday: attempts,
-      streakDays,
+      streakDays: streak.streakDays,
+      streakActiveToday: streak.activeToday,
+      streakLastActiveDay: streak.lastActiveDay,
       weekly: [...byDay.entries()].map(([date, reviewed]) => ({ date, reviewed })),
     };
   });

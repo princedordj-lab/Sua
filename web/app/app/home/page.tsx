@@ -19,6 +19,7 @@ import { SuaChatMark } from "@/components/sua-chat-icon";
 import { MarkdownPreview } from "@/components/markdown";
 import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
+import { ensureDailyActivity, withTimeout } from "@/lib/activity";
 import { relativeDate, firstName } from "@/lib/format";
 import { courseStyle } from "@/lib/course-style";
 import type { HomeSummary, ServerNote } from "@/lib/types";
@@ -52,7 +53,15 @@ export default function HomePage() {
   const { user } = useUser();
   const api = useApi();
 
-  const summary = useResource<HomeSummary>("home-summary", () => api.study.homeSummary());
+  // Report today's open first so the summary (and its streak) includes today;
+  // a slow ping must not hold the page hostage.
+  const summary = useResource<HomeSummary>("home-summary", async () => {
+    await withTimeout(
+      ensureDailyActivity(api, profile?.id ?? user?.id ?? null),
+      4000,
+    ).catch(() => {});
+    return api.study.homeSummary();
+  });
   const recent = useResource<ServerNote[]>(
     `home-recent:${courses.map((course) => course.id).join(",")}`,
     async () => {

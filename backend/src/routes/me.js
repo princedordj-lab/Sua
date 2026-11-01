@@ -6,6 +6,14 @@ import { identityFromRequest } from "../lib/identity.js";
 import { deleteAccountData } from "../lib/account.js";
 import { FREE_MONTHLY_LIMITS } from "../lib/pipeline.js";
 import { isValidExpoToken, notifyUser, pushConfigured } from "../lib/push.js";
+import { recordActiveDays } from "../lib/streak.js";
+import {
+  dayDiff,
+  dayKeyForOffset,
+  dayKeyInTimeZone,
+  isDayKey,
+  isValidTimezone,
+} from "../lib/streak-rules.js";
 
 export const meRouter = Router();
 
@@ -151,6 +159,46 @@ meRouter.delete("/push-subscription", async (req, res) => {
   res.status(200).json({ ok: true });
 });
 
+// App-open streak, server-authoritative. Devices send the local day keys they
+// opened on (a few queued offline days are fine); today in the supplied
+// timezone is always unioned in, so a returning user cannot be reset by a
+// stale queue and an app open always counts.
+meRouter.post("/activity", async (req, res) => {
+  const identity = await identityFromRequest(req);
+  const rawDays = req.body?.days;
+  if (rawDays !== undefined && !Array.isArray(rawDays)) {
+    return res.status(400).json({ error: "days must be an array" });
+  }
+  // A client-reported zone is a hint, not user input: unknown or legacy names
+  // (and engines that report "UTC" for an offset clock) must never make the
+  // sync fail forever. Fall back to the reported offset, then UTC.
+  const requested = String(req.body?.timezone ?? "").trim();
+  const timezone = isValidTimezone(requested) ? requested : "UTC";
+  const rawOffset = Number(req.body?.utcOffsetMinutes);
+  const hasOffset = Number.isInteger(rawOffset) && Math.abs(rawOffset) <= 840;
+  const now = new Date();
+  const today = !isValidTimezone(requested)
+    ? dayKeyForOffset(now, hasOffset ? rawOffset : 0)
+    : timezone === "UTC" && hasOffset && rawOffset !== 0
+      ? dayKeyForOffset(now, rawOffset)
+      : dayKeyInTimeZone(now, timezone);
+  const days = new Set([today]);
+  for (const value of (rawDays ?? []).slice(0, 60)) {
+    const day = typeof value === "string" ? value.trim() : "";
+    if (!isDayKey(day)) continue;
+    if (day > today) continue;
+    if (dayDiff(today, day) > 400) continue;
+    days.add(day);
+  }
+  const streak = await withUser(identity.clerkId, async (tx) => {
+    const profile = await requireUser(tx, identity);
+    // Pass the resolved day: when the zone name was unusable it may come from
+    // the offset, and the union must not add a second (UTC) day.
+    return recordActiveDays(tx, profile.id, [...days], timezone, now, today);
+  });
+  res.json({ ...streak, timezone });
+});
+
 function shapeNotificationSettings(row) {
   return {
     remindersEnabled: row?.remindersEnabled ?? false,
@@ -183,15 +231,6 @@ meRouter.get("/notification-settings", async (req, res) => {
 });
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
-function validTimezone(value) {
-  if (!value) return false;
-  try {
-    new Intl.DateTimeFormat("en-GB", { timeZone: value });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 meRouter.patch("/notification-settings", async (req, res) => {
   const identity = await identityFromRequest(req);
@@ -206,7 +245,7 @@ meRouter.patch("/notification-settings", async (req, res) => {
   }
   if ("timezone" in req.body) {
     const timezone = String(req.body.timezone ?? "").trim();
-    if (!validTimezone(timezone)) {
+    if (!isValidTimezone(timezone)) {
       return res.status(400).json({ error: "Unknown timezone" });
     }
     changes.timezone = timezone;
