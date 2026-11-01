@@ -66,25 +66,39 @@ export async function ensureUser(clerkUser, { tx = null, db = prisma, clerk = cl
   const name = nameFor(clerkUser);
   const imageUrl = imageFor(clerkUser);
 
-  const current = tx
-    ? await tx.user.findUnique({ where: { clerkId } })
-    : await readByClerkId(clerkId);
-  if (current) {
-    try {
-      const update = (client) => client.user.update({
-        where: { clerkId },
-        data: { ...(email ? { email } : {}), ...(name !== null ? { name } : {}), ...(imageUrl !== undefined ? { imageUrl } : {}) },
-      });
-      return tx ? await update(tx) : await withUser(clerkId, update);
-    } catch (error) {
-      if (!isP2002(error)) throw error;
-      const raced = tx
-        ? await tx.user.findUnique({ where: { clerkId } }) ?? (email ? await tx.user.findUnique({ where: { email } }) : null)
-        : await reread(clerkId, email);
-      if (raced?.clerkId === clerkId) return raced;
-      throw conflict();
-    }
+  // A claim the session actually carries. `imageUrl: null` means "the token
+  // has no picture claim", not "clear the stored avatar", so it is no change.
+  const patch = {
+    ...(email ? { email } : {}),
+    ...(name !== null ? { name } : {}),
+    ...(imageUrl != null ? { imageUrl } : {}),
+  };
+
+  // Read and (only if a claim actually differs) write inside ONE transaction.
+  // Every statement is a WAN round trip to Neon and this runs on every
+  // authenticated request, so the old unconditional UPDATE in a second
+  // transaction charged every screen an extra BEGIN/set_config/UPDATE/COMMIT.
+  const readOrRefresh = async (client) => {
+    const current = await client.user.findUnique({ where: { clerkId } });
+    if (!current) return null;
+    const changed = Object.keys(patch).some((key) => current[key] !== patch[key]);
+    return changed ? client.user.update({ where: { clerkId }, data: patch }) : current;
+  };
+
+  let current = null;
+  try {
+    current = tx
+      ? await readOrRefresh(tx)
+      : await withUser(clerkId, readOrRefresh);
+  } catch (error) {
+    if (!isP2002(error)) throw error;
+    const raced = tx
+      ? await tx.user.findUnique({ where: { clerkId } }) ?? (email ? await tx.user.findUnique({ where: { email } }) : null)
+      : await reread(clerkId, email);
+    if (raced?.clerkId === clerkId) return raced;
+    throw conflict();
   }
+  if (current) return current;
 
   // Only first-seen accounts need the full Clerk Backend User and old-id check.
   let fullUser = clerkUser.emailAddresses || clerkUser.email_addresses ? clerkUser : null;

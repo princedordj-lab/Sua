@@ -12,7 +12,7 @@ import { useAuth, useClerk, useUser } from "@clerk/expo";
 import NetInfo from "@react-native-community/netinfo";
 import { useAuthVerdict, type AuthVerdict } from "../lib/auth-gate";
 import { AppState, Platform } from "react-native";
-import { coursesApi, profileApi, pushApi } from "../lib/api";
+import { API_BASE_URL, coursesApi, profileApi, pushApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
 import {
   clearStudyDataForAccountSwitch,
@@ -201,6 +201,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // syncs into the JS client asynchronously). Counting the misses keeps the
   // retry bounded instead of spinning forever.
   const tokenMisses = useRef(0);
+  // Own timer, not `requestRefresh`: that helper drops a delayed request when
+  // another timer is already pending, which would silently swallow the retry.
+  const tokenRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A hydration snapshot only describes the state it was requested for. Local
   // writes bump this so a response already in flight cannot overwrite a newer
   // server write (finishing onboarding, adding a course...).
@@ -229,9 +232,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
   const retryHydration = useCallback(() => {
     // A manual retry is a fresh start: clear the "server rejected the session"
-    // verdict so the screen can show progress instead of the old failure copy.
+    // verdict and the previous attempt's message so the screen can show
+    // progress instead of the old failure copy.
     tokenMisses.current = 0;
     setAuthRejected(false);
+    setHydrationError(null);
     requestRefresh();
   }, [requestRefresh]);
   const applyHydrationFallback = useCallback((clerkId: string) => {
@@ -240,7 +245,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return { clerkId, profile: null, courses: [] };
     });
     setHydrationIssue(true);
-    setHydrationError("Sua could not reach the server in time.");
+    // The bootstrap request is normally still in flight when this fires (a cold
+    // API + Neon start can take ~10s), and it will hydrate the app the moment
+    // it lands. So this must not announce a failure: keep whatever the request
+    // itself reported, and otherwise say we are still connecting.
+    setHydrationError((previous) =>
+      previous ??
+      (__DEV__
+        ? `Still connecting to ${API_BASE_URL}…`
+        : "Still connecting to Sua…"),
+    );
     void listLocalCourses(db)
       .then((cached) => {
         setHydrated((previous) =>
@@ -254,6 +268,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(
     () => () => {
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
+      if (tokenRetryTimer.current) clearTimeout(tokenRetryTimer.current);
     },
     [],
   );
@@ -261,13 +276,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Network-backed bootstrap must not block the signed-in app forever. After
   // a bounded wait, expose cached courses and let connectivity/foreground
   // events retry the server bootstrap in the background.
+  //
+  // 15s, not 10s: the bootstrap request itself gives up at 12s, so its real
+  // error (401 vs unreachable) is recorded before this guess takes over. At
+  // 10s a cold Neon/Vercel start looked like "no connection" even when the
+  // answer was a 401 arriving a moment later.
   useEffect(() => {
     if (!isLoaded || !signedInNow || !userId || hydrated.clerkId === userId) {
       return;
     }
     const timeout = setTimeout(() => {
       applyHydrationFallback(userId);
-    }, 10_000);
+    }, 15_000);
     return () => clearTimeout(timeout);
   }, [applyHydrationFallback, hydrated.clerkId, isLoaded, signedInNow, userId]);
 
@@ -387,10 +407,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (!token) {
           // Clerk has a session but has not minted a token yet. Returning
           // silently used to leave the student on the /auth-finish spinner for
-          // the whole 10s fallback; retry a few times instead.
+          // the whole fallback window; retry a few times instead.
+          if (__DEV__) {
+            console.log(
+              `[hydration] no session token yet (attempt ${tokenMisses.current + 1}/3) from ${API_BASE_URL}`,
+            );
+          }
           if (tokenMisses.current < 3) {
             tokenMisses.current += 1;
-            requestRefresh(1_500);
+            if (tokenRetryTimer.current) clearTimeout(tokenRetryTimer.current);
+            tokenRetryTimer.current = setTimeout(() => {
+              tokenRetryTimer.current = null;
+              setRefreshTick((tick) => tick + 1);
+            }, 1_500);
           } else {
             setHydrationIssue(true);
             setAuthRejected(true);
@@ -424,6 +453,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         const serverCourses = await coursesApi.list(token);
         if (cancelled) return;
+        if (__DEV__) {
+          console.log(`[hydration] profile loaded from ${API_BASE_URL}`);
+        }
         // A newer local write already happened: this snapshot is older than the
         // truth on the server, so applying it would undo that write.
         if (hydrationRevision.current !== revision) return;
@@ -502,6 +534,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // and refused it. Saying "check your internet" here sends students in
         // circles, so keep the two failures apart.
         const rejected = (error as { status?: number } | null)?.status === 401;
+        if (__DEV__) {
+          console.warn(
+            `[hydration] failed (status ${(error as { status?: number } | null)?.status ?? "none"}) from ${API_BASE_URL}:`,
+            error instanceof Error ? error.message : error,
+          );
+        }
         setHydrationIssue(true);
         setAuthRejected(rejected);
         setHydrationError(

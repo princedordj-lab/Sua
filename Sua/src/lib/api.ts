@@ -20,11 +20,47 @@ import type {
   SyncResult,
   UploadTask,
 } from "./types";
+import Constants from "expo-constants";
 import { Platform } from "react-native";
 
-const API_URL =
-  process.env.EXPO_PUBLIC_API_URL ??
-  (Platform.OS === "android" ? "http://10.0.2.2:4000/api" : "http://localhost:4000/api");
+const LOOPBACK = /^https?:\/\/(localhost|127\.0\.0\.1|10\.0\.2\.2)(?=[:/]|$)/;
+// Only a machine's own private LAN address may replace a loopback dev URL. A
+// Metro tunnel host (xxx.exp.direct) must not be borrowed: the tunnel forwards
+// Metro's port only, so pointing the API at it would hang every request.
+const LAN_HOST = /^(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})$/;
+
+/**
+ * Resolve the API base URL.
+ *
+ * `localhost` is only the host machine on the iOS simulator, the web build, or
+ * through `adb reverse`. On a physical phone it is the phone itself, so a dev
+ * URL of `http://localhost:4000/api` silently refuses every request. Metro
+ * knows the machine's LAN address (`hostUri`), so a loopback dev URL is
+ * rewritten to it when that address is genuinely a LAN address. Anything that
+ * is not a loopback host, and every release build, is used exactly as
+ * configured.
+ */
+function resolveApiUrl() {
+  const configured =
+    process.env.EXPO_PUBLIC_API_URL ??
+    (Platform.OS === "android"
+      ? "http://10.0.2.2:4000/api"
+      : "http://localhost:4000/api");
+  if (!__DEV__ || !LOOPBACK.test(configured)) return configured;
+  const host = (Constants.expoConfig?.hostUri ?? "").split(":")[0];
+  if (host && LAN_HOST.test(host)) {
+    return configured.replace(LOOPBACK, `http://${host}`);
+  }
+  // Metro is reached through adb reverse, a simulator, or a tunnel: nothing to
+  // borrow. Keep the configured URL; the failure message names it verbatim.
+  return configured;
+}
+
+const API_URL = resolveApiUrl();
+
+// Exposed so a hydration failure can name the host it tried in dev: "could not
+// reach the server" is unactionable without knowing which URL was used.
+export const API_BASE_URL = API_URL;
 type RequestOptions = RequestInit & { token?: string; timeoutMs?: number };
 
 // Every request gets a ceiling. Without one, a half-open connection leaves the
@@ -52,7 +88,22 @@ export async function apiRequest<T>(
       },
     });
   } catch {
-    throw new Error("Could not connect to Sua. Check your internet connection.");
+    // "Check your internet connection" is the wrong advice for both of these:
+    // a timeout means the server is slow, and a rejected connection usually
+    // means the app is pointed at a host it cannot see (localhost on a phone).
+    // Naming the URL in dev turns a mystery into a one-line fix.
+    if (controller.signal.aborted && !init.signal) {
+      throw new Error(
+        __DEV__
+          ? `Sua took too long to answer (${API_URL}).`
+          : "Sua took too long to answer. Please try again.",
+      );
+    }
+    throw new Error(
+      __DEV__
+        ? `Could not reach Sua at ${API_URL}.`
+        : "Could not connect to Sua. Check your internet connection.",
+    );
   } finally {
     clearTimeout(timer);
   }
@@ -143,6 +194,9 @@ export const coursesApi = {
 };
 
 export const profileApi = {
+  // Deliberately the default 30s ceiling: this is the first call of a session
+  // and a cold API/Neon start legitimately takes ~10s. A shorter timeout here
+  // reported "offline" for a request that was about to succeed.
   get: (token: string) => apiRequest<ServerProfile>("/me", { token }),
   update: (token: string, changes: ServerProfileUpdate) =>
     apiRequest<ServerProfile>("/me", {

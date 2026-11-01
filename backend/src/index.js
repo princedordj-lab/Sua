@@ -16,6 +16,7 @@ import { extractNext } from "./lib/extraction.js";
 import { pruneNoteTombstones, retryStorageDeletions } from "./lib/note-deletion.js";
 import { sendDueReminders } from "./lib/reminders.js";
 import { sendStreakNotices } from "./lib/streak.js";
+import { prisma } from "./config/prisma.js";
 import { studyRouter } from "./routes/study.js";
 
 const app = express();
@@ -52,8 +53,17 @@ app.use(
   })
 );
 
-app.get("/api/health", (_req, res) => {
+// Neons free plan auto-suspends an idle compute; the next query then pays the
+// wake-up (~5s+). /api/health is the cheapest recurring touch point (connectivity
+// checks, the client's keep-warm ping), so ping the database here: whatever
+// calls "is Sua up?" also pre-warms the one resource /api/me is about to need.
+// Shape is unchanged and the response stays instant if the DB is unreachable —
+// health is about the HTTP service, not the database.
+app.get("/api/health", async (_req, res) => {
   res.json({ ok: true });
+  void prisma
+    .$queryRaw`SELECT 1`
+    .catch(() => {});
 });
 
 // Root stub. Without it, opening the deployment URL shows Express's plain

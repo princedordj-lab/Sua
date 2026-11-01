@@ -45,10 +45,14 @@ export default function AuthFinish() {
     routed.current = false;
     if (!userId) return;
     let cancelled = false;
-    void readOnboardedCache(db, userId).then((value) => {
-      if (cancelled) return;
-      setCache({ userId, value });
-    });
+    void readOnboardedCache(db, userId)
+      .then((value) => {
+        if (cancelled) return;
+        setCache({ userId, value });
+      })
+      // A rejected cache read must not wedge the resolver: `cacheLoaded`
+      // would stay false forever and `unresolved` could never route out.
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
