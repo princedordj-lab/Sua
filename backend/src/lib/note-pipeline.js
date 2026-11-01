@@ -1001,6 +1001,56 @@ export async function prepareMaterial({ note, kind, courseContext, deps, source:
 }
 
 /**
+ * Condense the material a study set reads when it exceeds one generation call.
+ *
+ * The study set is built from the note the student actually reads, so its input
+ * can be longer than `studySetSourceChars`: a rewritten long note body, or a
+ * typed note with a whole chapter pasted into it. Slicing that would generate
+ * cards and a quiz for the first part of the material and silently ignore the
+ * rest, so anything over the cap goes through the same cheap-model digest pass
+ * the long-file pipeline uses. Under the cap the text is returned untouched.
+ */
+export async function condenseMaterial(
+  material,
+  { courseContext = null, sourceType = "file", deps = null, digest = digestChunk } = {},
+) {
+  const value = String(material ?? "");
+  const cap = notePipeline.studySetSourceChars;
+  if (!(cap > 0) || value.length <= cap) return { text: value, condensed: false };
+
+  // splitChunks is paragraph-atomic, so a paste with no blank lines would become
+  // one giant chunk and one oversized request. Break any paragraph longer than a
+  // chunk into word groups first; every byte of the material still reaches a
+  // digest.
+  const segments = [];
+  for (const paragraph of value.split(/\n{2,}/)) {
+    const words = paragraph.split(/\s+/).filter(Boolean);
+    if (!words.length) continue;
+    if (words.length <= notePipeline.chunkWords) {
+      segments.push({ index: segments.length + 1, label: null, text: paragraph });
+      continue;
+    }
+    for (let start = 0; start < words.length; start += notePipeline.chunkWords) {
+      segments.push({
+        index: segments.length + 1,
+        label: null,
+        text: words.slice(start, start + notePipeline.chunkWords).join(" "),
+      });
+    }
+  }
+
+  const chunks = splitChunks(segments);
+  const digests = await mapWithLimit(chunks, notePipeline.digestConcurrency, (chunk) =>
+    digest(chunk, { courseContext, sourceType, chunkCount: chunks.length }, deps),
+  );
+  return {
+    text: digests.map(digestToText).join("\n\n"),
+    condensed: true,
+    chunks: chunks.length,
+  };
+}
+
+/**
  * Write + Check for one prepared source. Exported separately so the caller can
  * cache-check on the source hash before paying for the strong model.
  *

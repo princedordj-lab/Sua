@@ -367,7 +367,74 @@ async function extractDocx(buffer) {
     .replace(/<\/w:p>/g, "\n")
     .replace(/<\/w:tc>/g, "\t")
     .replace(/<w:tab\b[^>]*\/>/g, "\t");
-  return { text: decodeEntities(stripTags(withBreaks)), blocks: docxBlocks(xml) };
+  // The provider path returns Markdown and the note pipeline consumes Markdown,
+  // so the local fallback does too: headings keep their level and tables stay
+  // tables instead of collapsing into tab-separated lines. Flat text is kept as
+  // a last resort for a document the block walk produces nothing for.
+  const markdown = docxMarkdown(xml);
+  return {
+    text: markdown || decodeEntities(stripTags(withBreaks)),
+    blocks: docxBlocks(xml),
+  };
+}
+
+const DOCX_TABLE = /<w:tbl\b[\s\S]*?<\/w:tbl>/g;
+const DOCX_TABLE_PLACEHOLDER = /^@@SUA_TABLE_(\d+)@@$/;
+
+function docxCellText(cellXml) {
+  return decodeEntities(
+    stripTags(
+      cellXml.replace(/<w:tab\b[^>]*\/>/g, " ").replace(/<\/w:p>/g, " "),
+    ),
+  )
+    .replace(/\s+/g, " ")
+    .replace(/\|/g, "\\|")
+    .trim();
+}
+
+/**
+ * One `w:tbl` as a GitHub pipe table. Word does not promise the first row is a
+ * header, but the reader renders row 1 as the header anyway, so no cell is lost
+ * by writing it that way.
+ */
+export function docxTableMarkdown(tableXml) {
+  const rows = [...tableXml.matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)]
+    .map((row) => [...row[0].matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)].map((cell) => docxCellText(cell[0])))
+    .filter((row) => row.length);
+  const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  if (!width) return "";
+  const line = (row) =>
+    `| ${Array.from({ length: width }, (_, index) => row[index] ?? "").join(" | ")} |`;
+  return [
+    line(rows[0]),
+    `| ${Array.from({ length: width }, () => "---").join(" | ")} |`,
+    ...rows.slice(1).map(line),
+  ].join("\n");
+}
+
+/**
+ * DOCX body as Markdown in document order: `#…######` for headings, pipe tables
+ * for tables, blank-line separated paragraphs. Tables are lifted out first so
+ * the paragraphs inside their cells are not mistaken for body text (a nested
+ * table inside a cell is flattened into that cell's text).
+ */
+export function docxMarkdown(xml) {
+  const tables = [];
+  const withoutTables = xml.replace(DOCX_TABLE, (table) => {
+    tables.push(table);
+    return `<w:p>@@SUA_TABLE_${tables.length - 1}@@</w:p>`;
+  });
+  const out = [];
+  for (const block of docxBlocks(withoutTables)) {
+    const placeholder = block.text.match(DOCX_TABLE_PLACEHOLDER);
+    if (placeholder) {
+      const table = docxTableMarkdown(tables[Number(placeholder[1])] ?? "");
+      if (table) out.push(table);
+      continue;
+    }
+    out.push(block.level ? `${"#".repeat(block.level)} ${block.text}` : block.text);
+  }
+  return out.join("\n\n");
 }
 
 /**

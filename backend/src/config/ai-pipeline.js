@@ -126,13 +126,20 @@ export const documentRead = {
 };
 
 /**
- * LlamaParse (LlamaCloud REST) is the first extractor for PDF/DOCX/PPTX.
- * Anything it cannot finish — disabled, auth/quota, exhausted retries, a
- * timeout, or a parse with no usable text — falls through to the local-first
- * PDF path or the local Office extractor in lib/extraction.js.
+ * LlamaParse (LlamaCloud REST) is the primary extractor for DOCX/PPTX and the
+ * scan fallback for PDFs.
  *
- * LLAMAPARSE_FORMATS restores the free local-first PDF path by setting it to
- * "docx,pptx"; LLAMAPARSE_ENABLED=0 disables the provider everywhere.
+ * PDFs are local-first: the embedded text layer is read in-process, and the
+ * provider is only dispatched when no page has usable text (a scan) or when a
+ * parse we already submitted is still parked. A mixed PDF keeps its readable
+ * pages and only the unreadable ones reach the page-batch fallback.
+ * DOCX/PPTX go to the provider because it preserves headings, lists, tables and
+ * slide order; the local Office extractor is their fallback.
+ *
+ * LLAMAPARSE_FORMATS decides which formats may use the provider at all, so
+ * "docx,pptx" keeps PDFs entirely on the free local path. LLAMAPARSE_ENABLED=0
+ * disables the provider everywhere. Anything the provider cannot finish falls
+ * through to the local pipeline in lib/extraction.js.
  */
 export const llamaParse = {
   enabled: process.env.LLAMAPARSE_ENABLED !== "0" && Boolean(process.env.LLAMA_CLOUD_API_KEY),
@@ -164,6 +171,11 @@ export const notePipeline = {
   // call sees the entire source. Kept at the study-set material cap so no part
   // of the source is silently dropped between generated artefacts.
   shortSourceChars: int("SHORT_SOURCE_CHARS", 60_000),
+  // What the study set (summary, cards, quiz) may read in one call. Over this
+  // the material is condensed with the same cheap-model digests the long-file
+  // path uses — never sliced, because a sliced source produces cards and a quiz
+  // for the first part of a document and silently ignores the rest.
+  studySetSourceChars: int("STUDY_SET_SOURCE_CHARS", 60_000),
   // Target size of one digest chunk.
   chunkWords: int("CHUNK_WORDS", 3000),
   // Output budget for one digest call. A 3000-word chunk of dense physics needs

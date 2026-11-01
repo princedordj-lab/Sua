@@ -3,7 +3,13 @@ import { readAssetBytes } from "./storage.js";
 import { withUser } from "./db.js";
 import { bulkModel, chatCompletion, aiConfigured, timeoutForDeadline } from "./ai.js";
 import { enqueueStudyJob, studyQueueConfigured, STALE_QUEUED_MS } from "./queue.js";
-import { prepareMaterial, assembleSource, sourceFromSegments, writeNote } from "./note-pipeline.js";
+import {
+  condenseMaterial,
+  prepareMaterial,
+  assembleSource,
+  sourceFromSegments,
+  writeNote,
+} from "./note-pipeline.js";
 import {
   USER_MESSAGES,
   UserFacingError,
@@ -310,8 +316,10 @@ async function guardRerun(job, hash) {
  * notes qualify — recordings and photos still need source assembly.
  *
  * Returns the prepared `source`, or null when the long-file path must run.
+ *
+ * Exported for the routing checks (`scripts/test-single-pass.mjs`).
  */
-function singlePassSource(note, chunks) {
+export function singlePassSource(note, chunks) {
   if (!chunks?.rows?.length) return null;
   if (!(notePipeline.shortSourceChars > 0)) return null;
   const assets = (note.assets ?? []).filter(
@@ -322,25 +330,34 @@ function singlePassSource(note, chunks) {
 
   const rows = chunks.rows.filter((row) => String(row.text ?? "").trim());
   if (!rows.length) return null;
-  const chars = rows.reduce((sum, row) => sum + row.text.length, 0);
+
+  const segments = rows.map((row) => ({
+    index: row.index,
+    label: row.label ?? (row.startPage ? `p. ${row.startPage}` : null),
+    text: row.text,
+  }));
+
+  // A file note may also carry typed context the student wrote around the
+  // upload. assembleSource merges it the same way — the note body while there
+  // is no transcript yet — and taking this shortcut without it would hide text
+  // the student typed from the writer, the summary and the cards.
+  const typed = String(note.body ?? "").trim();
+  if (typed && !String(note.transcript ?? "").trim()) {
+    segments.unshift({ index: 0, label: null, text: typed });
+  }
+
+  const chars = segments.reduce((sum, segment) => sum + segment.text.length, 0);
   if (chars > notePipeline.shortSourceChars) return null;
 
   const pageCount = Math.max(
     ...rows.map((row) => row.endPage ?? row.startPage ?? row.index),
     rows.length,
   );
-  return sourceFromSegments(
-    rows.map((row) => ({
-      index: row.index,
-      label: row.label ?? (row.startPage ? `p. ${row.startPage}` : null),
-      text: row.text,
-    })),
-    {
-      sourceType: "file",
-      pageCount,
-      truncated: assets.some((asset) => asset.truncated),
-    },
-  );
+  return sourceFromSegments(segments, {
+    sourceType: "file",
+    pageCount,
+    truncated: assets.some((asset) => asset.truncated),
+  });
 }
 
 /**
@@ -437,9 +454,19 @@ export async function processStudySet(job, documentExtraction, deadline = null) 
       await persistTranscript(job, note, prepared.source.transcript);
       material = prepared.material;
     }
-    const MAX_NOTE_CHARS = 60_000;
-    if (material.length > MAX_NOTE_CHARS) {
-      material = material.slice(0, MAX_NOTE_CHARS);
+    // The study set never sees a sliced source: anything above the cap is
+    // condensed with the cheap-model digests instead of losing its second half.
+    const condensed = await condenseMaterial(material, {
+      courseContext,
+      sourceType: prepared.source.sourceType,
+      deps: prepared.deps,
+    });
+    material = condensed.text;
+    if (condensed.condensed) {
+      prepared.meta.studySetCondensed = true;
+      console.log(
+        `[pipeline] job=${job.id} studyset condensed chunks=${condensed.chunks} chars=${material.length}`,
+      );
     }
     if (material.length < 40) {
       throw new UserFacingError(USER_MESSAGES.unreadable || "Note content is too short (minimum 40 characters required).");

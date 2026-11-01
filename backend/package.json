@@ -8,6 +8,7 @@
     "dev": "tsx watch src/index.js",
     "eval": "tsx scripts/ai-eval.mjs",
     "test:extraction": "tsx scripts/test-extraction-pipeline.mjs",
+    "test:single-pass": "tsx scripts/test-single-pass.mjs",
     "test:pdf": "tsx scripts/test-pdf-extraction.mjs",
     "test:llamaparse": "tsx scripts/test-llamaparse.mjs",
     "test:ai": "tsx scripts/test-ai-errors.mjs",

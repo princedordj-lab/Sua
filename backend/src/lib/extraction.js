@@ -75,8 +75,9 @@ export const extractionDeps = {
   nativeReadEnabled,
   nativeReadEligible,
   nativeReadBlocked,
-  // LlamaParse is the first extractor for PDF/DOCX/PPTX; these are injectable
-  // so the focused extraction checks can run the full state machine offline.
+  // LlamaParse is the primary parser for DOCX/PPTX and the scan fallback for
+  // PDFs; these are injectable so the focused extraction checks can run the
+  // full state machine offline.
   llamaParseEnabled,
   llamaParseEligible,
   uploadToLlamaCloud,
@@ -312,26 +313,57 @@ export async function runExtractionPass(
     warn("SIGNATURE", `asset ${assetId} format=${format} content does not match its extension; trying anyway`);
   }
 
-  // LlamaParse is the first extractor for PDF/DOCX/PPTX. A null return means
-  // the provider is unavailable or gave up, and the local-first pipeline below
-  // runs exactly as before; a non-null result finishes this pass.
-  const llama = await tryLlamaParse(asset, format, bytes, started + budgetMs, deps);
-  if (llama) return llama;
-
-  // ---- PDF: local text layer first, model fallback only for scans ---------
-  let localPdf = null;
-  if (format === "pdf") {
-    localPdf = await readLocalPdfPages(asset, bytes, deps);
+  // The extraction order depends on the format, not on the provider.
+  //
+  // PDF: the embedded text layer is read locally first and is the source of
+  // truth for an ordinary text PDF, so a normal handout never reaches a cloud
+  // parser. LlamaParse is dispatched only when the local pass found no usable
+  // page at all — a scan — or when a parse we already submitted is still
+  // parked: a resumed pass must finish the provider job it started instead of
+  // re-deciding from scratch.
+  //
+  // DOCX/PPTX: LlamaParse is the primary parser because it keeps headings,
+  // lists, tables and slide order; the local Office extractor is the fallback.
+  //
+  // `LLAMAPARSE_FORMATS` still says *which* formats may use the provider at
+  // all, so "docx,pptx" keeps PDFs on the free local path entirely. A null
+  // return from tryLlamaParse means the provider is unavailable, out of budget
+  // or gave up, and the local pipeline below runs exactly as before.
+  const readLocal = async () => {
+    const result = await readLocalPdfPages(asset, bytes, deps);
     console.log(
-      `[extract] stage=local_pdf asset=${assetId} pages=${localPdf.pagesTotal ?? 0} usable=${localPdf.usablePages ?? 0} fallback=${localPdf.fallbackPages?.length ?? 0} empty=${localPdf.reasons?.empty ?? 0} garbled=${localPdf.reasons?.garbled ?? 0} sparse=${localPdf.reasons?.sparse ?? 0} ok=${localPdf.ok} ms=${localPdf.ms ?? 0}`,
+      `[extract] stage=local_pdf asset=${assetId} pages=${result.pagesTotal ?? 0} usable=${result.usablePages ?? 0} fallback=${result.fallbackPages?.length ?? 0} empty=${result.reasons?.empty ?? 0} garbled=${result.reasons?.garbled ?? 0} sparse=${result.reasons?.sparse ?? 0} ok=${result.ok} ms=${result.ms ?? 0}`,
     );
+    return result;
+  };
+
+  const providerParked = Boolean(asset.providerJobId);
+  let localPdf = null;
+  if (format === "pdf" && !providerParked) localPdf = await readLocal();
+
+  // A pure scan has no local page to keep. Everything else stays local: a mixed
+  // PDF keeps its readable pages and only the unreadable ones reach the
+  // page-batch fallback, so a whole-document parse can never overwrite text we
+  // already extracted.
+  const pdfIsScan =
+    format === "pdf" && (!localPdf || !localPdf.ok || localPdf.usablePages === 0);
+  if (format !== "pdf" || providerParked || pdfIsScan) {
+    const llama = await tryLlamaParse(asset, format, bytes, started + budgetMs, deps);
+    if (llama) return llama;
+    // A parked job that just fell back still needs the local pages for the
+    // scan decision and the page-wise pass below.
+    if (format === "pdf" && !localPdf) localPdf = await readLocal();
+  }
+
+  // ---- PDF: model fallback only for scans --------------------------------
+  if (format === "pdf") {
     // Nothing readable anywhere in the file: this is a scan. One model read of
     // the whole document beats OCR'ing it page by page, and a failure only
     // costs the page-wise fallback below — never the upload. First pass only: a
     // resumed pass finishes with the page-wise fallback it already started
     // instead of replacing the pages it recovered with a second full read.
     const firstPass = (asset.nextPage ?? 1) <= 1 && (asset.pagesDone ?? 0) === 0;
-    if (localPdf.ok && localPdf.usablePages === 0 && firstPass) {
+    if (localPdf?.ok && localPdf.usablePages === 0 && firstPass) {
       const native = await tryNativeRead(asset, bytes, format, started + budgetMs, deps);
       if (native) {
         console.log(
@@ -357,7 +389,7 @@ export async function runExtractionPass(
 }
 
 // ---------------------------------------------------------------------------
-// LlamaParse: first extractor for PDF/DOCX/PPTX
+// LlamaParse: primary extractor for DOCX/PPTX, scan fallback for PDFs
 // ---------------------------------------------------------------------------
 
 // Once one of these is recorded the provider is finished for this asset and

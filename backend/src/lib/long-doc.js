@@ -1408,6 +1408,17 @@ export async function writeSectionBodies({
   const doneBefore = writes.length - todo.length;
   await deps.setStage("writing", { done: doneBefore, total: writes.length });
 
+  // The map stage persisted its call count through patchCheckpoint, which does
+  // not mutate this in-memory job row. Read the authoritative number once, so
+  // the AI-call budget covers map + reduce + sections instead of the snapshot
+  // the job was loaded with (which is 0 on a fresh pass).
+  const freshCheckpoint = await prisma.job
+    .findUnique({ where: { id: job.id }, select: { checkpoint: true } })
+    .catch(() => null);
+  const callsBeforeSections = Number(
+    freshCheckpoint?.checkpoint?.mapCalls ?? job.checkpoint?.mapCalls ?? 0,
+  );
+
   const persist = async (progressIncrement = 0) => {
     await persistSectionState(job, { saved, failures, calls }, progressIncrement, deps);
   };
@@ -1420,8 +1431,7 @@ export async function writeSectionBodies({
     }
     await (deps.assertJobActive ?? assertJobActive)(job);
     const key = keyFor(write);
-    const mapCalls = Number(job.checkpoint?.mapCalls ?? 0);
-    if (mapCalls + calls >= longDoc.maxAiCallsPerJob) {
+    if (callsBeforeSections + calls >= longDoc.maxAiCallsPerJob) {
       failures[key] = { titles: write.titles, code: "AI_CALL_BUDGET" };
       await persist();
       return;

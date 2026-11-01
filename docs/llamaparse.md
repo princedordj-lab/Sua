@@ -1,10 +1,11 @@
 # LlamaParse extraction runbook
 
-Sua uses LlamaParse (LlamaCloud v2 REST) as the **first** extractor for PDF,
-DOCX and PPTX. Its output is stored in the existing `SourceChunk` table, so the
-AI generation pipeline is unchanged. When the provider is disabled or gives up,
-extraction falls through to the local-first PDF path / local Office extractor in
-`backend/src/lib/extraction.js`.
+Sua uses LlamaParse (LlamaCloud v2 REST) as the **primary** extractor for DOCX
+and PPTX, and as the **scan fallback** for PDFs. Its output is stored in the
+existing `SourceChunk` table, so the AI generation pipeline is unchanged. An
+ordinary text PDF never reaches the provider — its embedded text layer is read
+in-process — and when the provider is disabled or gives up, extraction falls
+through to the local PDF / Office extractor in `backend/src/lib/extraction.js`.
 
 ## Files
 
@@ -22,6 +23,10 @@ extraction falls through to the local-first PDF path / local Office extractor in
 
 ```
 /complete → extractState=pending → claim (FOR UPDATE SKIP LOCKED)
+  → PDF: read the embedded text layer locally first
+      usable pages found (or a providerJobId already parked) → no provider call
+      no usable page at all (a scan) → provider
+  → DOCX/PPTX: provider first
   → LlamaParse enabled and format eligible?
       no  → local-first pipeline
       yes → no providerJobId: upload file, create parse job, park
@@ -30,6 +35,11 @@ extraction falls through to the local-first PDF path / local Office extractor in
               FAILED/CANCELLED → fall back to local
               COMPLETED → persist pages (+ optional OCR for empty PDF pages)
 ```
+
+A mixed PDF keeps every locally readable page and sends only the unreadable ones
+to the page-batch OCR fallback, so a whole-document provider parse can never
+overwrite text that was extracted locally. A PDF whose local pass finds nothing
+tries the provider, then one whole-file model read, then page-wise OCR.
 
 - A parked asset is `extractState=pending` with a `providerNextPollAt`; the
   claim SQL refuses it before that time, so status polls cannot spam the API.
@@ -60,7 +70,7 @@ server code (the generated client expects these columns).
 | :--- | :--- | :--- |
 | `LLAMA_CLOUD_API_KEY` | — | Backend only. Never expose to Expo/Next.js. Without it the provider is skipped. |
 | `LLAMAPARSE_ENABLED` | `1` | Set `0` to restore the entire pre-LlamaParse path. |
-| `LLAMAPARSE_FORMATS` | `pdf,docx,pptx` | Set `docx,pptx` to keep text PDFs on the free local-first extractor. |
+| `LLAMAPARSE_FORMATS` | `pdf,docx,pptx` | Which formats **may** use the provider. A PDF only reaches it when its local text layer has no usable page, so `docx,pptx` keeps every PDF on the free local extractor. |
 | `LLAMAPARSE_TIER` | `cost_effective` | Manual only; the code never upgrades a tier automatically. |
 | `LLAMAPARSE_VERSION` | `latest` | Pin a dated tier version for production reproducibility when available. |
 | `LLAMAPARSE_OCR_LANGUAGES` | `en` | Comma-separated. |
@@ -89,7 +99,9 @@ the asset is marked `truncated` so the UI shows the source is incomplete.
 
 DOCX/PPTX use LlamaParse output only while the provider succeeds. The existing
 local text + Gemini embedded-picture reading still runs when the provider falls
-back, but it is not applied on top of a successful Llama parse.
+back, but it is not applied on top of a successful Llama parse. The local DOCX
+fallback keeps the document as Markdown (level-aware `#` headings and pipe
+tables) so the note pipeline sees the same shape either way.
 
 ## Credits
 

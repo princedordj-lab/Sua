@@ -34,8 +34,14 @@ console.log("=== Running Document Extraction Test Suite ===");
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
-    <w:p><w:r><w:t>Introduction to Computer Systems</w:t></w:r></w:p>
-    <w:p><w:r><w:t>Chapter 1: Hardware Abstraction Layer</w:t></w:r></w:p>
+    <w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>Introduction to Computer Systems</w:t></w:r></w:p>
+    <w:p><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:r><w:t>Chapter 1: Hardware Abstraction Layer</w:t></w:r></w:p>
+    <w:p><w:r><w:t>The kernel schedules every process.</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr><w:tc><w:p><w:r><w:t>Layer</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Role</w:t></w:r></w:p></w:tc></w:tr>
+      <w:tr><w:tc><w:p><w:r><w:t>Kernel</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Scheduling | memory</w:t></w:r></w:p></w:tc></w:tr>
+    </w:tbl>
+    <w:p><w:r><w:t>Closing remarks.</w:t></w:r></w:p>
   </w:body>
 </w:document>`;
   zip.file("word/document.xml", documentXml);
@@ -44,6 +50,21 @@ console.log("=== Running Document Extraction Test Suite ===");
   const result = await extractDocumentText(docxBuffer, "docx", "document");
   assert.ok(result.includes("Introduction to Computer Systems"));
   assert.ok(result.includes("Hardware Abstraction Layer"));
+  // The local fallback speaks Markdown, so the note pipeline sees the same
+  // shape the provider returns: heading levels survive, tables stay tables.
+  assert.ok(result.includes("# Introduction to Computer Systems"), "level-1 heading");
+  assert.ok(result.includes("## Chapter 1: Hardware Abstraction Layer"), "level-2 heading");
+  assert.ok(result.includes("| Layer | Role |"), "table header row");
+  assert.ok(result.includes("| --- | --- |"), "table separator row");
+  assert.ok(result.includes("| Kernel | Scheduling \\| memory |"), "pipes inside a cell are escaped");
+  // Document order is preserved: heading, body, table, tail.
+  assert.ok(
+    result.indexOf("# Introduction") <
+      result.indexOf("The kernel schedules") &&
+      result.indexOf("The kernel schedules") < result.indexOf("| Layer |") &&
+      result.indexOf("| Layer |") < result.indexOf("Closing remarks."),
+    "blocks stay in document order",
+  );
   console.log("✓ 3. DOCX extraction reads paragraphs and text correctly");
 }
 

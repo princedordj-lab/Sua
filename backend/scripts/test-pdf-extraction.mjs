@@ -178,6 +178,15 @@ function textPage(title, index = 1) {
     ],
   };
 }
+
+/**
+ * A one-page scan: an image-only page with no text layer at all. The local pass
+ * finds nothing usable, so this is the shape that legitimately reaches the
+ * provider — a text PDF never does.
+ */
+async function scanPdf(label = "Scanned page") {
+  return buildPdf([{ image: await scannedPageJpeg(label) }]);
+}
 // ---------------------------------------------------------------------------
 // In-memory stand-in for the Prisma client surface extraction.js uses
 // ---------------------------------------------------------------------------
@@ -787,7 +796,8 @@ async function runPass({
 // 14. Pending parse parks, resumes once, and never resubmits
 // ---------------------------------------------------------------------------
 {
-  const pdf = buildPdf([textPage("One")]);
+  // A scan, because a text PDF never reaches the provider any more.
+  const pdf = await scanPdf("One");
   let localParses = 0;
   const providers = createProviders({ llama: {} });
   const run = await runPass({
@@ -807,7 +817,7 @@ async function runPass({
   assert.ok(run.state.asset.providerSubmittedAt instanceof Date);
   assert.equal(providers.calls.llamaUpload, 1);
   assert.equal(providers.calls.llamaCreate, 1);
-  assert.equal(localParses, 0, "a parked pass does not start local extraction");
+  assert.equal(localParses, 1, "one local pass decides this is a scan, then parks");
 
   // Next poll time reached: exactly one status check, no resubmission.
   run.state.asset.extractState = "running";
@@ -830,7 +840,7 @@ async function runPass({
 // 15. Auth and quota are terminal: no silent fallback
 // ---------------------------------------------------------------------------
 for (const code of ["LLAMA_AUTH", "LLAMA_QUOTA"]) {
-  const pdf = buildPdf([textPage("One")]);
+  const pdf = await scanPdf();
   let localParses = 0;
   const failure = Object.assign(new Error(`${code} from provider`), { code, retryable: false });
   const providers = createProviders({
@@ -854,7 +864,7 @@ for (const code of ["LLAMA_AUTH", "LLAMA_QUOTA"]) {
   assert.equal(run.outcome.state, "failed");
   assert.equal(run.state.asset.extractState, "failed");
   assert.equal(run.state.asset.extractErrorCode, code);
-  assert.equal(localParses, 0, `${code} must not fall back silently`);
+  assert.equal(localParses, 1, `${code} must not fall back silently`);
 }
 console.log("✓ 15. Auth/quota failures are terminal and never touch the local path");
 
@@ -862,7 +872,7 @@ console.log("✓ 15. Auth/quota failures are terminal and never touch the local 
 // 16. Exhausted retryable errors fall through to local extraction
 // ---------------------------------------------------------------------------
 {
-  const pdf = buildPdf([textPage("One"), textPage("Two", 2)]);
+  const pdf = await scanPdf("One");
   let localParses = 0;
   const failure = Object.assign(new Error("provider 503"), {
     code: "LLAMA_TRANSIENT",
@@ -888,10 +898,13 @@ console.log("✓ 15. Auth/quota failures are terminal and never touch the local 
   });
 
   assert.equal(run.outcome.state, "done");
-  assert.equal(localParses, 1, "local extraction ran after the retry budget");
+  // One local pass decided this was a scan; the fallback reuses it instead of
+  // parsing the same bytes twice.
+  assert.equal(localParses, 1, "the decision parse is reused by the fallback");
   assert.ok(String(run.state.asset.providerError).startsWith("LLAMA_GAVE_UP"));
   assert.equal(run.state.asset.extractProvider, "fallback");
-  assert.equal(providers.calls.nativeRead, 0);
+  // A scan with no readable local page still gets its one whole-file model read.
+  assert.equal(providers.calls.nativeRead, 1);
   console.log("✓ 16. Exhausted retryable errors fall back to local extraction");
 }
 
@@ -935,6 +948,40 @@ console.log("✓ 15. Auth/quota failures are terminal and never touch the local 
   assert.equal(localParses, 1, "an empty provider result falls through");
   assert.ok(String(run.state.asset.providerError).startsWith("LLAMA_EMPTY_RESULT"));
   console.log("✓ 17. Empty parse result falls back to local extraction");
+}
+
+// ---------------------------------------------------------------------------
+// 18. Local-first policy: a text PDF never reaches the provider
+// ---------------------------------------------------------------------------
+{
+  const pdf = buildPdf([textPage("One"), textPage("Two", 2)]);
+  const providers = createProviders({ llama: {} });
+  const run = await runPass({ pdf, providers });
+
+  assert.equal(run.outcome.state, "done");
+  assert.equal(providers.calls.llamaUpload, 0, "no upload for a text PDF");
+  assert.equal(providers.calls.llamaCreate, 0);
+  assert.equal(providers.calls.llamaPoll, 0);
+  assert.equal(providers.calls.nativeRead, 0);
+  assert.equal(providers.calls.ocrBatch, 0);
+  assert.equal(run.state.asset.extractProvider, null);
+  console.log("✓ 18. Text PDF with the provider available: zero provider calls");
+}
+
+// ---------------------------------------------------------------------------
+// 19. A pure scan prefers the provider over the whole-file model read
+// ---------------------------------------------------------------------------
+{
+  const pdf = await scanPdf("Scanned derivation");
+  const providers = createProviders({ llama: {} });
+  const run = await runPass({ pdf, providers });
+
+  assert.equal(run.outcome.state, "pending", "the parse is accepted and parked");
+  assert.equal(providers.calls.llamaCreate, 1);
+  assert.equal(providers.calls.llamaResult, 0);
+  assert.equal(providers.calls.nativeRead, 0, "no model read while the provider works");
+  assert.equal(run.state.asset.extractProvider, "llamaparse");
+  console.log("✓ 19. Scan: LlamaParse is the preferred cloud fallback");
 }
 
 console.log("\nAll PDF extraction checks passed.");
