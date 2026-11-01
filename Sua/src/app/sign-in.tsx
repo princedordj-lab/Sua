@@ -9,7 +9,12 @@ import {
 import { router } from "expo-router";
 import * as AuthSession from "expo-auth-session";
 import * as WebBrowser from "expo-web-browser";
-import { useSignIn, useSignUp, useSSO } from "@clerk/expo";
+import { useSignIn, useSignUp } from "@clerk/expo";
+// Core 3 SSO: activates the finished session itself and returns the future
+// sign-in/sign-up resources, so it matches the signal resources used below for
+// email/password. The root `useSSO` export is the Core 2 helper (it drives
+// `@clerk/react/legacy` and needs a manual `setActive`).
+import { useSSO } from "@clerk/expo/experimental";
 import { Apple } from "lucide-react-native";
 import { Image } from "expo-image";
 import { Field, Logo, PrimaryButton } from "../components/ui";
@@ -26,6 +31,10 @@ function messageFromError(error: unknown): string {
 
 type SignInChallenge = "email_code" | "phone_code" | "totp" | "backup_code";
 
+// Forgot-password steps: ask for the identifier, verify the emailed code, then
+// collect the replacement password (Clerk signs the student in on success).
+type ResetStep = "email" | "code" | "password";
+
 export default function SignIn() {
   const pv = usePalette();
   const { signIn } = useSignIn();
@@ -41,6 +50,9 @@ export default function SignIn() {
   const [pendingVerification, setPendingVerification] = useState(false);
   const [verificationSubmitted, setVerificationSubmitted] = useState(false);
   const [signInChallenge, setSignInChallenge] = useState<SignInChallenge | null>(null);
+  const [resetStep, setResetStep] = useState<ResetStep | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const finalizingVerification = useRef(false);
 
@@ -53,12 +65,37 @@ export default function SignIn() {
     return () => clearTimeout(timeout);
   }, [authVerdict, isSigningOut]);
 
-  const switchMode = (next: "sign-in" | "sign-up") => {
-    setMode(next);
+  /**
+   * Drop any half-finished Clerk attempt. A stale attempt would otherwise leak
+   * its status into the next one (e.g. a reset left in `needs_new_password`
+   * making the next password sign-in fail for no visible reason).
+   */
+  const resetAttempts = async () => {
+    finalizingVerification.current = false;
+    await signIn.reset().catch(() => {});
+    await signUp.reset().catch(() => {});
+  };
+
+  const clearVerification = () => {
     setPendingVerification(false);
     setSignInChallenge(null);
     setVerificationSubmitted(false);
     setCode("");
+  };
+
+  const clearReset = () => {
+    setResetStep(null);
+    setCode("");
+    setNewPassword("");
+    setConfirmPassword("");
+  };
+
+  const switchMode = async (next: "sign-in" | "sign-up") => {
+    if (busy) return;
+    setMode(next);
+    clearVerification();
+    clearReset();
+    await resetAttempts();
   };
 
   const navigateAfterAuth = useCallback((params?: {
@@ -139,6 +176,7 @@ export default function SignIn() {
   };
 
   const submitEmailPassword = async () => {
+    if (busy) return;
     if (!email || !password)
       return Alert.alert(
         "Almost there",
@@ -157,6 +195,17 @@ export default function SignIn() {
         if (error) throw error;
         if (signIn.status === "complete") {
           await completeSignIn();
+        } else if (signIn.status === "needs_new_password") {
+          // Clerk rejected the password (e.g. it was flagged as compromised) or
+          // the account must set a new one. The reset attempt is already in the
+          // right state, so go straight to collecting the replacement.
+          setNewPassword("");
+          setConfirmPassword("");
+          setResetStep("password");
+          Alert.alert(
+            "New password needed",
+            "Clerk requires a new password for this account before signing in.",
+          );
         } else if (
           signIn.status === "needs_second_factor" ||
           signIn.status === "needs_client_trust"
@@ -205,7 +254,7 @@ export default function SignIn() {
   };
 
   const submitVerificationCode = async () => {
-    if (!code) return;
+    if (busy || !code) return;
     setBusy(true);
     try {
       const { error } = await signUp.verifications.verifyEmailCode({ code });
@@ -222,7 +271,7 @@ export default function SignIn() {
   };
 
   const submitSignInChallenge = async () => {
-    if (!code || !signInChallenge) return;
+    if (busy || !code || !signInChallenge) return;
     setBusy(true);
     try {
       let error: unknown = null;
@@ -250,6 +299,175 @@ export default function SignIn() {
     }
   };
 
+  /** Resend the sign-up verification code. */
+  const resendVerificationCode = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const { error } = await signUp.verifications.sendEmailCode();
+      if (error) throw error;
+      setCode("");
+      Alert.alert("Code sent", `We sent a new code to ${email.trim()}.`);
+    } catch (error) {
+      Alert.alert("Could not resend the code", messageFromError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Resend the second-factor code (email/phone challenges only). */
+  const resendSignInChallenge = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await beginSignInChallenge();
+      Alert.alert(
+        "Code sent",
+        signInChallenge === "phone_code"
+          ? "We sent a new code to your phone."
+          : `We sent a new code to ${email.trim()}.`,
+      );
+    } catch (error) {
+      Alert.alert("Could not resend the code", messageFromError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Forgot password, step 1: create a sign-in attempt for the identifier and
+   * ask Clerk to email a reset code. `sendCode()` always targets the first email
+   * address on the account, so the identifier has to be attached first.
+   */
+  const beginPasswordReset = async () => {
+    if (busy) return;
+    if (!email.trim()) {
+      return Alert.alert(
+        "Enter your email",
+        "We need the email you signed up with to send a reset code.",
+      );
+    }
+    setBusy(true);
+    try {
+      // Start from a clean attempt: a half-finished password sign-in would
+      // otherwise carry its status into the reset.
+      await signIn.reset().catch(() => {});
+      const { error: createError } = await signIn.create({
+        identifier: email.trim(),
+      });
+      if (createError) throw createError;
+      const { error: sendError } = await signIn.resetPasswordEmailCode.sendCode();
+      if (sendError) throw sendError;
+      setCode("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setResetStep("code");
+    } catch (error) {
+      Alert.alert("Could not send a reset code", messageFromError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resendResetCode = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const { error } = await signIn.resetPasswordEmailCode.sendCode();
+      if (error) throw error;
+      setCode("");
+      Alert.alert("Code sent", `We sent a new code to ${email.trim()}.`);
+    } catch (error) {
+      Alert.alert("Could not resend the code", messageFromError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Forgot password, step 2: verify the emailed code. */
+  const verifyResetCode = async () => {
+    if (busy || !code) return;
+    setBusy(true);
+    try {
+      const { error } = await signIn.resetPasswordEmailCode.verifyCode({ code });
+      if (error) throw error;
+      setNewPassword("");
+      setConfirmPassword("");
+      setResetStep("password");
+    } catch (error) {
+      Alert.alert("Verification failed", messageFromError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Forgot password, step 3: save the new password. Clerk moves the attempt to
+   * `complete` (it signs the student in), so the session finalizes like any
+   * other successful sign-in. Other sessions are revoked because a reset is the
+   * usual response to a compromised password.
+   */
+  const submitNewPassword = async () => {
+    if (busy) return;
+    if (newPassword.length < 8) {
+      return Alert.alert(
+        "Password too short",
+        "Use at least 8 characters for your new password.",
+      );
+    }
+    if (newPassword !== confirmPassword) {
+      return Alert.alert(
+        "Passwords do not match",
+        "Re-enter the same password in both fields.",
+      );
+    }
+    setBusy(true);
+    try {
+      const { error } = await signIn.resetPasswordEmailCode.submitPassword({
+        password: newPassword,
+        signOutOfOtherSessions: true,
+      });
+      if (error) throw error;
+      setPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      if (signIn.status === "complete") {
+        setResetStep(null);
+        await completeSignIn();
+      } else if (
+        signIn.status === "needs_second_factor" ||
+        signIn.status === "needs_client_trust"
+      ) {
+        setResetStep(null);
+        await beginSignInChallenge();
+      } else {
+        // Leave a clean form rather than a half-finished attempt.
+        clearReset();
+        await signIn.reset().catch(() => {});
+        Alert.alert(
+          "Password not confirmed",
+          `Your password may have been saved, but Clerk reports ${signIn.status ?? "an incomplete reset"}. Try signing in with the new password.`,
+        );
+      }
+    } catch (error) {
+      Alert.alert("Could not set the new password", messageFromError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const leaveVerification = async () => {
+    if (busy) return;
+    clearVerification();
+    await resetAttempts();
+  };
+
+  const exitReset = async () => {
+    if (busy) return;
+    clearReset();
+    await signIn.reset().catch(() => {});
+  };
+
   useEffect(() => {
     if (!verificationSubmitted || busy) return;
     if (finalizingVerification.current) return;
@@ -269,30 +487,36 @@ export default function SignIn() {
   }, [busy, finalizeVerifiedSignUp, signUp.status, verificationSubmitted]);
 
   const continueWithGoogle = async () => {
+    if (busy) return;
     setBusy(true);
     try {
-      const result = await startSSOFlow({
-        strategy: "oauth_google",
-        redirectUrl: AuthSession.makeRedirectUri({
-          scheme: "sua",
-          path: "oauth-callback",
-        }),
-      });
-      const { createdSessionId, setActive } = result;
-      if (!createdSessionId || !setActive) {
-        const missing = result.signUp?.missingFields?.join(", ");
-        throw new Error(
-          missing
-            ? `Google authentication needs these additional account details: ${missing}. Return to the form and complete them, or try Google again.`
-            : "Google authentication needs an additional verification step before a session can start. Return to email sign-in or try Google again.",
-        );
+      const { createdSessionId, authSessionResult, signUp: ssoSignUp } =
+        await startSSOFlow({
+          strategy: "oauth_google",
+          redirectUrl: AuthSession.makeRedirectUri({
+            scheme: "sua",
+            path: "oauth-callback",
+          }),
+        });
+      // Closing the browser sheet is a decision, not a failure. Alerting here
+      // would punish a student for backing out.
+      if (
+        authSessionResult?.type === "cancel" ||
+        authSessionResult?.type === "dismiss"
+      ) {
+        return;
       }
-      // result.signUp is always a SignUpResource object (the SSO hook also
-      // creates a transfer sign-up), so it must never drive navigation.
-      await setActive({
-        session: createdSessionId,
-        navigate: navigateAfterAuth,
-      });
+      if (createdSessionId) {
+        // The Core 3 helper finalized the session itself; the verdict effect
+        // above routes to /auth-finish once Clerk publishes it.
+        return;
+      }
+      const missing = ssoSignUp?.missingFields?.join(", ");
+      throw new Error(
+        missing
+          ? `Google authentication needs these additional account details: ${missing}. Return to the form and complete them, or try Google again.`
+          : "Google authentication needs an additional verification step before a session can start. Return to email sign-in or try Google again.",
+      );
     } catch (error) {
       Alert.alert("Google sign-in failed", messageFromError(error));
     } finally {
@@ -307,37 +531,124 @@ export default function SignIn() {
     );
   };
 
+  // One heading/subheading pair for every state, so the screen cannot show a
+  // stale "Welcome back." above a reset form.
+  let heading: string;
+  let subheading: string;
+  if (resetStep === "email") {
+    heading = "Reset your password.";
+    subheading = "Enter the email you signed up with and we will send a reset code.";
+  } else if (resetStep === "code") {
+    heading = "Check your email.";
+    subheading = `Enter the password reset code sent to ${email.trim()}.`;
+  } else if (resetStep === "password") {
+    heading = "Choose a new password.";
+    subheading = "Use at least 8 characters. We will sign you in once it is saved.";
+  } else if (pendingVerification) {
+    heading = "Check your email.";
+    subheading = `Enter the verification code sent to ${email.trim()}.`;
+  } else if (signInChallenge) {
+    heading = "Verify your sign-in.";
+    subheading =
+      signInChallenge === "email_code"
+        ? `Enter the verification code sent to ${email.trim()}.`
+        : signInChallenge === "phone_code"
+          ? "Enter the verification code sent to your phone."
+          : signInChallenge === "totp"
+            ? "Enter the code from your authenticator app."
+            : "Enter one of your backup codes.";
+  } else if (mode === "sign-in") {
+    heading = "Welcome back.";
+    subheading = "Sign in to pick up where you left off.";
+  } else {
+    heading = "Create your account.";
+    subheading = "Start turning lectures into exam-ready study sets.";
+  }
+
   return (
     <SafeAreaView className="flex-1 bg-cream" style={{ flex: 1 }}>
       <View className="flex-1 px-6 pt-5">
         <Logo />
         <View className="flex-1 justify-center gap-6">
           <View>
-            <Text className="text-[34px] font-black text-ink">
-              {pendingVerification
-                ? "Check your email."
-                : signInChallenge
-                  ? "Verify your sign-in."
-                  : mode === "sign-in"
-                  ? "Welcome back."
-                  : "Create your account."}
-            </Text>
-            <Text className="mt-2 text-base text-ink-soft">
-              {pendingVerification || signInChallenge
-                ? pendingVerification || signInChallenge === "email_code"
-                  ? `Enter the verification code sent to ${email}.`
-                  : signInChallenge === "phone_code"
-                    ? "Enter the verification code sent to your phone."
-                    : signInChallenge === "totp"
-                      ? "Enter the code from your authenticator app."
-                      : "Enter one of your backup codes."
-                : mode === "sign-in"
-                  ? "Sign in to pick up where you left off."
-                  : "Start turning lectures into exam-ready study sets."}
-            </Text>
+            <Text className="text-[34px] font-black text-ink">{heading}</Text>
+            <Text className="mt-2 text-base text-ink-soft">{subheading}</Text>
           </View>
 
-          {pendingVerification || signInChallenge ? (
+          {resetStep ? (
+            <View className="gap-4">
+              {resetStep === "email" ? (
+                <>
+                  <Field
+                    label="Email address"
+                    value={email}
+                    onChangeText={setEmail}
+                    placeholder="you@university.edu"
+                    autoCapitalize="none"
+                    autoComplete="email"
+                    textContentType="emailAddress"
+                    keyboardType="email-address"
+                  />
+                  <PrimaryButton onPress={beginPasswordReset}>
+                    {busy ? "Sending..." : "Send reset code"}
+                  </PrimaryButton>
+                </>
+              ) : resetStep === "code" ? (
+                <>
+                  <Field
+                    label="Reset code"
+                    value={code}
+                    onChangeText={setCode}
+                    placeholder="123456"
+                    keyboardType="number-pad"
+                    autoComplete="one-time-code"
+                    textContentType="oneTimeCode"
+                  />
+                  <PrimaryButton onPress={verifyResetCode}>
+                    {busy ? "Verifying..." : "Verify code"}
+                  </PrimaryButton>
+                  <Pressable
+                    onPress={resendResetCode}
+                    disabled={busy}
+                    className="items-center py-2"
+                  >
+                    <Text className="font-bold text-brand">Resend code</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <>
+                  <Field
+                    label="New password"
+                    value={newPassword}
+                    onChangeText={setNewPassword}
+                    placeholder="••••••••"
+                    secureTextEntry
+                    autoComplete="new-password"
+                    textContentType="newPassword"
+                  />
+                  <Field
+                    label="Confirm new password"
+                    value={confirmPassword}
+                    onChangeText={setConfirmPassword}
+                    placeholder="••••••••"
+                    secureTextEntry
+                    autoComplete="new-password"
+                    textContentType="newPassword"
+                  />
+                  <PrimaryButton onPress={submitNewPassword}>
+                    {busy ? "Saving..." : "Set new password"}
+                  </PrimaryButton>
+                </>
+              )}
+              <Pressable
+                onPress={exitReset}
+                disabled={busy}
+                className="items-center py-2"
+              >
+                <Text className="font-bold text-brand">Back to sign in</Text>
+              </Pressable>
+            </View>
+          ) : pendingVerification || signInChallenge ? (
             <View className="gap-4">
               <Field
                 label={signInChallenge === "backup_code" ? "Backup code" : "Verification code"}
@@ -345,18 +656,28 @@ export default function SignIn() {
                 onChangeText={setCode}
                 placeholder="123456"
                 keyboardType={signInChallenge === "backup_code" ? "default" : "number-pad"}
+                autoComplete="one-time-code"
+                textContentType="oneTimeCode"
               />
               <PrimaryButton
                 onPress={pendingVerification ? submitVerificationCode : submitSignInChallenge}
               >
                 {busy ? "Verifying..." : "Verify and continue"}
               </PrimaryButton>
+              {(pendingVerification ||
+                signInChallenge === "email_code" ||
+                signInChallenge === "phone_code") && (
+                <Pressable
+                  onPress={pendingVerification ? resendVerificationCode : resendSignInChallenge}
+                  disabled={busy}
+                  className="items-center py-2"
+                >
+                  <Text className="font-bold text-brand">Resend code</Text>
+                </Pressable>
+              )}
               <Pressable
-                onPress={() => {
-                  setPendingVerification(false);
-                  setSignInChallenge(null);
-                  setCode("");
-                }}
+                onPress={leaveVerification}
+                disabled={busy}
                 className="items-center py-2"
               >
                 <Text className="font-bold text-brand">
@@ -373,6 +694,8 @@ export default function SignIn() {
                     value={fullName}
                     onChangeText={setFullName}
                     placeholder="e.g. Ama Mensah"
+                    autoComplete="name"
+                    textContentType="name"
                   />
                 )}
                 <Field
@@ -382,6 +705,8 @@ export default function SignIn() {
                   placeholder="you@university.edu"
                   autoCapitalize="none"
                   keyboardType="email-address"
+                  autoComplete="email"
+                  textContentType="emailAddress"
                 />
                 <Field
                   label="Password"
@@ -389,9 +714,18 @@ export default function SignIn() {
                   onChangeText={setPassword}
                   placeholder="••••••••"
                   secureTextEntry
+                  autoComplete={mode === "sign-in" ? "current-password" : "new-password"}
+                  textContentType={mode === "sign-in" ? "password" : "newPassword"}
                 />
                 {mode === "sign-in" && (
-                  <Pressable className="items-end">
+                  <Pressable
+                    onPress={() => {
+                      if (busy) return;
+                      setResetStep("email");
+                    }}
+                    disabled={busy}
+                    className="items-end py-1"
+                  >
                     <Text className="font-semibold text-brand">
                       Forgot password?
                     </Text>
@@ -413,14 +747,16 @@ export default function SignIn() {
               <View className="flex-row gap-3">
                 <Pressable
                   onPress={continueWithGoogle}
-                    className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-full border border-line bg-surface"
-                  >
+                  disabled={busy}
+                  className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-full border border-line bg-surface"
+                >
                   <Image source={require("@/assets/images/google.svg")} style={{ width: 20, height: 20 }} />
                   <Text className="font-bold text-ink">Google</Text>
                 </Pressable>
                 {Platform.OS === "ios" && (
                   <Pressable
                     onPress={continueWithApple}
+                    disabled={busy}
                     className="h-14 flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-line bg-surface"
                   >
                     <Apple size={18} color={pv.ink.DEFAULT} />
@@ -430,8 +766,9 @@ export default function SignIn() {
               </View>
               <Pressable
                 onPress={() =>
-                  switchMode(mode === "sign-in" ? "sign-up" : "sign-in")
+                  void switchMode(mode === "sign-in" ? "sign-up" : "sign-in")
                 }
+                disabled={busy}
                 className="items-center py-2"
               >
                 <Text className="text-ink-soft">

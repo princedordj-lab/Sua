@@ -2461,13 +2461,11 @@ export async function loadHomeStats(db: SQLiteDatabase): Promise<HomeStats> {
 }
 
 /**
- * Account deletion (Privacy-first): remove every trace of the signed-out
- * student from the device. Recording segments and queued uploads reference
- * their files, so those are deleted from disk first, and only then is every
- * local table emptied — a hard reset of the study data while keeping the
- * database itself (and its migrations) intact for a future login.
+ * Delete the media files that recording segments and queued uploads point at.
+ * Shared by the two local-data resets below so a wipe never leaves a student's
+ * lecture audio behind on disk.
  */
-export async function wipeLocalData(db: SQLiteDatabase) {
+async function deleteLocalMediaFiles(db: SQLiteDatabase) {
   const paths = new Set<string>();
   for (const row of await db.getAllAsync<{ path: string }>(
     "SELECT path FROM recording_segments",
@@ -2486,6 +2484,17 @@ export async function wipeLocalData(db: SQLiteDatabase) {
       // Already gone — nothing to clean up.
     }
   }
+}
+
+/**
+ * Account deletion (Privacy-first): remove every trace of the signed-out
+ * student from the device. Recording segments and queued uploads reference
+ * their files, so those are deleted from disk first, and only then is every
+ * local table emptied — a hard reset of the study data while keeping the
+ * database itself (and its migrations) intact for a future login.
+ */
+export async function wipeLocalData(db: SQLiteDatabase) {
+  await deleteLocalMediaFiles(db);
   await db.execAsync(`
     DELETE FROM card_queue;
     DELETE FROM reviews;
@@ -2503,5 +2512,38 @@ export async function wipeLocalData(db: SQLiteDatabase) {
     DELETE FROM note_tombstones;
     DELETE FROM courses;
     DELETE FROM settings;
+  `);
+}
+
+/**
+ * Sign-out: the next account on this device must never inherit the previous
+ * student's study data. Every study table is emptied, but `settings` survives
+ * because it holds device preferences (appearance, push opt-in, Wi-Fi-only) and
+ * per-account caches keyed by the Clerk id, which the next session cannot read.
+ * The only settings rows dropped are per-note reading positions, which point at
+ * notes that no longer exist.
+ *
+ * Account deletion still uses `wipeLocalData` above: that one removes settings
+ * too, so the device leaves no trace at all.
+ */
+export async function clearStudyDataForAccountSwitch(db: SQLiteDatabase) {
+  await deleteLocalMediaFiles(db);
+  await db.execAsync(`
+    DELETE FROM card_queue;
+    DELETE FROM reviews;
+    DELETE FROM quiz_attempts;
+    DELETE FROM quiz_questions;
+    DELETE FROM quizzes;
+    DELETE FROM flashcards;
+    DELETE FROM generation_queue;
+    DELETE FROM chat_messages;
+    DELETE FROM upload_queue;
+    DELETE FROM recording_segments;
+    DELETE FROM recording_sessions;
+    DELETE FROM sync_queue;
+    DELETE FROM notes;
+    DELETE FROM note_tombstones;
+    DELETE FROM courses;
+    DELETE FROM settings WHERE key LIKE 'note_section:%';
   `);
 }

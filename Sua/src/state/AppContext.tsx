@@ -15,6 +15,7 @@ import { AppState, Platform } from "react-native";
 import { coursesApi, profileApi, pushApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
 import {
+  clearStudyDataForAccountSwitch,
   getSetting,
   listNotes,
   listLocalCourses,
@@ -65,6 +66,11 @@ type AppContextValue = {
   isHydrating: boolean;
   hydrationIssue: boolean;
   hydrationError: string | null;
+  // True when the API answered 401 for this session: the token exists but the
+  // server will not accept it (almost always an app/API Clerk instance
+  // mismatch). Distinct from "offline" so the UI stops telling students to
+  // check their connection.
+  authRejected: boolean;
   // True once a server profile was hydrated. Routing must not treat an
   // unresolved profile as "not onboarded".
   isProfileResolved: boolean;
@@ -190,6 +196,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   } | null>(null);
   const [hydrationIssue, setHydrationIssue] = useState(false);
   const [hydrationError, setHydrationError] = useState<string | null>(null);
+  const [authRejected, setAuthRejected] = useState(false);
+  // A session can exist in Clerk before it can mint a token (the native client
+  // syncs into the JS client asynchronously). Counting the misses keeps the
+  // retry bounded instead of spinning forever.
+  const tokenMisses = useRef(0);
   // A hydration snapshot only describes the state it was requested for. Local
   // writes bump this so a response already in flight cannot overwrite a newer
   // server write (finishing onboarding, adding a course...).
@@ -217,6 +228,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }, delayMs);
   }, []);
   const retryHydration = useCallback(() => {
+    // A manual retry is a fresh start: clear the "server rejected the session"
+    // verdict so the screen can show progress instead of the old failure copy.
+    tokenMisses.current = 0;
+    setAuthRejected(false);
     requestRefresh();
   }, [requestRefresh]);
   const applyHydrationFallback = useCallback((clerkId: string) => {
@@ -367,12 +382,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const revision = hydrationRevision.current;
     (async () => {
       try {
-        const token = await getToken();
-        if (!token || cancelled) return;
+        let token = await getToken().catch(() => null);
+        if (cancelled) return;
+        if (!token) {
+          // Clerk has a session but has not minted a token yet. Returning
+          // silently used to leave the student on the /auth-finish spinner for
+          // the whole 10s fallback; retry a few times instead.
+          if (tokenMisses.current < 3) {
+            tokenMisses.current += 1;
+            requestRefresh(1_500);
+          } else {
+            setHydrationIssue(true);
+            setAuthRejected(true);
+            setHydrationError(
+              "Sua could not read your session. Sign out and sign in again.",
+            );
+            setHydrated((prev) =>
+              prev.clerkId === userId && prev.profile
+                ? prev
+                : { clerkId: userId, profile: null, courses: [] },
+            );
+          }
+          return;
+        }
+        tokenMisses.current = 0;
+
         // Bootstrap the local User row before loading dependent courses. Both
         // endpoints lazily create the row, so running them concurrently can
         // race on the users.clerkId unique constraint for a new account.
-        const profile = await profileApi.get(token);
+        let profile: ServerProfile;
+        try {
+          profile = await profileApi.get(token);
+        } catch (error) {
+          // A token can rotate between the read and the request; one forced
+          // refresh absorbs that race. A second 401 is a real rejection.
+          if ((error as { status?: number } | null)?.status !== 401) throw error;
+          const fresh = await getToken({ skipCache: true }).catch(() => null);
+          if (!fresh) throw error;
+          token = fresh;
+          profile = await profileApi.get(token);
+        }
         const serverCourses = await coursesApi.list(token);
         if (cancelled) return;
         // A newer local write already happened: this snapshot is older than the
@@ -392,6 +441,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         });
         setHydrationIssue(false);
         setHydrationError(null);
+        setAuthRejected(false);
         // Keep the offline fallback fresh: an onboarded account may sign in
         // without a connection next time and should go straight to the app.
         void writeOnboardedCache(db, userId, onboarded);
@@ -448,11 +498,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // can still be created and viewed offline; keep any state already
         // hydrated by an earlier successful pass.
         if (cancelled) return;
+        // A 401 is not a connectivity problem: the server received the token
+        // and refused it. Saying "check your internet" here sends students in
+        // circles, so keep the two failures apart.
+        const rejected = (error as { status?: number } | null)?.status === 401;
         setHydrationIssue(true);
+        setAuthRejected(rejected);
         setHydrationError(
-          error instanceof Error && error.message
-            ? error.message
-            : "Could not check your account.",
+          rejected
+            ? "Sua could not confirm your session with the server. Sign out and sign in again."
+            : error instanceof Error && error.message
+              ? error.message
+              : "Could not check your account.",
         );
         let cached: LocalCourse[] = [];
         try {
@@ -492,10 +549,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       }
       await setSetting(db, "expo_push_token", "").catch(() => {});
+      // Last chance to push edits made offline. Bounded so an unreachable API
+      // can never hold the sign-out (and the spinner) for the full timeout.
+      await Promise.race([
+        getToken()
+          .then((token) => (token ? syncPendingNotes(db, token) : null))
+          .catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
       bumpHydrationRevision();
       setConfirmedOnboardedFor(null);
       setHydrated(EMPTY_HYDRATED);
+      // The next session starts from a clean slate; a rejection recorded for
+      // the previous one must not tint its screens.
+      tokenMisses.current = 0;
+      setAuthRejected(false);
+      setHydrationIssue(false);
+      setHydrationError(null);
       await clerkSignOut();
+      // A session that ended on purpose must not keep the flag: otherwise the
+      // next genuine expiry reads as "the student signed out" and the welcome
+      // screen loses its "session ended" message and its self-heal.
+      setSignOutRequested(false);
+      // Sign-out is also an account switch: the next student on this device
+      // must not inherit notes, cards, reviews or recordings. Only runs once
+      // the session is really gone (a failed sign-out keeps the data), and
+      // after the best-effort sync above so unsynced work is not thrown away.
+      await clearStudyDataForAccountSwitch(db).catch((error: unknown) => {
+        console.warn("[sign-out] could not clear local study data", error);
+      });
     } catch (error) {
       // Still signed in: let the guards work normally again.
       setSignOutRequested(false);
@@ -730,6 +812,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       isHydrating,
       hydrationIssue,
       hydrationError,
+      authRejected,
       isProfileResolved,
       hasCompletedOnboarding,
       profile,
@@ -751,6 +834,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       active.courses,
       addCourse,
       appStreak,
+      authRejected,
       authVerdict,
       completeOnboarding,
       deleteAccount,

@@ -18,7 +18,12 @@ export function NotificationObserver() {
   const handled = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!isLoaded || !isSignedIn) return;
+    if (!isLoaded || !isSignedIn) {
+      // The next account on this device must not inherit the previous one's
+      // handled ids: a re-delivered push would otherwise be swallowed.
+      handled.current.clear();
+      return;
+    }
     let cancelled = false;
 
     const redirect = (notification: Notifications.Notification) => {

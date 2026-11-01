@@ -76,6 +76,20 @@ export async function apiRequest<T>(
       throw fail("Something went wrong on the server. Please try again.");
     }
 
+    if (response.status === 401) {
+      // The token reached the API but did not verify. The usual cause is the
+      // app and the API pointing at different Clerk instances (a `pk_live_`
+      // app against a `pk_test_` backend), which no amount of retrying fixes.
+      if (__DEV__) {
+        console.warn(
+          "[api] 401 from " +
+            path +
+            ": the API rejected this session token. Check that backend CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY and EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY all belong to the same Clerk instance.",
+        );
+      }
+      throw fail("Sua could not confirm your session. Sign out and sign in again.");
+    }
+
     if (
       /prisma|foreign key|constraint|syntax error|database|relation|table/i.test(
         detail,
@@ -86,6 +100,14 @@ export async function apiRequest<T>(
 
     if (response.status === 409 && /sync notes/i.test(detail)) {
       throw fail("Note is syncing with the server. Please wait a moment.");
+    }
+
+    // The API answers ACCOUNT_CONFLICT with the code in `error` and the readable
+    // sentence in `message`; surface the sentence instead of the raw code.
+    if (response.status === 409 && detail === "ACCOUNT_CONFLICT") {
+      throw fail(
+        "This email is already linked to another Sua account. Sign in with that account instead.",
+      );
     }
 
     throw fail(detail || "Request failed. Please try again.");

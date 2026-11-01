@@ -27,6 +27,7 @@ export default function AuthFinish() {
     isProfileResolved,
     hasCompletedOnboarding,
     hydrationError,
+    authRejected,
     retryHydration,
     signOut,
   } = useApp();
@@ -127,6 +128,16 @@ export default function AuthFinish() {
     !isHydrating &&
     !isProfileResolved;
 
+  // A rejected session is not a connectivity problem, and telling a student to
+  // "connect" when the server already refused their token sends them in
+  // circles. Say what happened and make signing out the obvious way forward.
+  const heading = authRejected
+    ? "Sua could not accept this session"
+    : "Connect to finish signing in";
+  const body = authRejected
+    ? "Your sign-in worked, but Sua could not use this session on the server. Sign out, then sign in again."
+    : "Sua needs a connection once to check your account on this device.";
+
   return (
     <SafeAreaView className="flex-1 bg-cream" style={{ flex: 1 }}>
       <View className="flex-1 items-center justify-center gap-6 px-6">
@@ -134,24 +145,38 @@ export default function AuthFinish() {
         {unresolved && !checking ? (
           <View className="w-full items-center gap-3">
             <Text className="text-center text-[26px] font-black text-ink">
-              Connect to finish signing in
+              {heading}
             </Text>
             <Text className="text-center text-base leading-6 text-ink-soft">
-              Sua needs a connection once to check your account on this device.
+              {body}
             </Text>
-            {hydrationError ? (
+            {!authRejected && hydrationError ? (
               <Text className="text-center text-sm text-ink-faint">
                 {hydrationError}
               </Text>
             ) : null}
             <View className="mt-2 w-full gap-2">
-              <PrimaryButton onPress={retry}>Try again</PrimaryButton>
-              <Pressable
-                onPress={leave}
-                className="min-h-12 items-center justify-center"
-              >
-                <Text className="font-bold text-brand">Sign out</Text>
-              </Pressable>
+              {authRejected ? (
+                <>
+                  <PrimaryButton onPress={leave}>Sign out</PrimaryButton>
+                  <Pressable
+                    onPress={retry}
+                    className="min-h-12 items-center justify-center"
+                  >
+                    <Text className="font-bold text-brand">Try again</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <>
+                  <PrimaryButton onPress={retry}>Try again</PrimaryButton>
+                  <Pressable
+                    onPress={leave}
+                    className="min-h-12 items-center justify-center"
+                  >
+                    <Text className="font-bold text-brand">Sign out</Text>
+                  </Pressable>
+                </>
+              )}
             </View>
           </View>
         ) : (

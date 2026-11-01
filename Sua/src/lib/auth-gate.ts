@@ -28,11 +28,9 @@ export function useAuthVerdict(
   graceMs: number = SIGNED_OUT_GRACE_MS,
 ): AuthVerdict {
   // Set only by the timer below, i.e. after a signed-out reading survived the
-  // grace period. It is never cleared: a raw "signed in" outranks it during
-  // render, and a later sign-out is a real sign-out, so believing it at once
-  // costs nothing. A false positive can only be a transient frame, in which
-  // case the next render reads "signed-in" again and the screens that landed
-  // on Welcome route themselves back.
+  // grace period. A raw "signed in" clears it again so the next sign-out has to
+  // earn the verdict too: believing a stale confirmation would turn one
+  // transient frame after a re-login into a logout.
   const [signedOutConfirmed, setSignedOutConfirmed] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // True while a signed-out reading is already being timed, so re-renders (and
@@ -51,6 +49,15 @@ export function useAuthVerdict(
     if (isSignedIn === true || !isLoaded) {
       clear();
       waitingOnSignedOut.current = false;
+      // Re-arm the grace period. Without this, a process that signed out once
+      // would believe every later signed-out frame immediately (token refresh,
+      // native client sync) — exactly the flicker this hook prevents.
+      //
+      // Deferred because a synchronous state update from an effect body causes
+      // a cascading render, and this is not time-critical: the render below
+      // already reports "signed-in"/"loading", so the stale confirmation cannot
+      // be read before the microtask lands. React bails out when it is false.
+      queueMicrotask(() => setSignedOutConfirmed(false));
       return;
     }
 
