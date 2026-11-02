@@ -3,6 +3,7 @@ import { ActivityIndicator, Alert, Text, View } from "react-native";
 import { router } from "expo-router";
 import { useAuth } from "@clerk/expo";
 import * as WebBrowser from "expo-web-browser";
+import { useApp } from "../state/AppContext";
 import { usePalette } from "../state/appearance";
 
 WebBrowser.maybeCompleteAuthSession();
@@ -10,10 +11,16 @@ WebBrowser.maybeCompleteAuthSession();
 export default function OAuthCallback() {
   const pv = usePalette();
   const { isLoaded, isSignedIn } = useAuth();
+  const { markAuthClaim } = useApp();
 
   useEffect(() => {
     if (!isLoaded) return;
     if (isSignedIn) {
+      // Positive evidence right now. Mark the claim so auth-finish does not
+      // read a stale latched "signed out" verdict as a logout while the fresh
+      // session settles: a warm flow can route here before the sign-in screen
+      // behind this link marks anything.
+      markAuthClaim();
       // Cold-start deep links land here too; the resolver reads the account
       // verdict instead of trusting anything remembered from this process.
       router.replace("/auth-finish");
@@ -31,7 +38,7 @@ export default function OAuthCallback() {
     }, 20_000);
 
     return () => clearTimeout(timeout);
-  }, [isLoaded, isSignedIn]);
+  }, [isLoaded, isSignedIn, markAuthClaim]);
 
   return (
     <View className="flex-1 items-center justify-center gap-3 bg-cream">

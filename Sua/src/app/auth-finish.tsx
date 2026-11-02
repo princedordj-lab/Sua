@@ -23,6 +23,7 @@ export default function AuthFinish() {
   const { userId } = useAuth();
   const {
     authVerdict,
+    isAuthClaimPending,
     isHydrating,
     isProfileResolved,
     hasCompletedOnboarding,
@@ -72,6 +73,11 @@ export default function AuthFinish() {
     // The verdict already waited for a stable reading; no local debounce here.
     if (authVerdict === "loading") return;
     if (authVerdict === "signed-out") {
+      // A completed sign-in is positive evidence that outranks the stale
+      // "signed out" verdict still latched from before it. Clerk publishes
+      // "signed in" (and the claim clears) long before this window ends; a
+      // genuinely failed sync ends up here too, just 20s later.
+      if (isAuthClaimPending) return;
       router.replace("/welcome");
       return;
     }
@@ -100,6 +106,7 @@ export default function AuthFinish() {
     cachedOnboarded,
     db,
     hasCompletedOnboarding,
+    isAuthClaimPending,
     isHydrating,
     isProfileResolved,
     userId,
@@ -115,7 +122,7 @@ export default function AuthFinish() {
     checkTimer.current = setTimeout(() => {
       checkTimer.current = null;
       setChecking(false);
-    }, 12_000);
+    }, 30_000);
   }, [checking, retryHydration]);
 
   const leave = useCallback(() => {

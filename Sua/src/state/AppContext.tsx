@@ -63,6 +63,13 @@ type AppContextValue = {
   // uses it so the welcome screen's self-heal does not fight an explicit
   // sign-out during the grace window.
   isSigningOut: boolean;
+  // True from the moment an auth flow reports a completed sign-in until the
+  // debounced verdict confirms it (or a bounded timer runs out). auth-finish
+  // holds instead of treating a stale "signed-out" verdict as a logout while
+  // Clerk syncs the freshly created session.
+  isAuthClaimPending: boolean;
+  // Called by the sign-in screens the moment a flow resolves a session.
+  markAuthClaim: () => void;
   isHydrating: boolean;
   hydrationIssue: boolean;
   hydrationError: string | null;
@@ -110,6 +117,35 @@ const EMPTY_HYDRATED: HydratedState = {
   profile: null,
   courses: [],
 };
+
+// Clerk's getToken retries internally when the network is bad and can hang
+// well past every UI fallback; racing it keeps a stuck call bounded. A race
+// loss reads as a token miss and feeds the bounded retry path below.
+const TOKEN_TIMEOUT_MS = 10_000;
+// The /me bootstrap verdict must land inside the auth-finish fallback window,
+// so it gets a tighter ceiling than the default 30s request timeout.
+const BOOTSTRAP_TIMEOUT_MS = 15_000;
+// Upper bound on how long auth-finish will tolerate a stale "signed out"
+// verdict right after a completed sign-in. Only a real failure pays this
+// wait: the debounce itself confirms a healthy session long before it.
+const AUTH_CLAIM_MAX_MS = 20_000;
+
+async function getTokenWithTimeout(
+  getToken: (options?: { skipCache?: boolean }) => Promise<string | null>,
+  options?: { skipCache?: boolean },
+): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      getToken(options).catch(() => null),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), TOKEN_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 function serverCourseToLocal(course: ServerCourse): Course {
   return {
@@ -177,6 +213,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Derived, not stored: an explicit sign-out only "counts" until a session
   // exists again, and deriving it keeps the effect-free lint rule happy.
   const isSigningOut = signOutRequested && !signedInNow;
+  // Positive evidence from a completed auth flow. Derived, not stored: the
+  // debounced verdict posting "signed-in" disposes of it, so no effect is
+  // needed; the 20s timer keeps a wedged sync from holding auth-finish
+  // forever. (Raw state exists only because sign-out must clear it actively.)
+  const [authClaimPendingRaw, setAuthClaimPending] = useState(false);
+  const authClaimTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markAuthClaim = useCallback(() => {
+    setAuthClaimPending(true);
+    if (authClaimTimer.current) clearTimeout(authClaimTimer.current);
+    authClaimTimer.current = setTimeout(() => {
+      authClaimTimer.current = null;
+      setAuthClaimPending(false);
+    }, AUTH_CLAIM_MAX_MS);
+  }, []);
+  // A completed sign-in outranks a stale verdict only until "signed in" itself
+  // is published.
+  const isAuthClaimPending = authClaimPendingRaw && authVerdict !== "signed-in";
   const { signOut: clerkSignOut } = useClerk();
   const { user } = useUser();
   const db = useSQLiteContext();
@@ -201,6 +254,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // syncs into the JS client asynchronously). Counting the misses keeps the
   // retry bounded instead of spinning forever.
   const tokenMisses = useRef(0);
+  // True while a bootstrap attempt is physically in flight. The fallback timer
+  // checks it when it fires: every step of an attempt is bounded (10s token
+  // race, 15s /me), so a request that is merely slow must never be reported as
+  // "still connecting". A ref, not state — nothing renders from it.
+  const attemptInFlight = useRef(false);
   // Own timer, not `requestRefresh`: that helper drops a delayed request when
   // another timer is already pending, which would silently swallow the retry.
   const tokenRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -275,21 +333,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // Network-backed bootstrap must not block the signed-in app forever. After
   // a bounded wait, expose cached courses and let connectivity/foreground
-  // events retry the server bootstrap in the background.
-  //
-  // 15s, not 10s: the bootstrap request itself gives up at 12s, so its real
-  // error (401 vs unreachable) is recorded before this guess takes over. At
-  // 10s a cold Neon/Vercel start looked like "no connection" even when the
-  // answer was a 401 arriving a moment later.
+  // events retry the server bootstrap in the background. The timer checks
+  // `attemptInFlight` when it fires, so a slow-but-working attempt is never
+  // mistaken for a hang: its real job is covering an attempt that was
+  // cancelled and never restarted. `refreshTick` re-arms it after an attempt
+  // that settled without setting anything (the token-miss retries).
   useEffect(() => {
     if (!isLoaded || !signedInNow || !userId || hydrated.clerkId === userId) {
       return;
     }
     const timeout = setTimeout(() => {
+      if (attemptInFlight.current) return;
       applyHydrationFallback(userId);
     }, 15_000);
     return () => clearTimeout(timeout);
-  }, [applyHydrationFallback, hydrated.clerkId, isLoaded, signedInNow, userId]);
+  }, [applyHydrationFallback, hydrated.clerkId, isLoaded, refreshTick, signedInNow, userId]);
 
   // Flush the note queue and pull fresh copies whenever connectivity returns
   // or the app returns to the foreground — the queue must not wait for a
@@ -400,9 +458,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     if (!isLoaded || !signedInNow || !userId) return;
     const revision = hydrationRevision.current;
+    attemptInFlight.current = true;
     (async () => {
       try {
-        let token = await getToken().catch(() => null);
+        let token = await getTokenWithTimeout(getToken);
         if (cancelled) return;
         if (!token) {
           // Clerk has a session but has not minted a token yet. Returning
@@ -441,17 +500,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // race on the users.clerkId unique constraint for a new account.
         let profile: ServerProfile;
         try {
-          profile = await profileApi.get(token);
+          profile = await profileApi.get(token, {
+            timeoutMs: BOOTSTRAP_TIMEOUT_MS,
+          });
         } catch (error) {
           // A token can rotate between the read and the request; one forced
           // refresh absorbs that race. A second 401 is a real rejection.
           if ((error as { status?: number } | null)?.status !== 401) throw error;
-          const fresh = await getToken({ skipCache: true }).catch(() => null);
+          const fresh = await getTokenWithTimeout(getToken, { skipCache: true });
           if (!fresh) throw error;
           token = fresh;
-          profile = await profileApi.get(token);
+          profile = await profileApi.get(token, {
+            timeoutMs: BOOTSTRAP_TIMEOUT_MS,
+          });
         }
-        const serverCourses = await coursesApi.list(token);
         if (cancelled) return;
         if (__DEV__) {
           console.log(`[hydration] profile loaded from ${API_BASE_URL}`);
@@ -459,24 +521,65 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // A newer local write already happened: this snapshot is older than the
         // truth on the server, so applying it would undo that write.
         if (hydrationRevision.current !== revision) return;
+        // The server folds "has any data" into `onboarded`, so the profile
+        // alone settles the routing verdict.
         const onboarded = Boolean(
-          profile.onboarded ??
-            (profile.onboardingCompletedAt || serverCourses.length > 0),
+          profile.onboarded ?? profile.onboardingCompletedAt,
         );
         // Sticky: set before the state lands so a snapshot that arrives while
         // setup is on screen can never flip the verdict back to "new account".
         if (onboarded) setConfirmedOnboardedFor(userId);
-        setHydrated({
-          clerkId: userId,
-          profile,
-          courses: serverCourses.map(serverCourseToLocal),
-        });
+        // The profile is the routing verdict, so it lands before the course
+        // list: a slow or failing /courses must never hold the resolver on
+        // the connect screen.
+        setHydrated((prev) =>
+          prev.clerkId === userId
+            ? { ...prev, profile }
+            : { clerkId: userId, profile, courses: [] },
+        );
+        // A fallback that fired before this attempt landed left the
+        // "reconnecting" banner behind; the profile clears it.
         setHydrationIssue(false);
         setHydrationError(null);
         setAuthRejected(false);
         // Keep the offline fallback fresh: an onboarded account may sign in
         // without a connection next time and should go straight to the app.
+        // Written here, not after the course list, so a later /courses failure
+        // cannot cost the account its offline verdict.
         void writeOnboardedCache(db, userId, onboarded);
+
+        const serverCourses = await coursesApi.list(token).catch(() => null);
+        if (cancelled) return;
+        if (!serverCourses) {
+          // Degrade, do not fail: the profile already routed the student into
+          // the app, so keep it, fall back to the cached course list and let
+          // the reconnect banner offer a retry.
+          if (hydrationRevision.current !== revision) return;
+          setHydrationIssue(true);
+          let cached: LocalCourse[] = [];
+          try {
+            cached = await listLocalCourses(db);
+          } catch {
+            // Local cache unreadable — an empty course list is still safe.
+          }
+          if (cancelled) return;
+          setHydrated((prev) =>
+            prev.clerkId === userId && prev.profile
+              ? { ...prev, courses: cached.map(cachedCourseToApp) }
+              : prev,
+          );
+          requestRefresh(15_000);
+          return;
+        }
+        // A newer local write happened while the courses were loading.
+        if (hydrationRevision.current !== revision) return;
+        setHydrated((prev) =>
+          prev.clerkId === userId
+            ? { ...prev, courses: serverCourses.map(serverCourseToLocal) }
+            : prev,
+        );
+        // Keep the offline fallback fresh: an onboarded account may sign in
+        // without a connection next time and should go straight to the app.
         // Mirror courses into SQLite so an offline cold start can still list
         // them (and therefore create notes) without the API.
         void replaceLocalCourses(db, serverCourses.map(serverCourseToCache)).catch(() => {});
@@ -560,10 +663,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
             ? prev
             : { clerkId: userId, profile: null, courses: cached.map(cachedCourseToApp) },
         );
+      } finally {
+        // Only a natural settlement may clear the flag here: a cancelled
+        // attempt leaves that to its cleanup, so a newer attempt's "true"
+        // is never clobbered.
+        if (!cancelled) attemptInFlight.current = false;
       }
     })();
     return () => {
       cancelled = true;
+      // The next run re-arms the flag synchronously, so this only clears a
+      // cancelled attempt whose body may still be awaiting.
+      attemptInFlight.current = false;
     };
   }, [db, getAuthToken, getToken, isLoaded, signedInNow, requestRefresh, refreshTick, userId]);
 
@@ -576,6 +687,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // Routing must not "self-heal" the welcome screen back to /auth-finish
     // while an explicit sign-out is still settling.
     setSignOutRequested(true);
+    // An explicit sign-out ends any outstanding sign-in claim: auth-finish
+    // must not hold for a session this student just abandoned.
+    if (authClaimTimer.current) {
+      clearTimeout(authClaimTimer.current);
+      authClaimTimer.current = null;
+    }
+    setAuthClaimPending(false);
     // Release this device's push token best-effort: study pushes for a signed
     // out account make no sense, and the row would leak across sessions.
     const expoToken = await getSetting(db, "expo_push_token").catch(() => null);
@@ -847,6 +965,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       isSignedIn,
       isSignedOut,
       isSigningOut,
+      isAuthClaimPending,
+      markAuthClaim,
       isHydrating,
       hydrationIssue,
       hydrationError,
@@ -888,6 +1008,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       isSignedIn,
       isSignedOut,
       isSigningOut,
+      isAuthClaimPending,
+      markAuthClaim,
       profile,
       refreshAppStreak,
       retryHydration,

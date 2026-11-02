@@ -53,7 +53,17 @@ function MissingClerkKey() {
 export default function RootLayout() {
   if (!publishableKey) return <MissingClerkKey />;
   return (
-    <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
+    <ClerkProvider
+      publishableKey={publishableKey}
+      tokenCache={tokenCache}
+      // This app renders no Clerk native components (no @clerk/expo-native-
+      // components, all auth screens are custom), so the JS<->native client
+      // sync engine is pure overhead. Its stale-client recovery was what
+      // briefly reported signed-in students as signed out (v4 toolchain of
+      // fixes 4.0.3-4.14.3); disabling it removes the churn routing had to
+      // debounce. See @clerk/expo's ClerkProviderProps docs.
+      __experimental_disableNativeClientSync
+    >
       <SafeAreaProvider>
         <SQLiteProvider databaseName="sua.db" onInit={initializeDatabase}>
           <AppProvider>

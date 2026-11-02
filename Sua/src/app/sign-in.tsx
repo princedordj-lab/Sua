@@ -40,7 +40,7 @@ export default function SignIn() {
   const { signIn } = useSignIn();
   const { signUp } = useSignUp();
   const { startSSOFlow } = useSSO();
-  const { authVerdict, isSigningOut } = useApp();
+  const { authVerdict, isSigningOut, markAuthClaim } = useApp();
 
   const [mode, setMode] = useState<"sign-in" | "sign-up">("sign-in");
   const [email, setEmail] = useState("");
@@ -102,6 +102,11 @@ export default function SignIn() {
     session?: { currentTask?: unknown } | null;
     decorateUrl?: (url: string) => string;
   }) => {
+    // Positive evidence, before any routing: Clerk can still publish a stale
+    // "signed out" verdict for a moment while it syncs the session it just
+    // created, and auth-finish holds for that window instead of ejecting the
+    // student (see isAuthClaimPending in AppContext).
+    markAuthClaim();
     if (params?.session?.currentTask) {
       // Do not treat an active Clerk task as a completed authentication.
       // Return the user to the auth flow where the task can be addressed.
@@ -115,7 +120,7 @@ export default function SignIn() {
     // Sign-in and sign-up both resolve server-side: only the account's
     // onboarding verdict decides between Home and setup.
     router.replace("/auth-finish");
-  }, []);
+  }, [markAuthClaim]);
 
   const finalizeVerifiedSignUp = useCallback(async () => {
     if (signUp.status === "missing_requirements") {
@@ -507,9 +512,22 @@ export default function SignIn() {
         return;
       }
       if (createdSessionId) {
-        // The Core 3 helper finalized the session itself; the verdict effect
-        // above routes to /auth-finish once Clerk publishes it.
+        // The Core 3 helper finalized the session itself. Route from the flow
+        // completing rather than watching the debounced verdict: Clerk can
+        // publish a stale "signed out" reading for a beat after the browser
+        // sheet closes, and this screen's verdict effect (still the fallback)
+        // would only fire 800ms later on top of that.
+        markAuthClaim();
+        router.replace("/auth-finish");
         return;
+      }
+      // Another browser sheet is still holding the auth session: falling
+      // through to the "additional verification step" copy would send the
+      // student looking for a step that does not exist.
+      if (authSessionResult?.type === "locked") {
+        throw new Error(
+          "Another sign-in window is still open. Close it, then try Google again.",
+        );
       }
       const missing = ssoSignUp?.missingFields?.join(", ");
       throw new Error(

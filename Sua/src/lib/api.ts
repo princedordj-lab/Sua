@@ -194,10 +194,11 @@ export const coursesApi = {
 };
 
 export const profileApi = {
-  // Deliberately the default 30s ceiling: this is the first call of a session
-  // and a cold API/Neon start legitimately takes ~10s. A shorter timeout here
-  // reported "offline" for a request that was about to succeed.
-  get: (token: string) => apiRequest<ServerProfile>("/me", { token }),
+  // The hydration bootstrap passes a tighter `timeoutMs` (15s) than the
+  // default 30s ceiling so its verdict lands before the auth-finish fallback
+  // window guesses; every other caller keeps the default.
+  get: (token: string, options: { timeoutMs?: number } = {}) =>
+    apiRequest<ServerProfile>("/me", { token, ...options }),
   update: (token: string, changes: ServerProfileUpdate) =>
     apiRequest<ServerProfile>("/me", {
       method: "PATCH",
