@@ -74,11 +74,6 @@ export function setCheckpointStore(next) {
   store = next;
 }
 
-export function checkpointStore() {
-  return store;
-}
-
-
 // ---------------------------------------------------------------------------
 // Writes
 // ---------------------------------------------------------------------------
@@ -135,7 +130,6 @@ export async function mergeCheckpointKeys(jobId, patch, { progressIncrement = 0 
     );
   }
 }
-
 
 /**
  * Write one entry under `checkpoint[parent][key]` and report what the row now
