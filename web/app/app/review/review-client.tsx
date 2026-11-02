@@ -55,7 +55,7 @@ export function ReviewWorkspace() {
   const courseId = params.get("courseId");
   const noteId = params.get("noteId");
   const api = useApi();
-  const { courses, refresh } = useAppData();
+  const { courses } = useAppData();
   const { prefs } = usePrefs();
   const limit = prefs.reviewSessionLength;
 
@@ -136,7 +136,6 @@ export function ReviewWorkspace() {
         }
       }
       setOutcome((current) => ({ ...current, [gradeValue]: current[gradeValue] + 1 }));
-      refresh();
       if (index + 1 >= total) {
         setFinished(true);
       } else {
