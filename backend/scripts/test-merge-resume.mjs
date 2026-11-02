@@ -313,6 +313,69 @@ const headingsOf = (summary) => (summary?.topics ?? []).map((item) => item.headi
     `✓ budget yield resumes without redoing finished waves (pass1=${callsInFirstPass}, pass2=${calls - callsInFirstPass}, uninterrupted=${referenceCalls})`,
   );
   setCheckpointStore(null);
+// ---------------------------------------------------------------------------
+// 3b. The reported symptom: a document that needs many passes still finishes
+// ---------------------------------------------------------------------------
+{
+  const sections = Array.from({ length: 8 }, (_, index) => ({
+    id: `s${index + 1}`,
+    title: `Section ${index + 1}`,
+  }));
+  const source = buildSource({ sections, groupsPerSection: 3, topics: 2, points: 4 });
+
+  // Reference: one uninterrupted pass.
+  setCheckpointStore(makeStore());
+  let referenceCalls = 0;
+  setAiMock(({ user }) => {
+    referenceCalls += 1;
+    return mergeMock(parseItems(user));
+  });
+  await callReduce({ id: "job-3b-ref", checkpoint: {} }, source, makeDeps().deps);
+
+  const store = makeStore();
+  setCheckpointStore(store);
+  let calls = 0;
+  setAiMock(({ user }) => {
+    calls += 1;
+    // Every request takes a chunk of the pass, so only ~1 merge fits per pass.
+    const until = Date.now() + 45;
+    while (Date.now() < until) {
+      // burn a little wall clock
+    }
+    return mergeMock(parseItems(user));
+  });
+
+  const passes = [];
+  let result = null;
+  for (let pass = 1; pass <= 40 && !result; pass += 1) {
+    const started = Object.keys(store.state.checkpoint.reduce ?? {}).length;
+    const deadline = Date.now() + longDoc.reduceMinWindowMs + longDoc.reduceReserveMs + 30;
+    try {
+      result = await callReduce({ id: "job-3b", checkpoint: {} }, source, makeDeps({ deadline }).deps);
+    } catch (error) {
+      assert.equal(error.yield, true, `pass ${pass} must yield, not fail: ${error.message}`);
+      assert.equal(error.stage, "merging");
+    }
+    const stored = Object.keys(store.state.checkpoint.reduce ?? {}).length;
+    passes.push({ pass, calls: calls - (passes.at(-1)?.calls ?? 0), stored });
+    assert.ok(stored > started, `pass ${pass} made no durable progress`);
+  }
+
+  assert.ok(result, `the document finished after ${passes.length} passes`);
+  assert.equal(result.summaryList.length, sections.length);
+  assert.ok(passes.length >= 3, `the run really was spread over passes (${passes.length})`);
+  assert.equal(
+    calls,
+    referenceCalls + 0,
+    `multi-pass merging costs the same as one pass (${calls} vs ${referenceCalls} calls)`,
+  );
+  console.log(
+    `✓ a document spread over ${passes.length} budget passes finishes without repeating a merge (${calls} calls)`,
+  );
+  setCheckpointStore(null);
+}
+
+
 }
 
 // ---------------------------------------------------------------------------

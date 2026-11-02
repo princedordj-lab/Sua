@@ -45,6 +45,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** jsonb comes back parsed from pg; keep the string form working too. */
+function fromJsonb(value) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Test seam
 // ---------------------------------------------------------------------------
@@ -106,7 +116,7 @@ export async function mergeCheckpointKeys(jobId, patch, { progressIncrement = 0 
     return;
   }
   const increment = Math.max(0, Math.round(progressIncrement));
-  await withRetries(jobId, Object.keys(patch ?? {}).join(","), () =>
+  const written = await withRetries(jobId, Object.keys(patch ?? {}).join(","), () =>
     prisma.$executeRaw`
       UPDATE "jobs"
       SET "checkpoint" = COALESCE("checkpoint", '{}'::jsonb) || ${JSON.stringify(patch ?? {})}::jsonb,
@@ -116,6 +126,14 @@ export async function mergeCheckpointKeys(jobId, patch, { progressIncrement = 0 
       WHERE "id" = ${jobId}
     `,
   );
+  // Zero rows means the job row is gone (deleted or cancelled). That is not a
+  // write failure — the pipeline's own liveness check closes the job — but it
+  // must be visible in the log instead of looking like a saved checkpoint.
+  if (Number(written) === 0) {
+    console.warn(
+      `[checkpoint] no job row for ${jobId}; patch ${Object.keys(patch ?? {}).join(",")} not stored`,
+    );
+  }
 }
 
 
@@ -139,7 +157,7 @@ export async function writeCheckpointEntry(jobId, parent, key, value) {
             COALESCE("checkpoint", '{}'::jsonb)
               || jsonb_build_object(
                    ${parent}::text,
-                   COALESCE("checkpoint" -> ${parent}::text, '{}'::jsonb)
+                   COALESCE(jsonb_extract_path("checkpoint", ${parent}::text), '{}'::jsonb)
                  ),
             ARRAY[${parent}::text, ${key}::text],
             ${valueJson}::jsonb,
@@ -148,18 +166,18 @@ export async function writeCheckpointEntry(jobId, parent, key, value) {
           "heartbeatAt" = NOW(),
           "updatedAt" = NOW()
       WHERE "id" = ${jobId}
-        AND ("checkpoint" #> ARRAY[${parent}::text, ${key}::text]) IS NULL
-      RETURNING ("checkpoint" #> ARRAY[${parent}::text, ${key}::text]) AS "value"
+        AND jsonb_extract_path("checkpoint", ${parent}::text, ${key}::text) IS NULL
+      RETURNING jsonb_extract_path("checkpoint", ${parent}::text, ${key}::text) AS "value"
     `,
   );
   const saved = Array.isArray(written) ? written[0] : null;
-  if (saved) return { stored: true, value: saved.value ?? value };
+  if (saved) return { stored: true, value: fromJsonb(saved.value) ?? value };
 
   // Nothing was updated: either another attempt already stored this entry (use
   // its value) or the job row is gone (a cancelled or deleted job).
   const rows = await withRetries(jobId, path, () =>
     prisma.$queryRaw`
-      SELECT ("checkpoint" #> ARRAY[${parent}::text, ${key}::text]) AS "value"
+      SELECT jsonb_extract_path("checkpoint", ${parent}::text, ${key}::text) AS "value"
       FROM "jobs"
       WHERE "id" = ${jobId}
     `,
@@ -177,7 +195,7 @@ export async function writeCheckpointEntry(jobId, parent, key, value) {
       path,
     });
   }
-  return { stored: false, value: row.value };
+  return { stored: false, value: fromJsonb(row.value) };
 }
 
 /** Current checkpoint of a job (used to adopt whatever another attempt saved). */
