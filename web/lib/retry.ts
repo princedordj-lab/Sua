@@ -1,10 +1,12 @@
 /**
  * KEEP IN STEP with `Sua/src/lib/retry.ts`.
  *
- * The two files are deliberately identical: there is no workspace between the
- * Expo app and the Next app, so a shared package would mean a build pipeline
- * neither has. `web/lib/srs.ts`, `Sua/src/lib/srs.ts` and
- * `backend/src/lib/srs.js` already live by the same rule.
+ * The two files follow the same rules: there is no workspace between the Expo
+ * app and the Next app, so a shared package would mean a build pipeline neither
+ * has. `web/lib/srs.ts`, `Sua/src/lib/srs.ts` and `backend/src/lib/srs.js`
+ * already live by the same rule. The one difference is the abort rejection —
+ * this copy can throw a real `DOMException`, React Native cannot, so the mobile
+ * copy throws an `Error` with `name: "AbortError"` instead.
  */
 
 /** The one error body that means "we are full, ask again shortly". */
