@@ -33,7 +33,15 @@ export function isTransient(error) {
   // Typed provider errors decide their own policy. Rate limits are scheduled
   // as yields by the pipeline; a 5xx/timeout gets the bounded attempts below.
   const kind = error.kind;
-  if (kind === "rate_limit" || kind === "timeout" || kind === "transient" || kind === "invalid_output") {
+  if (
+    kind === "rate_limit" ||
+    kind === "timeout" ||
+    kind === "transient" ||
+    kind === "invalid_output" ||
+    // A checkpoint write that lost its retries is transient infrastructure: the
+    // work is intact and the next pass resumes from what did persist.
+    kind === "checkpoint_write"
+  ) {
     return true;
   }
   if (kind) return false;
@@ -120,6 +128,10 @@ export function errorCodeFor(error) {
   if (kind === "invalid_output") return "PARSE_ERROR";
   if (kind === "transient") return "AI_TRANSIENT";
   if (kind === "bad_request") return "AI_BAD_REQUEST";
+  // A checkpoint that cannot be written is not the model's fault: the durable
+  // state is missing, so the pass must be retried rather than reported as bad
+  // output.
+  if (kind === "checkpoint_write") return "CHECKPOINT_WRITE";
 
   const msg = String(error.message ?? error).toLowerCase();
   if (msg.includes("too short")) return "NOTE_TOO_SHORT";
@@ -361,7 +373,7 @@ async function handleYield(job, error, passStarted) {
   const delayMs = yieldDelayMs(error);
   await releaseJobForResume(job.id, delayMs);
   console.log(
-    `[yield] job=${job.id} stage=${error?.stage ?? "-"} reason=${error?.reason ?? "budget"} delayMs=${delayMs} runtimeMs=${state.runtimeMs} yields=${state.yields} stalled=${state.stalled}`,
+    `[yield] job=${job.id} stage=${error?.stage ?? "-"} reason=${error?.reason ?? "budget"} delayMs=${delayMs} runtimeMs=${state.runtimeMs} yields=${state.yields} stalled=${state.stalled}${error?.detail ? ` detail=${error.detail}` : ""}`,
   );
 }
 
