@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useApi } from "@/lib/use-api";
+import { invalidateNotes, invalidatePrefix } from "@/lib/bus";
 import { useResource } from "@/lib/use-resource";
 import type { ServerCourse, ServerProfile } from "@/lib/types";
 
@@ -54,6 +55,9 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       resource.setData((current) =>
         current ? { ...current, courses: [...current.courses, course] } : current,
       );
+      // Home's recents strip is keyed by the course ids it was built from, so a
+      // new course is a new key there even though the list itself is patched.
+      invalidateNotes();
       return course;
     },
     [api, resource],
@@ -70,6 +74,8 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
             }
           : current,
       );
+      // No invalidation: a rename or colour change touches nothing any other
+      // screen reads — notes, sets and due counts all key off ids.
       return course;
     },
     [api, resource],
@@ -83,6 +89,13 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
           ? { ...current, courses: current.courses.filter((row) => row.id !== id) }
           : current,
       );
+      // Its notes survive, moved to `moveToCourseId` or orphaned, so every
+      // course's list, every set listing and every scoped review queue is now
+      // describing a different account state. The deleted course's own screens
+      // are covered by the whole-kind invalidation.
+      invalidateNotes();
+      invalidatePrefix("course-sets:");
+      invalidatePrefix("review:");
     },
     [api, resource],
   );

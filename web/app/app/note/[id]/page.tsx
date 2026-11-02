@@ -41,6 +41,7 @@ import { Markdown } from "@/components/markdown";
 import { SectionReader } from "@/components/note/section-reader";
 import { ReportButton, ReportMistake } from "@/components/report-mistake";
 import { useApi } from "@/lib/use-api";
+import { invalidateDeck, invalidateNoteOutputs, invalidateNotes } from "@/lib/bus";
 import { useResource } from "@/lib/use-resource";
 import { usePrefs } from "@/lib/prefs";
 import { courseStyle } from "@/lib/course-style";
@@ -51,6 +52,7 @@ import {
   generationKindFor,
   isAiActive,
   sourceMetaFor,
+  uploadStatus,
 } from "@/lib/generation";
 import { splitNotices } from "@/lib/markdown";
 import type { AiState, ServerJob, ServerNote, ServerQuiz, ServerStudy } from "@/lib/types";
@@ -123,8 +125,9 @@ export default function NoteViewPage() {
         return;
       }
       if (shouldContinue && next && (next.state === "done" || next.state === "failed" || next.state === "cancelled")) {
-        noteResource.reload();
-        studyResource.reload();
+        // Terminal, so everything this run touched is now describing a different
+        // account state — this note, its deck, the course list and the counts.
+        invalidateNoteOutputs(id, note?.courseId ?? null);
       }
     }
 
@@ -135,6 +138,21 @@ export default function NoteViewPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, note?.id, note?.aiState]);
+
+  // Extraction progress lives on the asset rows, not the job row, so a document
+  // being read has to re-fetch the note or "Reading page 3 of 12" freezes at
+  // whatever the first fetch said. Stops by itself once every asset is done.
+  const extracting = (note?.assets ?? []).some(
+    (asset) =>
+      asset.status === "pending" ||
+      ["pending", "partial", "running"].includes(asset.extractState ?? "none"),
+  );
+  const reloadNote = noteResource.reload;
+  useEffect(() => {
+    if (!extracting) return;
+    const timer = setInterval(reloadNote, 6000);
+    return () => clearInterval(timer);
+  }, [extracting, reloadNote]);
 
   async function generate() {
     if (!note) return;
@@ -160,6 +178,11 @@ export default function NoteViewPage() {
     setActionError(null);
     try {
       await api.notes.sync([{ operation: "delete", id: note.id }]);
+      // The note screen navigates away, but the course it belonged to, the
+      // recents strip and every due-count summary are still mounted elsewhere
+      // and were describing this note a moment ago.
+      invalidateNotes(note.courseId);
+      invalidateDeck(note.id, note.courseId);
       refresh();
       setDeleteOpen(false);
       router.push(`/app/courses/${note.courseId}`);
@@ -243,6 +266,9 @@ export default function NoteViewPage() {
           <h1>{note.title || "Untitled note"}</h1>
           <div className="note-head-badges">
             <StatusBadge state={note.aiState ?? "none"} stage={job?.stage ?? note.aiState} />
+            {note.sourceType === "file" ? (
+              <Chip tone={extracting ? "warning" : "muted"}>{uploadStatus(note)}</Chip>
+            ) : null}
             {source?.read ? <Chip tone="muted">{source.read}</Chip> : null}
             {source?.truncated ? <Chip tone="warning">Source trimmed</Chip> : null}
             {source?.checkFailed ? <Chip tone="warning">Check flagged</Chip> : null}

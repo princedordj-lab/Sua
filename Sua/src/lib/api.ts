@@ -14,6 +14,7 @@ import type {
   ServerCourseNotesPage,
   ServerProfile,
   ServerProfileUpdate,
+  ServerHomeSummary,
   ServerReviewSyncResponse,
   ServerStudy,
   ServerTombstonePage,
@@ -23,6 +24,7 @@ import type {
 } from "./types";
 import Constants from "expo-constants";
 import { Platform } from "react-native";
+import { SERVER_BUSY, retryDelayMs, withRetry } from "./retry";
 
 const LOOPBACK = /^https?:\/\/(localhost|127\.0\.0\.1|10\.0\.2\.2)(?=[:/]|$)/;
 // Only a machine's own private LAN address may replace a loopback dev URL. A
@@ -69,9 +71,9 @@ type RequestOptions = RequestInit & { token?: string; timeoutMs?: number };
 // stuck request would block every later sync and leave notes "Waiting to sync".
 const REQUEST_TIMEOUT_MS = 30_000;
 
-export async function apiRequest<T>(
+async function requestOnce<T>(
   path: string,
-  options: RequestOptions = {},
+  options: RequestOptions,
 ) {
   // `timeoutMs` is a Sua-only option, so it never reaches fetch's RequestInit.
   const { token, timeoutMs = REQUEST_TIMEOUT_MS, ...init } = options;
@@ -121,10 +123,21 @@ export async function apiRequest<T>(
 
     // Callers such as the generation queue need to tell "this note is gone"
     // (404) apart from a transient failure without parsing the message.
+    // `code`/`retryAfter` are what the capacity retry reads: the verdict is the
+    // server's error code, never the status alone.
+    const retryAfter = response.headers.get("Retry-After") ?? null;
     const fail = (message: string) =>
-      Object.assign(new Error(message), { status: response.status });
+      Object.assign(new Error(message), {
+        status: response.status,
+        code: detail || null,
+        retryAfter,
+        retryAtMs: retryAfter === null ? null : retryDelayMs(retryAfter),
+      });
 
     if (response.status >= 500) {
+      if (detail === SERVER_BUSY) {
+        throw fail("Sua is busy finishing some database work. Please try again.");
+      }
       throw fail("Something went wrong on the server. Please try again.");
     }
 
@@ -166,6 +179,21 @@ export async function apiRequest<T>(
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+export async function apiRequest<T>(
+  path: string,
+  options: RequestOptions = {},
+) {
+  // One retry, only for the capacity 503, and only after the server's own
+  // `Retry-After`. The hydration burst is a fan-out over a five-connection pool,
+  // so a busy answer that would once have shown up as a red banner is now a
+  // second attempt five seconds later — and the queue drains on the next burst
+  // either way if that fails too.
+  return withRetry(() => requestOnce<T>(path, options), {
+    attempts: 2,
+    signal: options.signal ?? undefined,
+  });
 }
 
 export const coursesApi = {
@@ -322,6 +350,22 @@ export const jobsApi = {
 export const studyApi = {
   forNote: (token: string, noteId: string) =>
     apiRequest<ServerStudy>(`/notes/${noteId}/study`, { token }),
+  // The week is bucketed in the zone the request reports, which is what lets
+  // the phone's Study tab and the web draw the same seven bars.
+  homeSummary: (
+    token: string,
+    scope?: { timezone?: string; utcOffsetMinutes?: number },
+  ) => {
+    const params = new URLSearchParams();
+    if (scope?.timezone) params.set("timezone", scope.timezone);
+    if (typeof scope?.utcOffsetMinutes === "number")
+      params.set("utcOffsetMinutes", String(scope.utcOffsetMinutes));
+    const query = params.toString();
+    return apiRequest<ServerHomeSummary>(
+      `/study/home-summary${query ? `?${query}` : ""}`,
+      { token },
+    );
+  },
   postReviews: (token: string, logs: { id: string; cardId: string; grade: string; reviewedAt: string; prevIntervalDays: number; newIntervalDays: number }[]) =>
     apiRequest<ServerReviewSyncResponse>("/study/sync/reviews", {
       method: "POST",

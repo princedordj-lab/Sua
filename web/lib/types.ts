@@ -263,8 +263,21 @@ export type ServerCardScheduling = {
   reps: number;
 };
 
+/**
+ * Why the server did not replay a grade into a card's schedule.
+ * `already_applied` / `out_of_order` mean the log is settled (recorded, and the
+ * schedule already reflects it or has moved past it). `not_owned` means the card
+ * is not this student's, so the grade can never be accepted.
+ */
+export type ServerReviewSkipReason = "already_applied" | "out_of_order" | "not_owned";
+
 export type ServerReviewSyncResponse = {
   cards: Record<string, ServerCardScheduling> | null;
+  /** Log ids the server replayed into a schedule. */
+  applied?: string[];
+  skipped?: { id: string; reason: ServerReviewSkipReason }[];
+  /** The server's clock, for clients that must not trust their own. */
+  serverTime?: string;
 };
 
 export type ServerAttemptDetails = {
@@ -322,6 +335,10 @@ export type HomeSummary = {
   totalCards: number;
   reviewedToday: number;
   quizAttemptsToday: number;
+  // The same week the phone's Study tab reports: non-"again" grades over every
+  // grade, and quizzes finished inside the bucketed week.
+  recallPercent?: number;
+  quizzesWeek?: number;
   // Server-synced daily app-open streak (same count as mobile).
   streakDays: number;
   streakActiveToday?: boolean;

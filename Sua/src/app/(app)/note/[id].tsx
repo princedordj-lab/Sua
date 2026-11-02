@@ -66,6 +66,7 @@ import {
   isAiActive,
   reconcileAiOutputs,
   refreshNoteFromServer,
+  refreshStudySet,
   sourceMetaFor,
   userFacingMessage,
 } from "../../../lib/generate";
@@ -257,6 +258,15 @@ export default function NoteView() {
         // Offline, a stale token or a server hiccup must never block the reader:
         // the local copy is shown either way.
         await pullCourseNotes(db, token, local.courseId).catch(() => {});
+        // Cards are a separate endpoint, and hydration only ever pulls a deck
+        // this device has never cached — so the visit that heals the note text
+        // is also where a card edited or deleted on the web lands. Only for a
+        // finished run: regenerating briefly leaves the server deck empty, and
+        // adopting that would blank the local cards for no reason.
+        const healed = await getNote(db, id).catch(() => null);
+        if (healed?.aiState === "ready" && healed.noteKind !== "reference") {
+          await refreshStudySet({ db, getAuthToken }, id).catch(() => {});
+        }
         if (!cancelled) await load();
       })();
       return () => {

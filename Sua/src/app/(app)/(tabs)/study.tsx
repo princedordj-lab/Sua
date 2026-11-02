@@ -13,6 +13,7 @@ import {
 import { colors } from "../../../config/theme";
 import { usePalette } from "../../../state/appearance";
 import { useApp } from "../../../state/AppContext";
+import { loadHomeSummary } from "../../../lib/progress";
 import {
   computeWeeklyProgress,
   countDueCards,
@@ -24,7 +25,13 @@ import {
 export default function Study() {
   const pv = usePalette();
   const db = useSQLiteContext();
-  const { courses, appStreak, refreshAppStreak } = useApp();
+  const {
+    courses,
+    appStreak,
+    refreshAppStreak,
+    retryHydration,
+    getAuthToken,
+  } = useApp();
   const [due, setDue] = useState(0);
   const [nextDue, setNextDue] = useState<string | null>(null);
   const [weekly, setWeekly] = useState({
@@ -39,9 +46,11 @@ export default function Study() {
     const now = new Date().toISOString();
     setDue(await countDueCards(db, now));
     setNextDue(await getNextDueAt(db));
-    setWeekly(await computeWeeklyProgress(db));
     setSets(await listStudySetNotes(db));
-  }, [db]);
+    // Last: SQLite answers the rest instantly, and the week is the one number
+    // that has to agree with the browser.
+    setWeekly(await computeWeeklyProgress(db, await loadHomeSummary(getAuthToken)));
+  }, [db, getAuthToken]);
 
   useFocusEffect(
     useCallback(() => {
@@ -54,11 +63,14 @@ export default function Study() {
     setRefreshing(true);
     try {
       await load();
+      // Same as Home: pull-to-refresh is the student asking the server, so it
+      // goes through the sanctioned hydration path rather than a new queue.
+      retryHydration();
       void refreshAppStreak();
     } finally {
       setRefreshing(false);
     }
-  }, [load, refreshAppStreak]);
+  }, [load, refreshAppStreak, retryHydration]);
 
   function nextDueLabel() {
     if (!nextDue) return null;

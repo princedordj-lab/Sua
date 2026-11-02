@@ -25,6 +25,7 @@ import {
   type HomeStats,
   type Note,
 } from "../../../lib/notes";
+import { loadHomeSummary } from "../../../lib/progress";
 import { useApp } from "../../../state/AppContext";
 import { usePalette } from "../../../state/appearance";
 import type { Course } from "../../../lib/types";
@@ -114,7 +115,14 @@ function cardsLabel(count: number) {
 }
 
 export default function Home() {
-  const { profile, courses, retryHydration, appStreak, refreshAppStreak } = useApp();
+  const {
+    profile,
+    courses,
+    retryHydration,
+    appStreak,
+    refreshAppStreak,
+    getAuthToken,
+  } = useApp();
   const pv = usePalette();
   const { user } = useUser();
   const db = useSQLiteContext();
@@ -128,15 +136,18 @@ export default function Home() {
   );
 
   const load = useCallback(async () => {
-    const [noteGroups, homeStats] = await Promise.all([
+    // The server's week is fetched alongside the note lists, so a slow or absent
+    // API costs one overlay on the day-bucketed numbers, never the whole screen.
+    const [noteGroups, summary] = await Promise.all([
       Promise.all(activeCourses.map((course) => listNotes(db, course.id))),
-      loadHomeStats(db),
+      loadHomeSummary(getAuthToken),
     ]);
+    const homeStats = await loadHomeStats(db, summary);
     setNotes(
       noteGroups.flat().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
     );
     setStats(homeStats);
-  }, [activeCourses, db]);
+  }, [activeCourses, db, getAuthToken]);
 
   // Reload on focus so edits made in the Create editor show up on return.
   useFocusEffect(

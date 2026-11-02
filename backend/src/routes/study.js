@@ -6,6 +6,7 @@ import { studyQueueConfigured, enqueueStudyJob } from "../lib/queue.js";
 import { aiConfigured } from "../lib/ai.js";
 import { nextCardState } from "../lib/srs.js";
 import { streakViewForUser } from "../lib/streak.js";
+import { dayKeyInTimeZone, isValidTimezone } from "../lib/streak-rules.js";
 
 export const studyRouter = Router();
 
@@ -31,10 +32,35 @@ function date(value) {
 }
 
 // ---------------------------------------------------------------------------
-// Review sync. Client log ids are the idempotency key; the server replays the
-// same shared SM-2 transition (`lib/srs.js`) over each card's server state so
-// both sides converge. Returns per-card scheduling for the client to mirror.
+// Review sync. The server is the only scheduler: a grade is submitted, replayed
+// here through the shared SM-2 transition, and the returned `cards` are the
+// truth both clients mirror — which is what makes "what if the other device
+// graded it first" a non-question.
+//
+// Client log ids are the idempotency key and the replay is guarded twice. A log
+// whose id already exists never advances a card again: the row alone used to be
+// idempotent, so a retried batch spent an extra rep and multiplied the interval
+// a second time. A log older than the last one already applied for its card is
+// recorded for history but does not move the schedule backwards.
+//
+// What the 15 s transaction budget pays for is round trips, so a full queue is
+// committed in chunks: three batched pre-reads, one update per card the chunk
+// actually touched, and one `createMany` for every log it records.
 // ---------------------------------------------------------------------------
+
+const REVIEW_CHUNK_LOGS = 25;
+// A week of backlog is a student who was offline; a week in the future is a
+// skewed clock that would schedule the card beyond any horizon the app shows.
+const REVIEWED_AT_PAST_MS = 7 * DAY_MS;
+const REVIEWED_AT_FUTURE_MS = 10 * 60_000;
+
+function clampReviewedAt(value, serverTime) {
+  const parsed = new Date(String(value ?? ""));
+  if (Number.isNaN(parsed.getTime())) return serverTime;
+  const earliest = serverTime.getTime() - REVIEWED_AT_PAST_MS;
+  const latest = serverTime.getTime() + REVIEWED_AT_FUTURE_MS;
+  return new Date(Math.min(Math.max(parsed.getTime(), earliest), latest));
+}
 
 studyRouter.post("/sync/reviews", async (req, res) => {
   const identity = await identityFromRequest(req);
@@ -46,75 +72,147 @@ studyRouter.post("/sync/reviews", async (req, res) => {
     }
   }
 
-  const cards = await withUser(identity.clerkId, async (tx) => {
-    const user = await requireUser(tx, identity);
-    // Only cards the student actually owns are processed.
-    const cardIds = [...new Set(logs.map((log) => String(log.cardId)))];
-    const owned = new Set(
-      (
-        await tx.flashcard.findMany({
-          where: { id: { in: cardIds }, userId: user.id },
-          select: { id: true },
-        })
-      ).map((card) => card.id),
-    );
+  // `authenticate` already read this row and every chunk needs it, so the
+  // transactional fallback is paid once here rather than once per chunk.
+  const user =
+    identity.user ??
+    (await withUser(identity.clerkId, (tx) => requireUser(tx, identity)));
 
-    // Replay each card's new logs in review order from its server state; write
-    // every log idempotently so reconnect retries never double-apply.
-    const updated = {};
-    for (const cardId of cardIds) {
-      if (!owned.has(cardId)) continue;
-      let current = await tx.flashcard.findUnique({ where: { id: cardId } });
-      for (const log of logs
-        .filter((entry) => entry.cardId === cardId)
-        .sort((a, b) => String(a.reviewedAt).localeCompare(String(b.reviewedAt)))) {
-        current = await withReplay(tx, current, log);
-      }
-      if (current) {
-        updated[cardId] = {
+  const serverTime = new Date();
+  const cards = {};
+  const applied = [];
+  const skipped = [];
+
+  for (let start = 0; start < logs.length; start += REVIEW_CHUNK_LOGS) {
+    const chunk = logs.slice(start, start + REVIEW_CHUNK_LOGS);
+    const outcome = await withUser(identity.clerkId, async (tx) => {
+      const chunkApplied = [];
+      const chunkSkipped = [];
+      const chunkCards = {};
+      const cardIds = [...new Set(chunk.map((log) => String(log.cardId)))];
+      const logIds = [...new Set(chunk.map((log) => String(log.id)))];
+
+      // Only cards the student actually owns are processed.
+      const ownedById = new Map(
+        (
+          await tx.flashcard.findMany({
+            where: { id: { in: cardIds }, userId: user.id },
+            select: { id: true, ease: true, intervalDays: true, reps: true, dueAt: true },
+          })
+        ).map((card) => [card.id, card]),
+      );
+      // Pre-reads, not a stale cache: both maps grow as this loop writes, so a
+      // duplicate id or a second log for the same card inside one chunk still
+      // resolves against what the chunk has already done.
+      const seen = new Set(
+        (
+          await tx.reviewLog.findMany({ where: { id: { in: logIds } }, select: { id: true } })
+        ).map((row) => row.id),
+      );
+      const lastAppliedAt = new Map(
+        (
+          await tx.reviewLog.groupBy({
+            by: ["cardId"],
+            where: { cardId: { in: cardIds } },
+            _max: { reviewedAt: true },
+          })
+        ).map((row) => [row.cardId, row._max.reviewedAt]),
+      );
+
+      const records = [];
+      const writes = [];
+      for (const cardId of cardIds) {
+        const owned = ownedById.get(cardId);
+        const cardLogs = chunk
+          .filter((log) => String(log.cardId) === cardId)
+          .sort((a, b) => String(a.reviewedAt).localeCompare(String(b.reviewedAt)));
+
+        if (!owned) {
+          // Not the student's card: nothing is recorded, because a log here would
+          // fail the `review_logs_cardId_fkey` cascade as well as the intent. The
+          // client drops the grade and the card it belongs to.
+          for (const log of cardLogs) {
+            chunkSkipped.push({ id: String(log.id), reason: "not_owned" });
+          }
+          continue;
+        }
+
+        let current = owned;
+        for (const log of cardLogs) {
+          const id = String(log.id);
+          if (seen.has(id)) {
+            chunkSkipped.push({ id, reason: "already_applied" });
+            continue;
+          }
+          seen.add(id);
+          const reviewedAt = clampReviewedAt(log.reviewedAt, serverTime);
+          const previous = lastAppliedAt.get(cardId);
+          if (previous && reviewedAt <= previous) {
+            // Recorded for history, but the watermark stays where it is: an
+            // older grade must never pull a card's schedule backwards, and it
+            // must not lower the bar the next log is measured against either.
+            records.push(logRecord(user.id, cardId, log, current.intervalDays, reviewedAt));
+            chunkSkipped.push({ id, reason: "out_of_order" });
+            continue;
+          }
+          const next = nextCardState(current, String(log.grade), reviewedAt);
+          current = { ...current, ...next };
+          lastAppliedAt.set(cardId, reviewedAt);
+          records.push(logRecord(user.id, cardId, log, next.intervalDays, reviewedAt));
+          chunkApplied.push(id);
+        }
+
+        // Answer with the card's server state whether or not this chunk moved it,
+        // so a client that was told "no" still adopts the authoritative schedule.
+        chunkCards[cardId] = {
           id: cardId,
           dueAt: current.dueAt,
           ease: current.ease,
           intervalDays: current.intervalDays,
           reps: current.reps,
         };
+        if (current !== owned) {
+          writes.push(
+            tx.flashcard.update({
+              where: { id: cardId },
+              data: {
+                ease: current.ease,
+                intervalDays: current.intervalDays,
+                reps: current.reps,
+                dueAt: current.dueAt,
+              },
+            }),
+          );
+        }
       }
-    }
-    return updated;
-  });
 
-  res.json({ cards });
+      // `skipDuplicates` keeps a chunk that overlaps another (or a retry that
+      // raced this one) from ever recording the same grade twice.
+      if (records.length) {
+        await tx.reviewLog.createMany({ data: records, skipDuplicates: true });
+      }
+      await Promise.all(writes);
+      return { chunkApplied, chunkSkipped, chunkCards };
+    });
+
+    applied.push(...outcome.chunkApplied);
+    skipped.push(...outcome.chunkSkipped);
+    Object.assign(cards, outcome.chunkCards);
+  }
+
+  res.json({ cards, applied, skipped, serverTime });
 });
 
-async function withReplay(tx, card, log) {
-  const reviewedAt = date(log.reviewedAt);
-  const { ease, intervalDays, reps, dueAt } = nextCardState(
-    {
-      ease: card.ease,
-      intervalDays: card.intervalDays,
-      reps: card.reps,
-    },
-    String(log.grade),
+function logRecord(userId, cardId, log, newIntervalDays, reviewedAt) {
+  return {
+    id: String(log.id),
+    userId,
+    cardId,
+    grade: String(log.grade),
     reviewedAt,
-  );
-  const updated = await tx.flashcard.update({
-    where: { id: card.id },
-    data: { ease, intervalDays, reps, dueAt, updatedAt: new Date() },
-  });
-  await tx.reviewLog.upsert({
-    where: { id: String(log.id) },
-    create: {
-      id: String(log.id),
-      userId: card.userId,
-      cardId: card.id,
-      grade: String(log.grade),
-      reviewedAt,
-      prevIntervalDays: Number(log.prevIntervalDays) || 0,
-      newIntervalDays: intervalDays,
-    },
-    update: {},
-  });
-  return updated;
+    prevIntervalDays: Number(log.prevIntervalDays) || 0,
+    newIntervalDays,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -140,8 +238,10 @@ studyRouter.post("/sync/quiz-attempts", async (req, res) => {
     }
   }
 
-  await withUser(identity.clerkId, async (tx) => {
-    const user = await requireUser(tx, identity);
+  const stored = await withUser(identity.clerkId, async (tx) => {
+    const user =
+      identity.user ??
+      (await requireUser(tx, identity));
     const quizIds = [...new Set(attempts.map((attempt) => String(attempt.quizId)))];
     const owned = new Set(
       (
@@ -151,72 +251,126 @@ studyRouter.post("/sync/quiz-attempts", async (req, res) => {
         })
       ).map((quiz) => quiz.id),
     );
-    for (const attempt of attempts) {
-      if (!owned.has(String(attempt.quizId))) continue;
-      await tx.quizAttempt.upsert({
-        where: { id: String(attempt.id) },
-        create: {
-          id: String(attempt.id),
-          userId: user.id,
-          quizId: String(attempt.quizId),
-          startedAt: date(attempt.startedAt),
-          finishedAt: date(attempt.finishedAt),
-          total: Number(attempt.total) || 0,
-          correct: Number(attempt.correct) || 0,
-          state: "marked",
-          details: attempt.details ?? undefined,
-        },
-        update: {},
-      });
+    const records = attempts
+      .filter((attempt) => owned.has(String(attempt.quizId)))
+      .map((attempt) => ({
+        id: String(attempt.id),
+        userId: user.id,
+        quizId: String(attempt.quizId),
+        startedAt: date(attempt.startedAt),
+        finishedAt: date(attempt.finishedAt),
+        total: Number(attempt.total) || 0,
+        correct: Number(attempt.correct) || 0,
+        state: "marked",
+        details: attempt.details ?? undefined,
+      }));
+    // One statement for the whole batch instead of one round trip per attempt.
+    // `skipDuplicates` is the same promise the per-row upsert made: an id already
+    // on the server is left exactly as it is, so a reconnect retry cannot replace
+    // a stored verdict, and it never spends a second transaction.
+    if (records.length) {
+      await tx.quizAttempt.createMany({ data: records, skipDuplicates: true });
     }
+    return records.length;
   });
 
-  res.json({ ok: true });
+  res.json({ ok: true, stored });
 });
 
 // ---------------------------------------------------------------------------
-// Home summary for online clients. The mobile app derives streak/weekly
-// progress locally from SQLite; the web has no local database, so this small
-// read-only aggregate supplies the same numbers without touching RLS.
+// Home summary for online clients. Web has no local database, so this small
+// read-only aggregate supplies the numbers mobile derives from SQLite — which
+// means the day boundaries here have to mean the same thing they do on the
+// device. Buckets are keyed on the student's own day, not UTC: a UTC+1 student
+// reviewing at 20:00 is "tomorrow" under UTC bucketing, so the two surfaces
+// showed a different week every single day. `POST /me/activity` already resolves
+// a zone this way, and an unusable zone must never wedge the read.
 // ---------------------------------------------------------------------------
 
-function dayKey(date) {
-  return date.toISOString().slice(0, 10);
+/** UTC offset in minutes for `timeZone` at `date`, via the same Intl rule. */
+function zoneOffsetMinutes(date, timeZone) {
+  if (!isValidTimezone(timeZone)) return 0;
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const part = (type) => parts.find((entry) => entry.type === type)?.value ?? "00";
+  // "today's date + that wall clock, read as UTC" minus the real instant is the
+  // offset. Midnight is spelled "24" by en-GB on some ICU versions.
+  const clock = `${part("hour") === "24" ? "00" : part("hour")}:${part("minute")}:${part("second")}`;
+  const asUtc = Date.parse(`${dayKeyInTimeZone(date, timeZone)}T${clock}Z`);
+  if (Number.isNaN(asUtc)) return 0;
+  return Math.round((asUtc - date.getTime()) / 60_000);
+}
+
+function dayKeyAtOffset(date, offsetMinutes) {
+  return new Date(date.getTime() + offsetMinutes * 60_000).toISOString().slice(0, 10);
 }
 
 studyRouter.get("/home-summary", async (req, res) => {
   const identity = await identityFromRequest(req);
+  const requested = String(req.query?.timezone ?? "").trim();
+  const rawOffset = Number(req.query?.utcOffsetMinutes);
+  const hasOffset = Number.isInteger(rawOffset) && Math.abs(rawOffset) <= 840;
+  const timezone = isValidTimezone(requested) ? requested : "UTC";
+  // Same precedence as the streak sync: a usable zone name wins, then the
+  // reported offset, then UTC.
+  const offsetMinutes =
+    timezone === "UTC" ? (hasOffset ? rawOffset : 0) : zoneOffsetMinutes(new Date(), timezone);
+
   const summary = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
     const now = new Date();
-    const startOfToday = new Date(now);
-    startOfToday.setUTCHours(0, 0, 0, 0);
-    const weekStart = new Date(startOfToday);
-    weekStart.setUTCDate(weekStart.getUTCDate() - 6);
+    const todayKey = dayKeyAtOffset(now, offsetMinutes);
+    // Seed the seven buckets from local noon, a day's walk back: midnight and
+    // 23:00 are where a DST shift can land you on a neighbouring date, noon is
+    // not. The floor for the read is then a generous 24 h earlier — the bucketing
+    // below only counts keys it recognises, so a wide floor costs rows, not truth.
+    const noonAnchor = Date.parse(`${todayKey}T12:00:00Z`);
+    const weekStart = new Date(noonAnchor - 6 * DAY_MS - 12 * 3_600_000);
 
     const [due, totalCards, logs, attempts] = await Promise.all([
       tx.flashcard.count({
-        where: { userId: user.id, dueAt: { lte: now } },
+        where: { userId: user.id, retiredAt: null, dueAt: { lte: now } },
       }),
-      tx.flashcard.count({ where: { userId: user.id } }),
+      tx.flashcard.count({ where: { userId: user.id, retiredAt: null } }),
       tx.reviewLog.findMany({
         where: { userId: user.id, reviewedAt: { gte: weekStart } },
-        select: { reviewedAt: true },
+        select: { reviewedAt: true, grade: true },
       }),
-      tx.quizAttempt.count({
-        where: { userId: user.id, finishedAt: { gte: startOfToday } },
+      tx.quizAttempt.findMany({
+        where: { userId: user.id, finishedAt: { gte: weekStart } },
+        select: { finishedAt: true },
       }),
     ]);
 
     const byDay = new Map();
-    for (let offset = 0; offset < 7; offset += 1) {
-      const day = new Date(weekStart);
-      day.setUTCDate(weekStart.getUTCDate() + offset);
-      byDay.set(dayKey(day), 0);
+    for (let offset = 6; offset >= 0; offset -= 1) {
+      byDay.set(dayKeyAtOffset(new Date(noonAnchor - offset * DAY_MS), offsetMinutes), 0);
     }
+    // `graded`/`kept` are the week's recall rate — the same definition the phone
+    // computes locally: anything but "again" counts as remembered.
+    let graded = 0;
+    let kept = 0;
     for (const log of logs) {
-      const key = dayKey(log.reviewedAt);
-      if (byDay.has(key)) byDay.set(key, byDay.get(key) + 1);
+      const key = dayKeyAtOffset(log.reviewedAt, offsetMinutes);
+      if (!byDay.has(key)) continue;
+      byDay.set(key, (byDay.get(key) ?? 0) + 1);
+      graded += 1;
+      if (log.grade !== "again") kept += 1;
+    }
+    // Quizzes bucketed by the same recognised keys, so "today" and the week sum
+    // cannot disagree with the bars the client just drew.
+    let quizzesWeek = 0;
+    let quizAttemptsToday = 0;
+    for (const attempt of attempts) {
+      const key = dayKeyAtOffset(attempt.finishedAt, offsetMinutes);
+      if (!byDay.has(key)) continue;
+      quizzesWeek += 1;
+      if (key === todayKey) quizAttemptsToday += 1;
     }
 
     // The streak is the synced app-open streak (POST /me/activity keeps it
@@ -226,8 +380,10 @@ studyRouter.get("/home-summary", async (req, res) => {
     return {
       due,
       totalCards,
-      reviewedToday: byDay.get(dayKey(startOfToday)) ?? 0,
-      quizAttemptsToday: attempts,
+      reviewedToday: byDay.get(todayKey) ?? 0,
+      quizAttemptsToday,
+      quizzesWeek,
+      recallPercent: graded ? Math.round((kept / graded) * 100) : 0,
       streakDays: streak.streakDays,
       streakActiveToday: streak.activeToday,
       streakLastActiveDay: streak.lastActiveDay,
@@ -243,27 +399,39 @@ studyRouter.get("/sets", async (req, res) => {
   const identity = await identityFromRequest(req);
   const sets = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
-    const notes = await tx.note.findMany({
-      where: { userId: user.id },
-      select: {
-        id: true,
-        title: true,
-        courseId: true,
-        updatedAt: true,
-        _count: { select: { flashcards: true, quizzes: true } },
-      },
-      orderBy: { updatedAt: "desc" },
-    });
+    const [notes, cardCounts] = await Promise.all([
+      tx.note.findMany({
+        where: { userId: user.id },
+        select: {
+          id: true,
+          title: true,
+          courseId: true,
+          updatedAt: true,
+          _count: { select: { quizzes: true } },
+        },
+        orderBy: { updatedAt: "desc" },
+      }),
+      // One grouped count for every deck at once, and it is the *live* count: a
+      // retired (deleted) card must not keep a deck on the list. `_count.select`
+      // cannot carry a relation filter in this client, so the count is its own
+      // query rather than a flag on the note read.
+      tx.flashcard.groupBy({
+        by: ["noteId"],
+        where: { userId: user.id, retiredAt: null },
+        _count: { _all: true },
+      }),
+    ]);
+    const cardsByNote = new Map(cardCounts.map((row) => [row.noteId, row._count._all]));
     return notes
-      .filter((note) => note._count.flashcards > 0 || note._count.quizzes > 0)
       .map((note) => ({
         noteId: note.id,
         noteTitle: note.title,
         courseId: note.courseId,
-        cards: note._count.flashcards,
+        cards: cardsByNote.get(note.id) ?? 0,
         quizzes: note._count.quizzes,
         updatedAt: note.updatedAt,
-      }));
+      }))
+      .filter((set) => set.cards > 0 || set.quizzes > 0);
   });
   res.json({ sets });
 });
@@ -273,6 +441,11 @@ studyRouter.get("/sets", async (req, res) => {
 // `ahead=N` (days, 1-30) also returns `aheadCards`: cards coming up in that
 // window. Mobile offers the same short review-ahead when nothing is due yet;
 // the web asks for both in one round trip and picks client-side.
+//
+// `noteId`/`courseId` scope the queue server-side. Without them a client has to
+// take the globally-most-due `limit` cards and filter afterwards, so a deck
+// buried below the cut-off answers "nothing due here" while the phone reviews
+// those very cards — which is why the filter belongs in the query, not the page.
 studyRouter.get("/due", async (req, res) => {
   const identity = await identityFromRequest(req);
   const limit = Math.min(
@@ -280,26 +453,30 @@ studyRouter.get("/due", async (req, res) => {
     Math.max(5, Number(req.query.limit) || 30),
   );
   const aheadDays = Math.min(30, Math.max(1, Number(req.query.ahead) || 0));
+  const noteId = typeof req.query.noteId === "string" && req.query.noteId ? req.query.noteId : null;
+  const courseId =
+    typeof req.query.courseId === "string" && req.query.courseId ? req.query.courseId : null;
   const outcome = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
     const now = new Date();
     const aheadUntil = new Date(now.getTime() + aheadDays * 86_400_000);
+    const scope = {
+      userId: user.id,
+      retiredAt: null,
+      ...(noteId ? { noteId } : {}),
+      ...(courseId ? { courseId } : {}),
+    };
     const [due, cards, aheadCards] = await Promise.all([
-      tx.flashcard.count({
-        where: { userId: user.id, dueAt: { lte: now } },
-      }),
+      tx.flashcard.count({ where: { ...scope, dueAt: { lte: now } } }),
       tx.flashcard.findMany({
-        where: { userId: user.id, dueAt: { lte: now } },
+        where: { ...scope, dueAt: { lte: now } },
         orderBy: { dueAt: "asc" },
         take: limit,
         include: { note: { select: { title: true } } },
       }),
       aheadDays > 0
         ? tx.flashcard.findMany({
-            where: {
-              userId: user.id,
-              dueAt: { gt: now, lte: aheadUntil },
-            },
+            where: { ...scope, dueAt: { gt: now, lte: aheadUntil } },
             orderBy: { dueAt: "asc" },
             take: limit,
             include: { note: { select: { title: true } } },
@@ -522,7 +699,9 @@ studyRouter.post("/notes/:noteId/cards", async (req, res) => {
           ...fields,
           dueAt: new Date(Date.now() + DAY_MS),
         },
-        update: { front: fields.front, back: fields.back },
+        // Re-adding a card under a retired id revives it rather than silently
+        // creating a second card the student cannot see.
+        update: { front: fields.front, back: fields.back, retiredAt: null },
       }),
     };
   });
@@ -538,7 +717,7 @@ studyRouter.patch("/cards/:cardId", async (req, res) => {
   const outcome = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
     const card = await tx.flashcard.findFirst({
-      where: { id: req.params.cardId, userId: user.id },
+      where: { id: req.params.cardId, userId: user.id, retiredAt: null },
     });
     if (!card) return { error: "Card not found", status: 404 };
     return {
@@ -554,14 +733,18 @@ studyRouter.delete("/cards/:cardId", async (req, res) => {
   const outcome = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
     const card = await tx.flashcard.findFirst({
-      where: { id: req.params.cardId, userId: user.id },
+      where: { id: req.params.cardId, userId: user.id, retiredAt: null },
     });
     if (!card) return { error: "Card not found", status: 404 };
-    await tx.flashcard.delete({ where: { id: card.id } });
-    return { deleted: card.id };
+    // Soft retire, not delete. The row is what `review_logs` points at, so a hard
+    // delete both erases the student's history and makes any review still queued
+    // on another device fail the foreign key when it arrives. Retiring keeps the
+    // history and takes the card out of study through `retiredAt: null` on reads.
+    await tx.flashcard.update({ where: { id: card.id }, data: { retiredAt: new Date() } });
+    return { retired: card.id };
   });
   if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
-  res.json({ ok: true, id: outcome.deleted });
+  res.json({ ok: true, id: outcome.retired });
 });
 
 function shapeCard(card) {

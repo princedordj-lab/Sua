@@ -99,22 +99,32 @@ const MAX_POLLS = 50;
 const UPLOAD_WAIT_MS = 15 * 60_000;
 const activeDrains = new WeakMap<SQLiteDatabase, Promise<number>>();
 
-async function pullStudySet(
-  deps: DrainDeps,
+/**
+ * Pull one deck from the server and rebuild the local copy.
+ *
+ * This is the web→phone direction for cards: a deck already cached on the
+ * device is never re-pulled by the hydration pass (`listNotesMissingStudySet`
+ * only selects notes with no local cards), so a card created, edited or deleted
+ * on the web would stay invisible forever. A screen opening a deck the student
+ * is looking at is the moment to reconcile it. `storeStudySet` keeps local
+ * scheduling for any card with a grade still queued and skips cards this device
+ * has queued a delete for, so the pull cannot clobber unsynced work.
+ */
+export async function refreshStudySet(
+  { db, getAuthToken, onNoteChange }: DrainDeps,
   noteId: string,
-  { notify = true }: { notify?: boolean } = {},
 ) {
-  const token = await deps.getAuthToken();
+  const token = await getAuthToken();
   if (!token) throw new Error("no auth token");
-  // The note can be deleted (here or on another device) between the job
-  // finishing and this pull; never recreate cards for a row that is gone.
-  if (!(await getNote(deps.db, noteId).catch(() => null))) return;
+  // The note can be deleted (here or on another device) before this pull; never
+  // recreate cards for a row that is gone.
+  if (!(await getNote(db, noteId).catch(() => null))) return false;
   const study = await studyApi.forNote(token, noteId);
   // Keep the server summary in step even when only the cards were missing.
   if (study.summaryMarkdown) {
-    await setNoteSummary(deps.db, noteId, study.summaryMarkdown);
+    await setNoteSummary(db, noteId, study.summaryMarkdown);
   }
-  await storeStudySet(deps.db, noteId, {
+  await storeStudySet(db, noteId, {
     flashcards: study.flashcards,
     quizzes: study.quizzes.map((quiz) => ({
       id: quiz.id,
@@ -122,6 +132,18 @@ async function pullStudySet(
       questions: quiz.questions,
     })),
   });
+  onNoteChange?.(noteId);
+  return true;
+}
+
+async function pullStudySet(
+  deps: DrainDeps,
+  noteId: string,
+  { notify = true }: { notify?: boolean } = {},
+) {
+  // Silence the refresh's own change signal: a finishing generation should notify
+  // once, after `aiState` says ready, not twice with a stale state in between.
+  if (!(await refreshStudySet({ ...deps, onNoteChange: undefined }, noteId))) return;
   await setNoteAiState(deps.db, noteId, "ready");
   if (notify) await announceReady(deps, "Your study set is ready");
   deps.onNoteChange?.(noteId);

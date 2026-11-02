@@ -1,10 +1,13 @@
 // Reviews, quiz attempts and manual card edits are personal study progress:
 // they mutate SQLite first and flush to /api/study when connectivity allows.
-// Idempotency keys are client ids (review log id / attempt id / card id), so
-// retries after a half-completed flush are safe.
+// Client ids (review log id / attempt id / card id) are the idempotency keys,
+// and /sync/reviews enforces them: a log the server has already replayed comes
+// back under `skipped`, so retrying a half-completed flush never re-advances a
+// card and the reply always carries the authoritative schedule to adopt.
 import NetInfo from "@react-native-community/netinfo";
 import {
   applyDeckScheduling,
+  dropLocalCard,
   listAttemptsWithState,
   listPendingCardOps,
   listUnsyncedReviews,
@@ -16,11 +19,21 @@ import {
   type LocalQuizAttempt,
 } from "./notes";
 import { studyApi } from "./api";
+import { deviceTimeZone, deviceUtcOffsetMinutes } from "./streak";
+import type { ServerHomeSummary, ServerReviewSyncResponse } from "./types";
 
 type DrainDeps = {
   db: import("expo-sqlite").SQLiteDatabase;
   getAuthToken: () => Promise<string | null>;
 };
+
+/**
+ * Grades per request. The server commits its own chunks, so this only needs to
+ * keep one POST from turning into a transaction long enough to expire — and a
+ * part-failed queue resumes where it stopped rather than re-paying for grades
+ * the server already applied.
+ */
+const REVIEW_FLUSH_CHUNK = 50;
 
 export async function flushStudyProgress(deps: DrainDeps) {
   const state = await NetInfo.fetch();
@@ -29,7 +42,6 @@ export async function flushStudyProgress(deps: DrainDeps) {
   if (!token) return { reviews: 0, cards: 0, attempts: 0 };
 
   const reviews = await flushReviews(deps, token);
-  await flushReviewsScheduling(deps, token);
   const cards = await flushCardOps(deps, token);
   const attempts = await flushAttempts(deps, token);
   return { reviews, cards, attempts };
@@ -38,26 +50,49 @@ export async function flushStudyProgress(deps: DrainDeps) {
 async function flushReviews(deps: DrainDeps, token: string) {
   const logs = await listUnsyncedReviews(deps.db);
   if (!logs.length) return 0;
-  try {
-    await studyApi.postReviews(token, logs);
-    await markReviewsSynced(deps.db, logs.map((log) => log.id));
-    return logs.length;
-  } catch {
-    return 0;
-  }
-}
+  let settled = 0;
 
-/** Mirror the server's replayed scheduling back onto local cards. */
-async function flushReviewsScheduling(deps: DrainDeps, token: string) {
-  const sample = await listUnsyncedReviews(deps.db, 1);
-  if (!sample.length) return;
-  try {
-    const result = await studyApi.postReviews(token, sample);
-    const cards = result.cards ? Object.values(result.cards) : [];
-    if (cards.length) await applyDeckScheduling(deps.db, cards);
-  } catch {
-    // scheduling mirror is best-effort: grades already synced above
+  for (let start = 0; start < logs.length; start += REVIEW_FLUSH_CHUNK) {
+    const chunk = logs.slice(start, start + REVIEW_FLUSH_CHUNK);
+    let result: ServerReviewSyncResponse;
+    try {
+      result = await studyApi.postReviews(token, chunk);
+    } catch {
+      // Capacity or connectivity. Stop here and leave the rest queued: the
+      // server applies a log id at most once, so the next burst resumes this
+      // queue instead of paying for the same grades twice.
+      break;
+    }
+
+    // The server is the only scheduler. Adopt whatever it computed for every card
+    // it answered for — including a card whose grade it declined to replay. This
+    // is the step that used to be dead code: the response was discarded and every
+    // card marked synced, so the phone went on believing its own arithmetic about
+    // a due date the rest of the account had already moved on from.
+    await applyDeckScheduling(deps.db, Object.values(result.cards ?? {}));
+
+    const settledIds = new Set<string>(result.applied ?? []);
+    for (const skip of result.skipped ?? []) {
+      if (skip.reason === "not_owned") {
+        // This device is holding a card the account no longer has. The grade can
+        // never be accepted, so forget the card and its history rather than
+        // resending a batch the server refuses on every future burst.
+        const log = chunk.find((entry) => entry.id === skip.id);
+        if (log) await dropLocalCard(deps.db, log.cardId);
+        continue;
+      }
+      // already_applied / out_of_order: recorded, and the schedule already covers
+      // it. Nothing left for this row to do.
+      settledIds.add(skip.id);
+    }
+
+    const ids = chunk.filter((log) => settledIds.has(log.id)).map((log) => log.id);
+    if (!ids.length) continue;
+    await markReviewsSynced(deps.db, ids);
+    settled += ids.length;
   }
+
+  return settled;
 }
 
 async function flushCardOps(deps: DrainDeps, token: string) {
@@ -156,4 +191,25 @@ async function flushAttempts(deps: DrainDeps, token: string) {
     }
   }
   return flushed;
+}
+
+/**
+ * The server's own week, bucketed in this device's timezone — the numbers the
+ * web draws, counting reviews made on either surface. Null whenever it cannot
+ * answer (offline, no session, a busy server), which is what lets Home and Study
+ * fall back to SQLite instead of an empty chart.
+ */
+export async function loadHomeSummary(
+  getAuthToken: () => Promise<string | null>,
+): Promise<ServerHomeSummary | null> {
+  try {
+    const token = await getAuthToken();
+    if (!token) return null;
+    return await studyApi.homeSummary(token, {
+      timezone: deviceTimeZone(),
+      utcOffsetMinutes: deviceUtcOffsetMinutes(),
+    });
+  } catch {
+    return null;
+  }
 }

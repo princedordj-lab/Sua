@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { Alert, Button, Card, Chip, ErrorState, LoadingBlock, ProgressBar } from "@/components/ui";
 import { useApi } from "@/lib/use-api";
+import { invalidateNoteOutputs } from "@/lib/bus";
 import { useResource } from "@/lib/use-resource";
 import { aiStageLabel, GENERIC_FAILURE, generationKindFor, isAiActive } from "@/lib/generation";
 import type { AiState, ServerJob, ServerNote } from "@/lib/types";
@@ -70,7 +71,9 @@ export default function JobStatusPage() {
       if (next && (next.state === "queued" || next.state === "running")) {
         timer = setTimeout(() => void poll(), 5000);
       } else if (next && (next.state === "done" || next.state === "failed" || next.state === "cancelled")) {
-        note.reload();
+        // A finished run wrote a note body, a summary, cards and a quiz. The
+        // course list, the study-set listings and the due counts all moved.
+        invalidateNoteOutputs(noteId, note.data?.courseId ?? null);
       }
     }
 

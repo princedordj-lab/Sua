@@ -31,6 +31,7 @@ import {
 } from "@/components/ui";
 import { ReportButton, ReportMistake } from "@/components/report-mistake";
 import { useApi } from "@/lib/use-api";
+import { invalidateDeck } from "@/lib/bus";
 import { useResource } from "@/lib/use-resource";
 import { dueLabel, examCountdown, relativeDate } from "@/lib/format";
 import { courseStyle } from "@/lib/course-style";
@@ -117,6 +118,10 @@ export default function DeckPage() {
         );
       }
       setEditor(null);
+      // Patching this list is instant feedback, not the record: the due count on
+      // Study/Home, the deck's card count in the sets list and the phone's next
+      // pull are all answered by the server, so they are re-asked here.
+      invalidateDeck(id, course?.id ?? null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save this card.");
     } finally {
@@ -136,6 +141,7 @@ export default function DeckPage() {
           : current,
       );
       setDeleteFor(null);
+      invalidateDeck(id, course?.id ?? null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not delete this card.");
     } finally {
@@ -354,7 +360,10 @@ export default function DeckPage() {
         }
       >
         {error ? <Alert title="Could not delete">{error}</Alert> : null}
-        <Alert tone="warning">Its review history is removed too. This cannot be undone.</Alert>
+        <Alert tone="warning">
+          It leaves the deck and stops coming up for review. What you have already reviewed on it
+          stays in your history.
+        </Alert>
       </Modal>
 
       <ReportMistake

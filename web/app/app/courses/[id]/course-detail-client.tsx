@@ -38,10 +38,11 @@ import {
 } from "@/components/ui";
 import { MarkdownPreview } from "@/components/markdown";
 import { useApi } from "@/lib/use-api";
+import { invalidateDeck, invalidateNotes } from "@/lib/bus";
 import { useResource } from "@/lib/use-resource";
 import { courseStyle } from "@/lib/course-style";
 import { examCountdown, relativeDate, shortDate } from "@/lib/format";
-import { isAiActive } from "@/lib/generation";
+import { isAiActive, uploadStatus } from "@/lib/generation";
 import { formatBytes } from "@/lib/uploads";
 import type { ServerNote, ServerStudySet } from "@/lib/types";
 
@@ -58,23 +59,13 @@ function UploadRow({ note }: { note: ServerNote }) {
   const size = assets.length
     ? formatBytes(assets.reduce((total, asset) => total + asset.bytes, 0))
     : "Size unavailable";
-  let status = "Upload details unavailable";
-  if (assets.some((asset) => asset.status === "pending")) {
-    status = "Upload pending";
-  } else if (note.aiState === "ready") {
-    status = "Ready";
-  } else if (note.aiState === "failed") {
-    status = "Needs attention";
-  } else if (assets.length) {
-    status = "Uploaded";
-  }
 
   return (
     <div className="upload-row">
       <strong className="upload-row-name">{note.title || "Untitled upload"}</strong>
       <div className="upload-row-meta">
         <span>{size}</span>
-        <span>{status}</span>
+        <span>{uploadStatus(note)}</span>
       </div>
     </div>
   );
@@ -231,7 +222,12 @@ export function CourseDetailClient() {
       notes.setData((current) =>
         current ? current.filter((row) => row.id !== moveNote.id) : current,
       );
-      sets.reload();
+      // Both courses changed, and `noteCount` on each of them did too. Filtering
+      // this list by hand only tells one half of the story: the destination is a
+      // different key, and a mounted copy of it would go on showing the note it
+      // no longer owns.
+      invalidateNotes(id);
+      invalidateNotes(moveTarget);
       refresh();
       setMoveNote(null);
       setMoveTarget("");
@@ -251,7 +247,10 @@ export function CourseDetailClient() {
       notes.setData((current) =>
         current ? current.filter((row) => row.id !== deleteNote.id) : current,
       );
-      sets.reload();
+      // A deleted note takes its deck with it: the due queue, both summaries and
+      // every study-set listing have to stop counting those cards.
+      invalidateNotes(id);
+      invalidateDeck(deleteNote.id, id);
       refresh();
       setDeleteNote(null);
     } catch (cause) {

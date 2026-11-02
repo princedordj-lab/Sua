@@ -1,5 +1,5 @@
 import type { ApiClient } from "./use-api";
-import type { AssetKind, GenerationKind, ServerAsset, ServerJob, UploadTask } from "./types";
+import type { AssetKind, GenerationKind, ServerAsset, UploadTask } from "./types";
 
 export const DOCUMENT_FORMATS = ["pdf", "pptx", "ppt", "txt", "docx", "md"] as const;
 export const IMAGE_FORMATS = ["jpg", "jpeg", "png", "webp", "heic", "heif"] as const;
@@ -166,27 +166,6 @@ export async function uploadFile(
   }
 
   return api.uploads.complete(signed.id, signed.publicId);
-}
-
-export async function waitForJob(
-  api: ApiClient,
-  noteId: string,
-  options: {
-    onJob?: (job: ServerJob | null) => void;
-    timeoutMs?: number;
-    intervalMs?: number;
-  } = {},
-): Promise<ServerJob | null> {
-  const timeout = options.timeoutMs ?? 12 * 60_000;
-  const interval = options.intervalMs ?? 4000;
-  const started = Date.now();
-  while (Date.now() - started < timeout) {
-    const job = await api.jobs.forNote(noteId);
-    options.onJob?.(job);
-    if (!job || job.state === "done" || job.state === "failed") return job;
-    await new Promise((resolve) => setTimeout(resolve, interval));
-  }
-  return null;
 }
 
 export function generationKindFor(task: UploadTask | "none"): GenerationKind {

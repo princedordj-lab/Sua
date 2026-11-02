@@ -2,6 +2,7 @@
 
 import { useAuth } from "@clerk/nextjs";
 import { useCallback, useMemo } from "react";
+import { browserTimeZone, browserUtcOffsetMinutes } from "./activity";
 import {
   ApiError,
   apiRequest,
@@ -76,11 +77,20 @@ export function useApi() {
           withToken((token) => jobsApi.feedback(token, input)),
       },
       study: {
-        homeSummary: () => withToken(studyApi.homeSummary),
+        homeSummary: () =>
+          withToken((token) =>
+            studyApi.homeSummary(token, {
+              timezone: browserTimeZone(),
+              utcOffsetMinutes: browserUtcOffsetMinutes(),
+            }),
+          ),
         sets: () => withToken(studyApi.sets),
         quiz: (quizId: string) => withToken((token) => studyApi.quiz(token, quizId)),
-        due: (limit: number, aheadDays = 7) =>
-          withToken((token) => studyApi.due(token, limit, aheadDays)),
+        due: (
+          limit: number,
+          aheadDays = 7,
+          scope?: { noteId?: string | null; courseId?: string | null },
+        ) => withToken((token) => studyApi.due(token, limit, aheadDays, scope)),
         syncReviews: (logs: ReviewLogInput[]) =>
           withToken((token) => studyApi.syncReviews(token, logs)),
         submitAttempt: (attempt: AttemptInput) =>

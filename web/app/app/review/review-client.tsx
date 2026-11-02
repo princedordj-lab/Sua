@@ -29,9 +29,14 @@ import { Markdown } from "@/components/markdown";
 import { useApi } from "@/lib/use-api";
 import { useResource } from "@/lib/use-resource";
 import { usePrefs } from "@/lib/prefs";
-import { GRADE_LABELS, nextDueMs } from "@/lib/srs";
+import { GRADE_LABELS } from "@/lib/srs";
 import { dueLabel } from "@/lib/format";
-import type { CardGrade, ServerDueCard, ServerDueResponse } from "@/lib/types";
+import type {
+  CardGrade,
+  ServerCardScheduling,
+  ServerDueCard,
+  ServerDueResponse,
+} from "@/lib/types";
 
 type Outcome = Record<CardGrade, number>;
 
@@ -39,6 +44,11 @@ const EMPTY_OUTCOME: Outcome = { again: 0, hard: 0, good: 0, easy: 0 };
 
 /** Days of look-ahead offered when nothing is due (matches mobile). */
 const AHEAD_DAYS = 7;
+
+/** Overwrite one card's schedule where it appears, keeping list order and length. */
+function patchCard(cards: ServerDueCard[], scheduled: ServerCardScheduling) {
+  return cards.map((entry) => (entry.id === scheduled.id ? { ...entry, ...scheduled } : entry));
+}
 
 export function ReviewWorkspace() {
   const params = useSearchParams();
@@ -51,22 +61,19 @@ export function ReviewWorkspace() {
 
   const due = useResource<ServerDueResponse>(
     `review:${limit}:${courseId ?? ""}:${noteId ?? ""}`,
-    () => api.study.due(limit, AHEAD_DAYS),
+    () => api.study.due(limit, AHEAD_DAYS, { courseId, noteId }),
   );
 
   // Same order as mobile: today's due cards first, and only when that queue is
-  // empty does the session fall back to a short review-ahead.
+  // empty does the session fall back to a short review-ahead. The deck/course
+  // filter is applied by the query, so the session length is not a coincidence
+  // of which cards happened to be globally most overdue.
   const selection = useMemo(() => {
-    const matches = (card: ServerDueCard) => {
-      if (noteId && card.noteId !== noteId) return false;
-      if (courseId && card.courseId !== courseId) return false;
-      return true;
-    };
-    const dueNow = (due.data?.cards ?? []).filter(matches);
+    const dueNow = due.data?.cards ?? [];
     if (dueNow.length) return { cards: dueNow, ahead: false };
-    const later = (due.data?.aheadCards ?? []).filter(matches).slice(0, limit);
+    const later = (due.data?.aheadCards ?? []).slice(0, limit);
     return { cards: later, ahead: later.length > 0 };
-  }, [due.data, courseId, noteId, limit]);
+  }, [due.data, limit]);
 
   const cards = selection.cards;
   const reviewingAhead = selection.ahead;
@@ -96,16 +103,38 @@ export function ReviewWorkspace() {
     setBusy(true);
     setError(null);
     const now = new Date();
+    const logId = crypto.randomUUID();
     try {
-      await api.study.syncReviews([
+      const result = await api.study.syncReviews([
         {
-          id: crypto.randomUUID(),
+          id: logId,
           cardId: card.id,
           grade: gradeValue,
           reviewedAt: now.toISOString(),
           prevIntervalDays: card.intervalDays,
         },
       ]);
+      if (result.skipped?.some((entry) => entry.id === logId && entry.reason === "not_owned")) {
+        // The card is not this account's any more, so the grade is genuinely
+        // gone — say so instead of counting a review that was never recorded.
+        setError("This card no longer exists in your account.");
+      } else {
+        const scheduled = result.cards?.[card.id];
+        if (scheduled) {
+          // Server-authoritative schedule, adopted in place: web has no local
+          // mirror, and this response is the only reason the phone can trust
+          // that the due date it pulls matches the one just computed here.
+          due.setData((current) =>
+            current
+              ? {
+                  ...current,
+                  cards: patchCard(current.cards, scheduled),
+                  aheadCards: patchCard(current.aheadCards, scheduled),
+                }
+              : current,
+          );
+        }
+      }
       setOutcome((current) => ({ ...current, [gradeValue]: current[gradeValue] + 1 }));
       refresh();
       if (index + 1 >= total) {
@@ -184,7 +213,10 @@ export function ReviewWorkspace() {
   }
 
   if (!total) {
-    const dueElsewhere = (due.data?.due ?? 0) > 0 && Boolean(courseId || noteId);
+    // `due` is scoped to this deck/course, so a zero here means "nothing due
+    // here" — not "nothing due anywhere". Only the unscoped queue can claim the
+    // student is caught up account-wide.
+    const scoped = Boolean(courseId || noteId);
     return (
       <div>
         <Link href="/app/study" className="back-link">
@@ -197,15 +229,15 @@ export function ReviewWorkspace() {
         />
         <EmptyState
           icon={<Brain size={27} />}
-          title={dueElsewhere ? "No cards due in this selection" : "You’re all caught up"}
+          title={scoped ? "No cards due in this selection" : "You’re all caught up"}
           body={
-            dueElsewhere
-              ? `${due.data?.due} ${due.data?.due === 1 ? "card is" : "cards are"} due in other decks. Open the full review to keep the streak going.`
+            scoped
+              ? "Every card in this selection is scheduled for a later day. The full review shows what else is due."
               : "Generate a study set from any note — cards land here when due."
           }
           action={
             <div className="empty-actions">
-              {dueElsewhere ? (
+              {scoped ? (
                 <Link href="/app/review" className="btn btn-secondary btn-md">
                   Review everything
                 </Link>
@@ -264,8 +296,6 @@ export function ReviewWorkspace() {
     );
   }
 
-  const nextDue = card ? nextDueMs(card, "good") : 0;
-
   return (
     <div className="review-page">
       <div className="review-topbar">
@@ -319,7 +349,9 @@ export function ReviewWorkspace() {
       <div className="review-meta-row">
         <span>{card?.noteTitle || "Untitled note"}</span>
         <span>{dueLabel(card?.dueAt)}</span>
-        <span>Due again on “Good”: {new Date(nextDue).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+        <span>
+          {card ? `${card.reps} ${card.reps === 1 ? "review" : "reviews"} · ${card.intervalDays}d interval` : ""}
+        </span>
       </div>
 
       {flipped ? (

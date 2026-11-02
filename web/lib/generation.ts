@@ -126,3 +126,36 @@ export function sourceMetaFor(
 
 export const GENERIC_FAILURE =
   "Something went wrong. Try again. This didn’t use your monthly allowance.";
+
+/**
+ * What an upload is doing right now, from the server's own extraction state.
+ *
+ * `extractState` (with `pagesDone`/`pagesTotal`) is the pipeline's answer to
+ * "have you read my PDF yet" and it is already on the wire. Deriving status from
+ * `aiState` and the upload flag alone freezes a four-way guess: a document still
+ * being read looks exactly like one that failed, and the row cannot stop looking
+ * that way without a remount.
+ */
+export function uploadStatus(
+  note: Pick<ServerNote, "aiState" | "assets">,
+): string {
+  const assets = note.assets ?? [];
+  if (!assets.length) return "Upload details unavailable";
+  const reading = assets.find((asset) =>
+    ["pending", "partial", "running"].includes(asset.extractState ?? "none"),
+  );
+  if (reading) {
+    const done = reading.pagesDone ?? 0;
+    const total = reading.pagesTotal ?? 0;
+    return total > 0
+      ? `Reading page ${Math.min(done + 1, total)} of ${total}`
+      : "Reading your file";
+  }
+  if (assets.some((asset) => asset.status === "pending")) return "Upload pending";
+  if (assets.some((asset) => asset.extractState === "failed"))
+    return "Couldn’t read this file";
+  if (note.aiState === "ready") return "Ready";
+  if (note.aiState === "failed") return "Needs attention";
+  if (isAiActive(note.aiState)) return "Building your study set";
+  return "Uploaded";
+}

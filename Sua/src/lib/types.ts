@@ -316,7 +316,39 @@ export type ServerCardScheduling = {
   reps: number;
 };
 
-export type ServerReviewSyncResponse = { cards: Record<string, ServerCardScheduling> | null };
+/**
+ * Why the server did not replay a grade into a card's schedule.
+ * `already_applied` / `out_of_order` mean the log is settled (recorded, and the
+ * schedule already reflects it or has moved past it) — stop sending it.
+ * `not_owned` means the card is not this student's, so the grade can never be
+ * accepted and the card should be forgotten.
+ */
+export type ServerReviewSkipReason = "already_applied" | "out_of_order" | "not_owned";
+
+export type ServerReviewSyncResponse = {
+  cards: Record<string, ServerCardScheduling> | null;
+  /** Log ids the server replayed into a schedule. */
+  applied?: string[];
+  skipped?: { id: string; reason: ServerReviewSkipReason }[];
+  /** The server's clock, for clients that must not trust their own. */
+  serverTime?: string;
+};
+
+export type ServerHomeSummary = {
+  due: number;
+  totalCards: number;
+  reviewedToday: number;
+  quizAttemptsToday: number;
+  /** Grades that were not "again", over every grade in the bucketed week. */
+  recallPercent: number;
+  quizzesWeek: number;
+  streakDays: number;
+  streakActiveToday?: boolean;
+  streakLastActiveDay?: string | null;
+  // Seven local-day buckets (YYYY-MM-DD) in the timezone the request reported,
+  // oldest first — the same chart the web draws.
+  weekly: { date: string; reviewed: number }[];
+};
 
 export type ServerAttemptDetails = {
   questionId: string;

@@ -3,7 +3,7 @@ import { File } from "expo-file-system";
 import type { SQLiteDatabase } from "expo-sqlite";
 import { notesApi } from "./api";
 import { nextDueMs, nextState, type CardGrade } from "./srs";
-import type { GenerationKind, NoteKind, ServerNote, SyncResult } from "./types";
+import type { GenerationKind, NoteKind, ServerHomeSummary, ServerNote, SyncResult } from "./types";
 
 export type { GenerationKind, NoteKind };
 
@@ -1465,6 +1465,39 @@ export async function storeStudySet(
         )
       ).map((row) => row.card_id),
     );
+    // A delete this device asked for but has not flushed yet. Without this the
+    // pull would hand the card straight back: the server still has it live until
+    // the queued op lands, so a re-pull during that window resurrects a card the
+    // student already deleted.
+    const deletedHere = new Set(
+      (
+        await db.getAllAsync<{ card_id: string }>(
+          "SELECT DISTINCT card_id FROM card_queue WHERE note_id = ? AND op = 'delete' AND state != 'done'",
+          noteId,
+        )
+      ).map((row) => row.card_id),
+    );
+    // Text this device edited but has not flushed. The student's own words win
+    // over the server's until the queued op lands, or opening the deck would
+    // show the old card for a second and then send the edit anyway.
+    const editedHere = new Map(
+      (
+        await db.getAllAsync<{ card_id: string; payload: string | null }>(
+          `SELECT card_id, payload FROM card_queue
+             WHERE note_id = ? AND op IN ('create', 'update') AND state != 'done'
+             ORDER BY id ASC`,
+          noteId,
+        )
+      )
+        .filter((row) => row.payload)
+        .map((row) => {
+          const payload = JSON.parse(String(row.payload)) as {
+            front?: string;
+            back?: string;
+          };
+          return [row.card_id, payload] as const;
+        }),
+    );
     const previous = new Map(
       (
         await db.getAllAsync<Record<string, unknown>>(
@@ -1475,7 +1508,9 @@ export async function storeStudySet(
     );
     await db.runAsync("DELETE FROM flashcards WHERE note_id = ?", noteId);
     for (const card of study.flashcards) {
+      if (deletedHere.has(card.id)) continue;
       const prior = previous.get(card.id);
+      const edit = editedHere.get(card.id);
       const preserve = keepScheduling.has(card.id) && prior != null;
       const dueAt =
         preserve && prior
@@ -1488,14 +1523,34 @@ export async function storeStudySet(
         "INSERT OR REPLACE INTO flashcards (id, note_id, front, back, due_at, interval_days, ease, reps, lapses, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         card.id,
         noteId,
-        card.front,
-        card.back,
+        edit?.front ?? card.front,
+        edit?.back ?? card.back,
         dueAt,
         intervalDays,
         ease,
         reps,
         prior ? Number(prior.lapses ?? 0) : 0,
         now,
+      );
+    }
+    // A card created on this device is not on the server yet, so it is absent
+    // from the response above. Keeping it is what stops a deck re-pull from
+    // making the student's new card disappear until the queue flushes.
+    for (const [cardId, row] of previous) {
+      if (deletedHere.has(cardId) || !editedHere.has(cardId)) continue;
+      if (study.flashcards.some((card) => card.id === cardId)) continue;
+      await db.runAsync(
+        "INSERT OR REPLACE INTO flashcards (id, note_id, front, back, due_at, interval_days, ease, reps, lapses, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        cardId,
+        noteId,
+        String(row.front ?? ""),
+        String(row.back ?? ""),
+        row.due_at == null ? null : String(row.due_at),
+        Number(row.interval_days ?? 0),
+        Number(row.ease ?? 2.5),
+        Number(row.reps ?? 0),
+        Number(row.lapses ?? 0),
+        String(row.created_at ?? now),
       );
     }
     // Regeneration replaces the previous quiz wholesale, exactly like the
@@ -2145,26 +2200,49 @@ export async function listUnsyncedReviews(db: SQLiteDatabase, limit = 500) {
 }
 
 export async function markReviewsSynced(db: SQLiteDatabase, ids: string[]) {
-  for (const id of ids) {
-    await db.runAsync("UPDATE reviews SET synced = 1 WHERE id = ?", id);
-  }
+  if (!ids.length) return;
+  // One transaction for the batch: each autocommit is a separate write, so a
+  // flush that died halfway used to leave a queue that claimed half-synced.
+  await db.withTransactionAsync(async () => {
+    for (const id of ids) {
+      await db.runAsync("UPDATE reviews SET synced = 1 WHERE id = ?", id);
+    }
+  });
 }
 
-/** Apply server-replayed scheduling back onto the local cards. */
+/**
+ * Apply server-replayed scheduling back onto the local cards. The server is the
+ * only scheduler, so these values overwrite whatever the device computed: a card
+ * the response names but this device does not have is left to the deck re-pull,
+ * which is what also brings in a card another device created.
+ */
 export async function applyDeckScheduling(
   db: SQLiteDatabase,
   cards: { id: string; dueAt: string; ease: number; intervalDays: number; reps: number }[],
 ) {
-  for (const card of cards) {
-    await db.runAsync(
-      "UPDATE flashcards SET due_at = ?, ease = ?, interval_days = ?, reps = ? WHERE id = ?",
-      card.dueAt,
-      card.ease,
-      card.intervalDays,
-      card.reps,
-      card.id,
-    );
-  }
+  if (!cards.length) return;
+  await db.withTransactionAsync(async () => {
+    for (const card of cards) {
+      await db.runAsync(
+        "UPDATE flashcards SET due_at = ?, ease = ?, interval_days = ?, reps = ? WHERE id = ?",
+        card.dueAt,
+        card.ease,
+        card.intervalDays,
+        card.reps,
+        card.id,
+      );
+    }
+  });
+}
+
+/**
+ * Forget a card the server says this student does not own — deleted on another
+ * surface. No queued delete op: there is nothing left to tell the server.
+ */
+export async function dropLocalCard(db: SQLiteDatabase, cardId: string) {
+  await db.runAsync("DELETE FROM flashcards WHERE id = ?", cardId);
+  await db.runAsync("DELETE FROM reviews WHERE card_id = ?", cardId);
+  await db.runAsync("DELETE FROM card_queue WHERE card_id = ?", cardId);
 }
 
 // ---------------------------------------------------------------------------
@@ -2405,8 +2483,40 @@ function dayKey(iso: string) {
   return `${date.getFullYear()}-${month}-${date.getDate()}`;
 }
 
-/** Last-7-days cards reviewed and recall rate (non-lapse grades / graded). */
-export async function computeWeeklyProgress(db: SQLiteDatabase) {
+/** Grades and quiz results this device has recorded but not yet handed to the
+ * server. While any exist, the server's aggregates are behind the screen, so
+ * the local numbers stay the truthful ones. */
+async function hasPendingLocalProgress(db: SQLiteDatabase) {
+  const [reviews, attempts] = await Promise.all([
+    db.getFirstAsync<{ count: number }>(
+      "SELECT COUNT(*) as count FROM reviews WHERE synced = 0",
+    ),
+    db.getFirstAsync<{ count: number }>(
+      "SELECT COUNT(*) as count FROM quiz_attempts WHERE synced = 0",
+    ),
+  ]);
+  return (reviews?.count ?? 0) > 0 || (attempts?.count ?? 0) > 0;
+}
+
+/**
+ * Last-7-days cards reviewed and recall rate (non-lapse grades / graded).
+ *
+ * `summary` is the server's own week bucketed in this device's timezone — the
+ * chart the web draws, and the only one that also counts reviews made there. It
+ * is adopted only when nothing this device did is still queued, so a grade made
+ * seconds ago never disappears from the numbers on screen.
+ */
+export async function computeWeeklyProgress(
+  db: SQLiteDatabase,
+  summary?: ServerHomeSummary | null,
+) {
+  if (summary && !(await hasPendingLocalProgress(db))) {
+    return {
+      cardsReviewed: summary.weekly.reduce((sum, day) => sum + day.reviewed, 0),
+      recallPercent: summary.recallPercent ?? 0,
+      quizzesTaken: summary.quizzesWeek ?? 0,
+    };
+  }
   const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
   const reviewed = await db.getFirstAsync<{ count: number }>(
     "SELECT COUNT(*) as count FROM reviews WHERE reviewed_at >= ?",
@@ -2445,9 +2555,15 @@ export type HomeStats = {
 /**
  * Everything the Home tab reports, derived from SQLite in one pass so the
  * screen stays truthful offline. Day boundaries are local, matching
- * `computeWeeklyProgress`. The streak itself is server-synced (lib/streak.ts).
+ * `computeWeeklyProgress`; when `summary` is supplied and this device has
+ * nothing queued, the day-bucketed numbers come from the server instead, which
+ * is the same week and the same "today" the web shows. The streak itself is
+ * server-synced (lib/streak.ts).
  */
-export async function loadHomeStats(db: SQLiteDatabase): Promise<HomeStats> {
+export async function loadHomeStats(
+  db: SQLiteDatabase,
+  summary?: ServerHomeSummary | null,
+): Promise<HomeStats> {
   const now = new Date();
   const nowIso = now.toISOString();
   const startOfDay = new Date(now);
@@ -2456,6 +2572,9 @@ export async function loadHomeStats(db: SQLiteDatabase): Promise<HomeStats> {
   const weekStart = new Date(startOfDay);
   weekStart.setDate(weekStart.getDate() - 6);
   const weekStartIso = weekStart.toISOString();
+
+  const serverWeek =
+    summary && !(await hasPendingLocalProgress(db)) ? summary : null;
 
   const [
     dueRow,
@@ -2516,9 +2635,15 @@ export async function loadHomeStats(db: SQLiteDatabase): Promise<HomeStats> {
   return {
     due: dueRow?.count ?? 0,
     totalCards: totalRow?.count ?? 0,
-    reviewedToday: todayRow?.count ?? 0,
-    quizAttemptsToday: quizRow?.count ?? 0,
-    weekly: [...buckets.entries()].map(([date, reviewed]) => ({ date, reviewed })),
+    reviewedToday: serverWeek?.reviewedToday ?? (todayRow?.count ?? 0),
+    quizAttemptsToday:
+      serverWeek?.quizAttemptsToday ?? (quizRow?.count ?? 0),
+    weekly:
+      serverWeek?.weekly.map((day) => ({
+        date: day.date,
+        reviewed: day.reviewed,
+      })) ??
+      [...buckets.entries()].map(([date, reviewed]) => ({ date, reviewed })),
     cardsByNote,
     dueCardsByNote,
     quizNoteIds: new Set(quizNoteRows.map((row) => String(row.note_id))),

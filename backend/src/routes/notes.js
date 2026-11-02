@@ -388,7 +388,10 @@ notesRouter.get("/:noteId/study", async (req, res) => {
     });
     if (!note) return null;
     const flashcards = await tx.flashcard.findMany({
-      where: { noteId: note.id },
+      // Retired cards are the ones the student deleted. This pull is what a
+      // device rebuilds its local deck from, so leaking them would resurrect a
+      // deleted card on every re-pull.
+      where: { noteId: note.id, retiredAt: null },
       orderBy: { createdAt: "asc" },
     });
     const quizzes = await tx.quiz.findMany({

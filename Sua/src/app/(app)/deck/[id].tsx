@@ -28,6 +28,7 @@ import {
   type LocalQuiz,
 } from "../../../lib/notes";
 import { flushStudyProgress } from "../../../lib/progress";
+import { refreshStudySet } from "../../../lib/generate";
 
 export default function Deck() {
   const pv = usePalette();
@@ -57,8 +58,18 @@ export default function Deck() {
 
   useFocusEffect(
     useCallback(() => {
-      void load();
-    }, [load]),
+      // Opening a deck is the reconciliation point for the web→phone direction:
+      // hydration only pulls decks with no local cards, so without this the
+      // phone keeps showing a deck the student already changed on the web.
+      void (async () => {
+        try {
+          await refreshStudySet({ db, getAuthToken }, String(id));
+        } catch {
+          // Offline, or this deck has no server row yet: the local copy renders.
+        }
+        await load();
+      })();
+    }, [db, getAuthToken, id, load]),
   );
 
   const dueLabel =

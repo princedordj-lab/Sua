@@ -29,6 +29,7 @@ import type {
   UploadTask,
   WebPushSubscriptionInput,
 } from "./types";
+import { SERVER_BUSY, retryDelayMs, withRetry } from "./retry";
 
 export const API_URL = (
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api"
@@ -37,12 +38,26 @@ export const API_URL = (
 export class ApiError extends Error {
   status: number;
   detail: string;
+  /** The server's machine-readable error code, e.g. `SERVER_BUSY`. */
+  code: string | null;
+  /** `Retry-After` verbatim, so the retry helper can honour the server's pace. */
+  retryAfter: string | null;
+  /** When set, a failed screen load should re-ask itself rather than sit dead. */
+  retryAtMs: number | null;
 
-  constructor(message: string, status = 0, detail = "") {
+  constructor(
+    message: string,
+    status = 0,
+    detail = "",
+    extra: { code?: string | null; retryAfter?: string | null } = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.code = extra.code ?? null;
+    this.retryAfter = extra.retryAfter ?? null;
+    this.retryAtMs = this.retryAfter === null ? null : retryDelayMs(this.retryAfter);
   }
 }
 
@@ -54,6 +69,9 @@ type RequestOptions = Omit<RequestInit, "body"> & {
 
 function friendlyDetail(status: number, detail: string) {
   if (status === 401) return "Your session expired. Please sign in again.";
+  if (status === 503 && detail === SERVER_BUSY) {
+    return "Sua is busy finishing some database work. Trying again in a moment.";
+  }
   if (status >= 500) return "Something went wrong on the server. Please try again.";
   if (/prisma|foreign key|constraint|syntax error|database|relation|table/i.test(detail)) {
     return "Unable to complete that request. Please try again.";
@@ -61,10 +79,10 @@ function friendlyDetail(status: number, detail: string) {
   return detail || "Request failed. Please try again.";
 }
 
-export async function apiRequest<T>(
+async function requestOnce<T>(
   token: string,
   path: string,
-  options: RequestOptions = {},
+  options: RequestOptions,
 ): Promise<T> {
   const { body, rawBody, headers, ...rest } = options;
   let response: Response;
@@ -93,14 +111,35 @@ export async function apiRequest<T>(
     } catch {
       detail = "";
     }
+    const retryAfter = response.headers.get("Retry-After");
+    const extra = { code: detail || null, retryAfter };
     if (response.status === 409 && /sync notes/i.test(detail)) {
-      throw new ApiError("This note is still syncing. Please try again in a moment.", 409, detail);
+      throw new ApiError(
+        "This note is still syncing. Please try again in a moment.",
+        409,
+        detail,
+        extra,
+      );
     }
-    throw new ApiError(friendlyDetail(response.status, detail), response.status, detail);
+    throw new ApiError(friendlyDetail(response.status, detail), response.status, detail, extra);
   }
 
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+export async function apiRequest<T>(
+  token: string,
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
+  // One retry, only for the capacity 503, and only after the server's own
+  // `Retry-After`. Everything else is answered on the first attempt, because a
+  // second try at a rejected request is just a second failure to explain.
+  return withRetry(() => requestOnce<T>(token, path, options), {
+    attempts: 2,
+    signal: options.signal,
+  });
 }
 
 export const profileApi = {
@@ -241,17 +280,41 @@ export type AttemptInput = {
 };
 
 export const studyApi = {
-  homeSummary: (token: string) =>
-    apiRequest<HomeSummary>(token, "/study/home-summary"),
+  // The student's zone has to travel with the request: the server buckets
+  // "reviewed today" and the weekly chart on it, and UTC-only buckets are how
+  // the web and the phone disagreed about the same week.
+  homeSummary: (
+    token: string,
+    scope?: { timezone?: string; utcOffsetMinutes?: number },
+  ) => {
+    const query = new URLSearchParams();
+    if (scope?.timezone) query.set("timezone", scope.timezone);
+    if (typeof scope?.utcOffsetMinutes === "number")
+      query.set("utcOffsetMinutes", String(scope.utcOffsetMinutes));
+    const search = query.toString();
+    return apiRequest<HomeSummary>(
+      token,
+      `/study/home-summary${search ? `?${search}` : ""}`,
+    );
+  },
   sets: (token: string) =>
     apiRequest<{ sets: ServerStudySet[] }>(token, "/study/sets"),
   quiz: (token: string, quizId: string) =>
     apiRequest<ServerQuizDetail>(token, `/study/quizzes/${quizId}`),
-  due: (token: string, limit: number, aheadDays = 7) =>
-    apiRequest<ServerDueResponse>(
-      token,
-      `/study/due?limit=${limit}&ahead=${aheadDays}`,
-    ),
+  due: (
+    token: string,
+    limit: number,
+    aheadDays = 7,
+    scope?: { noteId?: string | null; courseId?: string | null },
+  ) => {
+    // Scoping the queue server-side is what makes a buried deck behave the same
+    // here as on the phone: taking the globally-most-due `limit` and filtering
+    // afterwards reports "nothing due" for cards that are due.
+    const query = new URLSearchParams({ limit: String(limit), ahead: String(aheadDays) });
+    if (scope?.noteId) query.set("noteId", scope.noteId);
+    if (scope?.courseId) query.set("courseId", scope.courseId);
+    return apiRequest<ServerDueResponse>(token, `/study/due?${query.toString()}`);
+  },
   syncReviews: (token: string, logs: ReviewLogInput[]) =>
     apiRequest<ServerReviewSyncResponse>(token, "/study/sync/reviews", {
       method: "POST",
