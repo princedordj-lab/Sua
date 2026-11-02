@@ -44,11 +44,18 @@ import {
   notePipeline,
   UserFacingError,
   JobYieldError,
+  isUserFacing,
 } from "../config/ai-pipeline.js";
 import { validateStudyPack } from "../config/study-pack-schema.js";
 import { checkSourceFidelity, normaliseForCompare } from "./numbers.js";
 import { MAX_TEXT_CHARS } from "./extract.js";
 import { purgeNoteRows, flushStorageDeletes } from "./note-deletion.js";
+import {
+  CheckpointWriteError,
+  mergeCheckpointKeys,
+  readJobCheckpoint,
+  writeCheckpointEntry,
+} from "./job-checkpoint.js";
 
 // ---------------------------------------------------------------------------
 // Reading chunks
@@ -296,18 +303,10 @@ async function patchCheckpoint(jobId, patch, { progressIncrement = 0 } = {}, dep
     await deps.saveMapCheckpoint(patch, progressIncrement);
     return;
   }
-  await prisma
-    .$executeRaw`
-      UPDATE "jobs"
-      SET "checkpoint" = COALESCE("checkpoint", '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb,
-          "progressDone" = "progressDone" + ${Math.max(0, Math.round(progressIncrement))},
-          "heartbeatAt" = NOW(),
-          "updatedAt" = NOW()
-      WHERE "id" = ${jobId}
-    `
-    .catch((error) => {
-      console.warn(`checkpoint write failed for job ${jobId}: ${error?.message ?? error}`);
-    });
+  // Throws CheckpointWriteError when the row cannot take the patch. Swallowing
+  // it (the old `.catch(warn)`) made a lost digest/section look saved and the
+  // pass kept spending calls on work the next pass had to redo.
+  await mergeCheckpointKeys(jobId, patch, { progressIncrement });
 }
 
 // ---------------------------------------------------------------------------
@@ -504,12 +503,17 @@ function mergeModel() {
  */
 export function partitionWaves(items, maxChars) {
   const budget = Math.max(1_000, Math.floor(maxChars * 0.85));
+  // Two caps, both needed: payload size keeps the request inside the model's
+  // context, item count keeps one request short enough to finish inside a
+  // runner pass. Without the item cap a dense document produced waves of ten
+  // digests whose single merge call could outlive the whole pass.
+  const maxItems = Math.max(2, Math.min(longDoc.reduceGroupSize, longDoc.reduceBatchItems));
   const waves = [];
   let wave = [];
   let chars = 0;
   for (const item of items) {
     const size = JSON.stringify(item).length + 1;
-    const full = wave.length && (chars + size > budget || wave.length >= longDoc.reduceGroupSize);
+    const full = wave.length && (chars + size > budget || wave.length >= maxItems);
     if (full) {
       waves.push(wave);
       wave = [];
@@ -570,8 +574,83 @@ function reduceBudget(promptChars = 0) {
   return Math.max(4_000, Math.min(fromChars, fromTokens) - Math.max(0, promptChars));
 }
 
-function reduceWaveKey(scope, level, index, items, model) {
-  return `${scope}:L${level}:W${index}:${sha1(JSON.stringify(items))}:${PROMPT_VERSION}:${model}`;
+function reduceWaveKey(scope, level, items, model) {
+  // The batch id is derived from what is being merged, never from its position
+  // in the wave list: a resume that repartitions (because a digest landed late)
+  // still finds every merge it already paid for, and two identical waves at one
+  // level collapse onto the same key instead of being merged twice.
+  return `${scope}:L${level}:B${stableBatchId(scope, level, items)}:${PROMPT_VERSION}:${model}`;
+}
+
+/** Stable identifier of one merge operation: scope + level + member content. */
+export function stableBatchId(scope, level, items) {
+  const members = (items ?? []).map((item) => sha1(JSON.stringify(item ?? null)).slice(0, 12));
+  return sha1(`${scope}|L${level}|${members.join(",")}`).slice(0, 16);
+}
+
+/** Section summary key: a finished section is skipped entirely on a resume. */
+function sectionSummaryKey(section, items) {
+  return `sectionDone:${section.id}:B${stableBatchId(`section:${section.id}`, 0, items)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Merge execution budget
+//
+// One runner pass is a fixed wall clock (a Vercel invocation). A merge that
+// starts with less than a full window left is clamped by the deadline, times
+// out, and spends an attempt instead of parking the job — so the pass ends by
+// itself, at a safe boundary, leaving time to persist and release.
+// ---------------------------------------------------------------------------
+
+function remainingBudget(deps) {
+  if (!deps?.deadline) return Infinity;
+  return deps.deadline - Date.now();
+}
+
+/** How long one merge request may take, never past this pass's deadline. */
+function mergeTimeoutFor(deps) {
+  const remaining = remainingBudget(deps) - longDoc.reduceReserveMs;
+  if (!Number.isFinite(remaining)) return longDoc.mergeTimeoutMs;
+  return Math.max(5_000, Math.min(longDoc.mergeTimeoutMs, remaining));
+}
+
+/**
+ * Throw a yield unless a merge can plausibly finish and be persisted inside
+ * this pass. Called before every model request and before every retry.
+ */
+function ensureMergeWindow(deps, log, reason = "budget") {
+  const remaining = remainingBudget(deps);
+  const needed = longDoc.reduceMinWindowMs + longDoc.reduceReserveMs;
+  if (remaining >= needed) return;
+  const remainingMs = Number.isFinite(remaining) ? Math.max(0, Math.round(remaining)) : Infinity;
+  console.log(
+    `[reduce] yield job=${log?.jobId ?? "-"} stage=merging scope=${log?.scope ?? "-"} level=${log?.level ?? "-"} batch=${log?.batch ?? "-"} reason=${reason} remainingMs=${remainingMs} needMs=${needed}`,
+  );
+  throw new JobYieldError("merging", {
+    detail: `scope=${log?.scope ?? "-"} level=${log?.level ?? "-"} batch=${log?.batch ?? "-"} remainingMs=${remainingMs} needMs=${needed}`,
+  });
+}
+
+/**
+ * A transient provider failure is worth one more attempt. Rate limits are
+ * parked by the pipeline (they are project-wide, so retrying immediately is
+ * pointless), and auth/quota/bad-request are permanent configuration errors
+ * that must not be retried at all.
+ */
+function isRetryableMergeError(error) {
+  const kind = error?.kind;
+  if (kind === "transient" || kind === "timeout") return true;
+  if (kind) return false;
+  return isTransientNetworkError(error);
+}
+
+function isTransientNetworkError(error) {
+  const code = error?.code;
+  if (code === "ETIMEDOUT" || code === "ECONNRESET" || code === "ECONNREFUSED" || code === "EAI_AGAIN") {
+    return true;
+  }
+  const message = String(error?.message ?? "").toLowerCase();
+  return message.includes("fetch failed") || message.includes("socket hang up");
 }
 
 function isSplittableReduceError(error) {
@@ -582,81 +661,164 @@ function isSplittableReduceError(error) {
 }
 
 /**
- * Persist one wave by path instead of rewriting the whole reduce map. The
- * checkpoint can hold hundreds of waves on a long file; only this key changes
- * per call, and the heartbeat proves the pass is alive.
+ * Whether a merge failure may be answered from local material. These say "this
+ * request or response was too big, too slow or too badly shaped", not "your key
+ * or your account is wrong": the latter must fail the job rather than quietly
+ * writing a note the student believes is complete.
  */
-async function patchReduceEntry(job, key, value, deps) {
-  if (deps.saveReduceEntry) {
-    await deps.saveReduceEntry(key, value);
-    return;
+function isDegradableReduceError(error) {
+  if (!error || error.yield || error.cancelled) return false;
+  if (isUserFacing(error)) return false;
+  const kind = error?.kind;
+  if (
+    kind === "auth" ||
+    kind === "quota" ||
+    kind === "bad_request" ||
+    kind === "rate_limit" ||
+    kind === "checkpoint_write"
+  ) {
+    return false;
   }
-  await prisma
-    .$executeRaw`
-      UPDATE "jobs"
-      SET "checkpoint" = jsonb_set(
-            COALESCE("checkpoint", '{}'::jsonb),
-            ${`{reduce,${key}}`}::text[],
-            ${JSON.stringify(value)}::jsonb,
-            true
-          ),
-          "heartbeatAt" = NOW(),
-          "updatedAt" = NOW()
-      WHERE "id" = ${job.id}
-    `
-    .catch((error) => {
-      console.warn(`reduce checkpoint write failed for job ${job.id}: ${error?.message ?? error}`);
-    });
+  if (kind) return true;
+  return isSplittableReduceError(error) || error?.name === "ReduceSplitError";
 }
 
 /**
- * Merge several digests into one summary of the same shape. Retries once at
- * temperature 0. Inputs are wave-sized by partitionWaves; a lone oversized
- * digest is compacted (slimDigest), never truncated. A continued failure is a
- * split signal for the hierarchy, not a dead end.
+ * Persist one merge result by path instead of rewriting the whole reduce map.
+ *
+ * The write is durable or it throws: a merge whose result is still only in
+ * memory is not finished, and pretending otherwise is what made a long document
+ * re-merge the same waves on every pass. Returns the value the row holds, which
+ * may be a newer one another attempt persisted first.
  */
-async function mergeDigests({ digests, prompt, step, deps }) {
+async function patchReduceEntry(job, key, value, deps) {
+  const started = Date.now();
+  try {
+    if (deps.saveReduceEntry) {
+      await deps.saveReduceEntry(key, value);
+      await deps.onCheckpoint?.({ reduce: { [key]: value } });
+      return value;
+    }
+    const written = await writeCheckpointEntry(job.id, "reduce", key, value);
+    await deps.onCheckpoint?.({ reduce: { [key]: written.value } });
+    if (!written.stored) {
+      console.log(
+        `[reduce] checkpoint kept existing batch job=${job.id} batch=${batchLabel(key)} adopting=${written.value === value ? "same" : "newer"}`,
+      );
+    }
+    return written.value ?? value;
+  } catch (error) {
+    console.warn(
+      `[reduce] checkpoint write failed job=${job.id} batch=${batchLabel(key)} ms=${Date.now() - started} code=${error?.kind ?? error?.name ?? "error"}`,
+    );
+    if (error instanceof CheckpointWriteError) throw error;
+    throw new CheckpointWriteError(
+      `reduce checkpoint write failed for job ${job.id}: ${error?.message ?? error}`,
+      { jobId: job.id, path: `reduce.${batchLabel(key)}`, cause: error },
+    );
+  }
+}
+
+/** Short, log-safe label for a checkpoint key (scope + batch id only). */
+function batchLabel(key) {
+  const parts = String(key ?? "").split(":");
+  const batch = parts.find((part) => /^B[0-9a-f]{8,}$/.test(part)) ?? sha1(key ?? "").slice(0, 8);
+  return `${parts[0] ?? "?"}/${batch}`;
+}
+
+/**
+ * Merge several digests into one summary of the same shape. One bounded
+ * transient retry (5xx/timeout) with backoff, then a stricter temperature-0
+ * repair pass for an unusable shape, then a split signal for the hierarchy.
+ * Inputs are wave-sized by partitionWaves; a lone oversized digest is compacted
+ * (slimDigest), never truncated.
+ */
+async function mergeDigests({ digests, prompt, step, deps, log = null }) {
   const budget = reduceBudget(prompt.length);
   let payload = JSON.stringify(digests);
   if (payload.length > budget) {
     const share = Math.floor(budget / Math.max(1, digests.length));
     payload = JSON.stringify(digests.map((digest) => slimDigest(digest, share)));
   }
-  const attempt = async (stricter, cutOff = false) => {
-    const started = Date.now();
-    let result;
-    try {
-      result = await chatCompletion({
-        system:
-          "You merge structured study material for a university student revising for exams. " +
-          "Output ONLY valid JSON matching the requested shape — no prose, no code fences." +
-          (stricter ? " Schema exactly as instructed. No extra keys." : ""),
-        user:
-          `${prompt}\n\n` +
-          (cutOff
-            ? "Your previous answer was cut off. Return a shorter JSON object: at most 6 topics, at most 5 points per topic.\n\n"
-            : "") +
-          `=== DIGESTS ===\n${payload}`,
-        model: mergeModel(),
-        json: true,
-        temperature: stricter ? 0 : 0.2,
-        maxTokens: notePipeline.studySetMaxTokens,
-        timeoutMs: timeoutForDeadline(deps.deadline),
-      });
-    } catch (error) {
-      await deps.recordFailure?.(step, error, Date.now() - started);
-      throw error;
+  // Last guard before the request goes out: an oversized payload is answered by
+  // splitting the wave (the hierarchy), never by sending it and hoping the
+  // provider keeps up. Slicing the JSON is still forbidden — it would corrupt
+  // the input.
+  if (payload.length > longDoc.mergePayloadMaxChars) {
+    throw new ReduceSplitError(
+      `Merge payload of ${payload.length} chars exceeds ${longDoc.mergePayloadMaxChars}`,
+    );
+  }
+  let attempts = 0;
+  const call = async (stricter, cutOff) => {
+    for (;;) {
+      attempts += 1;
+      const started = Date.now();
+      try {
+        const result = await chatCompletion({
+          system:
+            "You merge structured study material for a university student revising for exams. " +
+            "Output ONLY valid JSON matching the requested shape — no prose, no code fences." +
+            (stricter ? " Schema exactly as instructed. No extra keys." : ""),
+          user:
+            `${prompt}\n\n` +
+            (cutOff
+              ? "Your previous answer was cut off. Return a shorter JSON object: at most 6 topics, at most 5 points per topic.\n\n"
+              : "") +
+            `=== DIGESTS ===\n${payload}`,
+          model: mergeModel(),
+          json: true,
+          temperature: stricter ? 0 : 0.2,
+          maxTokens: notePipeline.studySetMaxTokens,
+          timeoutMs: mergeTimeoutFor(deps),
+        });
+        await deps.record(stricter ? `${step}_retry` : step, result);
+        if (log) {
+          console.log(
+            `[reduce] merge job=${log.jobId} stage=merging scope=${log.scope} level=${log.level} batch=${log.batch} model=${result.model ?? mergeModel()} items=${digests.length} chars=${payload.length} ms=${Date.now() - started} attempt=${attempts}`,
+          );
+        }
+        return result;
+      } catch (error) {
+        await deps.recordFailure?.(step, error, Date.now() - started);
+        console.warn(
+          `[reduce] merge failed job=${log?.jobId ?? "-"} stage=merging scope=${log?.scope ?? "-"} level=${log?.level ?? "-"} batch=${log?.batch ?? "-"} model=${mergeModel()} items=${digests.length} ms=${Date.now() - started} attempt=${attempts} code=${error?.kind ?? error?.name ?? "error"} status=${Number.isFinite(error?.status) ? error.status : "-"}`,
+        );
+        if (!isRetryableMergeError(error) || attempts >= Math.max(1, longDoc.mergeAttempts)) {
+          throw error;
+        }
+        // A retry that cannot finish inside this pass is a yield, not a
+        // failure: nothing is lost and the wave resumes next pass without
+        // spending one of the job's attempts.
+        ensureMergeWindow(deps, log, "retry");
+        // Harnesses shorten this; production keeps a 1.5s×attempt backoff so a
+        // provider flap clears without a hot retry loop.
+        const backoff = Math.max(0, deps.mergeRetryDelayMs ?? 1_500) * attempts;
+        if (log) {
+          console.log(
+            `[reduce] merge retry job=${log.jobId} batch=${log.batch} attempt=${attempts + 1} backoffMs=${backoff} code=${error?.kind ?? "error"}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+      }
     }
-    await deps.record(stricter ? `${step}_retry` : step, result);
+  };
+  const attemptOutcome = async (stricter, cutOff = false) => {
+    const result = await call(stricter, cutOff);
     const parsed = parseJsonObject(result.text);
     const problem = parsed ? validateDigest(parsed) : "unparseable JSON";
     const endedCleanly = /\}\s*$/.test(String(result.text).trim());
+    if (problem) {
+      console.warn(
+        `[reduce] merge invalid job=${log?.jobId ?? "-"} batch=${log?.batch ?? "-"} attempt=${attempts} repair=${stricter ? "final" : "retry"} reason=${String(problem).slice(0, 80)}`,
+      );
+    }
     return { parsed, problem, cutOff: Boolean(problem) && !endedCleanly };
   };
-  let outcome = await attempt(false);
-  if (outcome.problem) outcome = await attempt(true, outcome.cutOff);
+  let outcome = await attemptOutcome(false);
+  if (outcome.problem) outcome = await attemptOutcome(true, outcome.cutOff);
   if (outcome.problem) throw new ReduceSplitError(`Merge failed validation (${outcome.problem})`);
-  return {
+  const digest = {
     range: String(outcome.parsed.range ?? ""),
     topics: outcome.parsed.topics.map((topic) => ({
       heading: String(topic?.heading ?? "").trim() || "Untitled topic",
@@ -680,6 +842,65 @@ async function mergeDigests({ digests, prompt, step, deps }) {
     })),
     unclear: (outcome.parsed.unclear ?? []).slice(0, 20).map(String),
   };
+  // Output side of the budget: a merge must not hand the next level a payload
+  // as large as the one it received, or the hierarchy never converges.
+  const shrunk = shrinkMergedDigest(digest, payload.length);
+  if (log && shrunk.topics.length !== digest.topics.length) {
+    console.warn(`[reduce] merge lost topics job=${log.jobId} batch=${log.batch}`);
+  }
+  return { digest: shrunk, inputChars: payload.length, attempts };
+}
+
+/**
+ * Compact a merge result so a level always shrinks the hierarchy, while every
+ * topic heading, term and formula survives: section boundaries and technical
+ * content are what make the note usable, so the optional prose goes first.
+ */
+export function shrinkMergedDigest(digest, inputChars) {
+  const target = Math.max(
+    1_500,
+    Math.min(
+      Math.floor(Number(inputChars || 0) * longDoc.mergeShrinkRatio),
+      reduceBudget(0),
+    ),
+  );
+  const copy = {
+    ...digest,
+    topics: (digest?.topics ?? []).map((topic) => ({
+      ...topic,
+      points: [...(topic.points ?? [])],
+      terms: [...(topic.terms ?? [])],
+      formulas: [...(topic.formulas ?? [])],
+      examples: [...(topic.examples ?? [])],
+      emphasised: [...(topic.emphasised ?? [])],
+    })),
+  };
+  const fits = () => JSON.stringify(copy).length <= target;
+  if (fits() || !copy.topics.length) return copy;
+
+  // 1. Optional colour first: examples and bold-emphasis carry no facts.
+  for (const topic of copy.topics) {
+    topic.examples = [];
+    topic.emphasised = [];
+  }
+  if (fits()) return copy;
+
+  // 2. Long point lists, shortest survivors kept at one each so no topic
+  //    disappears from the outline.
+  for (const cap of [6, 4, 3, 2]) {
+    for (const topic of copy.topics) topic.points = topic.points.slice(0, cap);
+    if (fits()) return copy;
+  }
+  for (const topic of copy.topics) topic.points = topic.points.slice(0, 1);
+
+  // 3. Open questions and the per-topic source line are the last to go.
+  copy.unclear = [];
+  for (const topic of copy.topics) {
+    topic.source = "";
+    topic.terms = topic.terms.slice(0, 6);
+    topic.formulas = topic.formulas.slice(0, 6);
+  }
+  return copy;
 }
 
 /**
@@ -731,29 +952,33 @@ async function reduceLevel({
       await deps.setStage("merging", { done: index + 1, total });
       continue;
     }
-    const key = reduceWaveKey(scope, level, index, wave, model);
-    const cached = saved[key];
-    if (!cached && deps.deadline && Date.now() > deps.deadline) {
-      throw new JobYieldError("merging");
-    }
-    let result = cached;
+    const key = reduceWaveKey(scope, level, wave, model);
+    const batch = stableBatchId(scope, level, wave);
+    const log = { jobId: job.id, scope, level, batch, index, total };
+    let result = saved[key];
     if (!result) {
+      // Check the pass budget BEFORE spending a request: a merge that starts
+      // with no window left is clamped to the deadline, times out, and burns an
+      // attempt instead of parking finished work.
+      ensureMergeWindow(deps, log);
       const prompt = promptFor(index, total, level);
       const step = stepFor ? stepFor(level, index) : level === 0 ? "reduce" : "reduce_wave";
       try {
-        result = await withStage(deps, "merging", () =>
-          mergeDigests({ digests: wave, prompt, step, deps }),
+        const merged = await withStage(deps, "merging", () =>
+          mergeDigests({ digests: wave, prompt, step, deps, log }),
         );
+        result = merged.digest;
       } catch (error) {
+        if (error?.yield || error?.cancelled) throw error;
         if (!isSplittableReduceError(error) || wave.length < 2) throw error;
         console.warn(
-          `[reduce] job=${job.id} scope=${scope} level=${level} wave=${index} split=${wave.length} code=${error?.kind ?? error?.name ?? "error"}`,
+          `[reduce] split job=${job.id} scope=${scope} level=${level} batch=${batch} items=${wave.length} code=${error?.kind ?? error?.name ?? "error"}`,
         );
         const mid = Math.ceil(wave.length / 2);
         const left = await reduceLevel({
           items: wave.slice(0, mid),
           level: level + 1,
-          scope: `${scope}:S${index}a`,
+          scope: `${scope}:S${batch}a`,
           sourceType,
           courseContext,
           deps,
@@ -766,7 +991,7 @@ async function reduceLevel({
         const right = await reduceLevel({
           items: wave.slice(mid),
           level: level + 1,
-          scope: `${scope}:S${index}b`,
+          scope: `${scope}:S${batch}b`,
           sourceType,
           courseContext,
           deps,
@@ -781,7 +1006,7 @@ async function reduceLevel({
             ? await reduceLevel({
                 items: [left, right],
                 level: level + 1,
-                scope: `${scope}:S${index}m`,
+                scope: `${scope}:S${batch}m`,
                 sourceType,
                 courseContext,
                 deps,
@@ -794,8 +1019,10 @@ async function reduceLevel({
             : (left ?? right);
       }
       if (result) {
+        // Durable or throw: `saved` only ever holds what the row holds, so a
+        // resumed pass cannot mistake an unwritten merge for finished work.
+        result = await patchReduceEntry(job, key, result, deps);
         saved[key] = result;
-        await patchReduceEntry(job, key, result, deps);
       }
     }
     results.push(result);
@@ -825,61 +1052,131 @@ async function reduceLevel({
  * waves that have not finished yet.
  */
 export async function reduceDigests({ job, digests, groups, sections, sourceType, courseContext, deps }) {
-  const saved = { ...(job.checkpoint?.reduce ?? {}) };
+  // The job row, not the snapshot this pass was claimed with, is the source of
+  // truth for finished merges: a resume (or a second attempt that already
+  // advanced the checkpoint) must never re-pay for a wave the row holds.
+  // A harness that keeps its own reduce store (`saveReduceEntry`) is the same
+  // source of truth, so it is not read twice.
+  const fresh = deps?.saveReduceEntry ? null : await readJobCheckpoint(job.id).catch(() => null);
+  const saved = { ...(job.checkpoint?.reduce ?? {}), ...(fresh?.reduce ?? {}) };
   const digestKey = (group) => digestCacheKey(group, bulkModel());
   const summariesFor = {};
+  const degraded = [];
+  let firstDegradation = null;
+  let sectionsWithEntries = 0;
 
   const sectionPrompt = (index, count) =>
     reducePrompt({ course: courseContext, sourceType, groupIndex: index, groupCount: count });
+
+  /**
+   * Section-level fallback: a section whose merge cannot be produced by the
+   * model is folded locally (no request, nothing lost — every topic, point,
+   * term and formula of the digests survives) and the note says so. A permanent
+   * configuration error is NOT degraded: it fails the job instead of shipping a
+   * note that pretends to be complete.
+   */
+  const localSummary = (entries) =>
+    entries.reduce((acc, entry) => (acc ? mergeSummaries(acc, entry) : entry), null);
+
   for (const section of sections) {
     const entries = groups
       .filter((group) => group.sectionId === section.id)
       .map((group) => digests[digestKey(group)])
       .filter(Boolean);
     if (!entries.length) continue;
+    sectionsWithEntries += 1;
 
-    const summary = await reduceLevel({
-      items: entries,
-      level: 0,
-      scope: `section:${section.id}`,
-      sourceType,
-      courseContext,
-      deps,
-      job,
-      saved,
-      promptFor: sectionPrompt,
-      stepFor: (level) => (level === 0 ? "reduce" : "reduce_wave"),
-    });
+    // A finished section is skipped without a single call: its summary was
+    // persisted under a content-derived key, so a resume never re-merges it.
+    const doneKey = sectionSummaryKey(section, entries);
+    let summary = saved[doneKey];
+    if (!summary) {
+      try {
+        summary = await reduceLevel({
+          items: entries,
+          level: 0,
+          scope: `section:${section.id}`,
+          sourceType,
+          courseContext,
+          deps,
+          job,
+          saved,
+          promptFor: sectionPrompt,
+          stepFor: (level) => (level === 0 ? "reduce" : "reduce_wave"),
+        });
+      } catch (error) {
+        if (error?.yield || error?.cancelled || !isDegradableReduceError(error)) throw error;
+        summary = localSummary(entries);
+        degraded.push(section.title || section.id);
+        firstDegradation = firstDegradation ?? error;
+        console.warn(
+          `[reduce] section degraded job=${job.id} section=${section.id} items=${entries.length} code=${error?.kind ?? error?.name ?? "error"}`,
+        );
+      }
+      if (summary) {
+        summary = await patchReduceEntry(job, doneKey, summary, deps);
+        saved[doneKey] = summary;
+      }
+    }
     if (summary) summariesFor[section.id] = { summary, section };
   }
 
   const summaryList = Object.values(summariesFor);
-  const overviewKey = `overview:${PROMPT_VERSION}:${mergeModel()}`;
-  let overview = saved[overviewKey];
+  // A degraded section is a partial answer. If the model could not merge the
+  // document at all (every section, or more than the allowed share), this is
+  // not "some parts were merged locally" — it is a broken provider, and the
+  // job must retry instead of shipping a note that looks complete.
+  if (degraded.length && sectionsWithEntries) {
+    const share = degraded.length / sectionsWithEntries;
+    if (share > longDoc.maxDegradedSectionShare) {
+      console.warn(
+        `[reduce] too many degraded sections job=${job.id} degraded=${degraded.length}/${sectionsWithEntries} code=${firstDegradation?.kind ?? firstDegradation?.name ?? "error"}`,
+      );
+      throw firstDegradation ?? new Error("The AI could not merge this document");
+    }
+  }
+  // The overview belongs to the summaries it was built from: a section that
+  // changed (or landed late) produces a different key, so a stale overview can
+  // never be reused for a different document state.
+  const overviewKey = summaryList.length
+    ? `overview:${stableBatchId("overview", 0, summaryList.map((item) => item.summary))}:${PROMPT_VERSION}:${mergeModel()}`
+    : null;
+  let overview = overviewKey ? saved[overviewKey] : null;
   if (!overview && summaryList.length) {
     const overviewPromptFor = (index, count, level) =>
       level === 0
         ? overviewPrompt({ course: courseContext, sourceType, sectionCount: summaryList.length })
         : reducePrompt({ course: courseContext, sourceType, groupIndex: index, groupCount: count });
-    overview = await reduceLevel({
-      items: summaryList.map((item) => item.summary),
-      level: 0,
-      scope: "overview",
-      sourceType,
-      courseContext,
-      deps,
-      job,
-      saved,
-      promptFor: overviewPromptFor,
-      stepFor: (level) => (level === 0 ? "overview" : "overview_wave"),
-    });
+    try {
+      overview = await reduceLevel({
+        items: summaryList.map((item) => item.summary),
+        level: 0,
+        scope: "overview",
+        sourceType,
+        courseContext,
+        deps,
+        job,
+        saved,
+        promptFor: overviewPromptFor,
+        stepFor: (level) => (level === 0 ? "overview" : "overview_wave"),
+      });
+    } catch (error) {
+      if (error?.yield || error?.cancelled || !isDegradableReduceError(error)) throw error;
+      overview = summaryList
+        .map((item) => item.summary)
+        .reduce((acc, item) => (acc ? mergeSummaries(acc, item) : item), null);
+      degraded.push("Overview");
+      console.warn(
+        `[reduce] overview degraded job=${job.id} sections=${summaryList.length} code=${error?.kind ?? error?.name ?? "error"}`,
+      );
+    }
     if (overview) {
+      overview = await patchReduceEntry(job, overviewKey, overview, deps);
       saved[overviewKey] = overview;
-      await patchReduceEntry(job, overviewKey, overview, deps);
     }
   }
 
-  return { summariesFor, summaryList, overview };
+  return { summariesFor, summaryList, overview, degraded };
 }
 
 function withStage(deps, stage, fn) {
@@ -1786,6 +2083,13 @@ export async function runLongDocJob({ job, note, kind, clerkId, deps, source: pr
   await assertJobActive(job);
 
   const sectionNotices = notices.slice();
+  if (reduce.degraded?.length) {
+    // Honest, not silent: the sections are all present (nothing was dropped),
+    // but they were combined locally instead of by the model.
+    sectionNotices.push(
+      `> ${reduce.degraded.length} part(s) were combined locally because the AI could not merge them. Everything from the file is here, but those parts read as lists rather than prose.`,
+    );
+  }
   if (sectionResult.sampled) {
     sectionNotices.push(
       "> Some sections use a sampled portion of the source to fit the AI limits. Check against the file.",
@@ -1842,6 +2146,7 @@ export async function runLongDocJob({ job, note, kind, clerkId, deps, source: pr
       coverage,
       notices: sectionNotices,
       fidelityNotice: sectionNotices.some((notice) => notice.includes("numbers")),
+      reduceDegraded: reduce.degraded?.length ?? 0,
       startedMs,
       groupId: null,
       truncated,
@@ -1879,7 +2184,7 @@ function clampChars(value, max) {
   return String(value ?? "").slice(0, max);
 }
 
-function longDocMeta({ mode, pagesTotal, pagesUsed, sections, sectionsWritten, sectionsFailed, writtenNotes, lost, coverage, notices, fidelityNotice, startedMs, groupId, truncated }) {
+function longDocMeta({ mode, pagesTotal, pagesUsed, sections, sectionsWritten, sectionsFailed, writtenNotes, lost, coverage, notices, fidelityNotice, reduceDegraded = 0, startedMs, groupId, truncated }) {
   return {
     promptVersion: PROMPT_VERSION,
     sourceType: "file",
@@ -1908,6 +2213,7 @@ function longDocMeta({ mode, pagesTotal, pagesUsed, sections, sectionsWritten, s
     coverage: Number(coverage.toFixed(3)),
     lostRanges: lost.slice(0, 10),
     notices: (notices ?? []).map((notice) => notice.replace(/^> /, "")).slice(0, 5),
+    reduceDegraded: Number(reduceDegraded) || 0,
     groupId,
     durationMs: Date.now() - startedMs,
   };

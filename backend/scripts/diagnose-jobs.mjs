@@ -90,7 +90,10 @@ for (const job of jobs) {
       errorCode: job.errorCode,
       digests: Object.keys(cp.digests ?? {}).length,
       digestFailures: Object.keys(cp.digestFailures ?? {}).length,
-      reduceWaves: reduce.filter((key) => !key.startsWith("overview")).length,
+      sectionSummaries: reduce.filter((key) => key.startsWith("sectionDone:")).length,
+      reduceWaves: reduce.filter(
+        (key) => !key.startsWith("overview") && !key.startsWith("sectionDone:"),
+      ).length,
       overviewWaves: reduce.filter((key) => key.startsWith("overview")).length,
       recovery: cp.recovery ?? null,
       rateLimitPasses: cp.rateLimitPasses ?? 0,

@@ -63,6 +63,35 @@ export const longDoc = {
   // Reduce stage.
   reduceMaxChars: int("REDUCE_MAX_CHARS", 40_000),
   reduceGroupSize: int("REDUCE_GROUP_SIZE", 10),
+  // A merge wave is capped by item count as well as by payload size, so one
+  // request cannot grow with the document. Five digest-shaped items is the
+  // sweet spot: the prompt stays well inside the cheap model's context and the
+  // request finishes inside a single runner pass, which is what turns a
+  // 60-wave merge from "yields forever" into three or four passes.
+  reduceBatchItems: int("REDUCE_BATCH_ITEMS", 5),
+  // Output-side compaction. A merge returns roughly the shape it received, so
+  // without a cap a verbose model can hand back almost the whole payload and
+  // the next level merges an even bigger wave — the hierarchy then never
+  // shrinks. Results are trimmed (optional detail first, headings and terms
+  // always kept) to this share of their input.
+  mergeShrinkRatio: ratio("MERGE_SHRINK_RATIO", 0.6),
+  // Bounded retries for a transient provider failure (5xx/timeout) on one
+  // merge call. Rate limits are parked by the pipeline instead, and auth/quota
+  // are terminal, so this never becomes an infinite retry.
+  mergeAttempts: int("MERGE_ATTEMPTS", 2),
+  // Ceiling for one merge request, and the time kept back at the end of a pass
+  // for the checkpoint write + release so a yield never loses a finished wave.
+  mergeTimeoutMs: int("MERGE_TIMEOUT_MS", 120_000),
+  // Hard ceiling for one merge request's payload. Waves are already sized by
+  // REDUCE_MAX_CHARS and by item count, but a dense merge result can still be
+  // large; anything above this is split rather than sent, which keeps a single
+  // request inside the model's comfort zone and inside one pass.
+  mergePayloadMaxChars: int("MERGE_PAYLOAD_MAX_CHARS", 40_000),
+  reduceReserveMs: int("REDUCE_RESERVE_MS", 8_000),
+  // A merge that cannot get at least this long is not worth starting: it would
+  // be clamped to the deadline and time out, which costs work instead of
+  // parking it.
+  reduceMinWindowMs: int("REDUCE_MIN_WINDOW_MS", 20_000),
   // Coverage and verification.
   minCoverage: ratio("MIN_COVERAGE", 0.85),
   // Generate-stage word caps for long outputs.
@@ -75,6 +104,10 @@ export const longDoc = {
   sectionMaterialMaxChars: int("SECTION_MATERIAL_MAX_CHARS", 34_000),
   maxSectionWrites: int("MAX_SECTION_WRITES", 24),
   maxFailedSectionRatio: ratio("MAX_FAILED_SECTION_RATIO", 0.25),
+  // Share of sections that may be merged locally (no model) before the reduce
+  // stage treats the provider as broken instead of "some parts were folded".
+  // A note is only reported ready when the model did most of the merging.
+  maxDegradedSectionShare: ratio("MAX_DEGRADED_SECTION_SHARE", 0.5),
   get sectionConcurrency() {
     return int("SECTION_CONCURRENCY", this.aiConcurrency);
   },
@@ -247,13 +280,16 @@ export function isUserFacing(error) {
  * Kept out of the student-facing vocabulary on purpose.
  */
 export class JobYieldError extends Error {
-  constructor(stage = "run", { retryAfterMs = null, reason = null } = {}) {
+  constructor(stage = "run", { retryAfterMs = null, reason = null, detail = null } = {}) {
     super(`Job yielded at ${stage}`);
     this.name = "JobYieldError";
     this.yield = true;
     this.stage = stage;
     this.retryAfterMs = retryAfterMs;
     this.reason = reason;
+    // Free-form, id-only context for the yield log (level, batch id, remaining
+    // ms). Never content: the student's text must not reach the log.
+    this.detail = detail;
   }
 }
 
