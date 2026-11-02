@@ -60,10 +60,6 @@ export function invalidatePrefix(prefix: string) {
   invalidate((key) => key.startsWith(prefix));
 }
 
-export function invalidateAll() {
-  invalidate(() => true);
-}
-
 /**
  * The numbers a deck edit moves: this deck on the note and deck screens, the
  * study-set list, the due queue, and both summary counts. `courseId` is optional
@@ -103,9 +99,20 @@ export function invalidateNotes(courseId?: string | null) {
   }
 }
 
-/** A finished/failed job: the note, its deck, its course list, and the summaries. */
+/**
+ * A finished/failed job: the note, its deck, its course list, and the summaries.
+ * `deck-note:` is the deck screen's own copy of the row, and `quiz:` is the quiz
+ * the job just rewrote — both are separate resources, so a student reading either
+ * when generation lands has to be re-asked or they keep studying the old output.
+ */
 export function invalidateNoteOutputs(noteId: string, courseId?: string | null) {
-  for (const prefix of [`note:${noteId}`, `create-note:${noteId}`, `job-note:${noteId}`]) {
+  for (const prefix of [
+    `note:${noteId}`,
+    `create-note:${noteId}`,
+    `job-note:${noteId}`,
+    `deck-note:${noteId}`,
+    "quiz:",
+  ]) {
     invalidatePrefix(prefix);
   }
   invalidateDeck(noteId, courseId);
