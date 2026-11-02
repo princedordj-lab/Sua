@@ -11,6 +11,7 @@ import type {
   ServerNote,
   ServerCourse,
   ServerCourseCreate,
+  ServerCourseNotesPage,
   ServerProfile,
   ServerProfileUpdate,
   ServerReviewSyncResponse,
@@ -237,8 +238,16 @@ export const streakApi = {
 };
 
 export const notesApi = {
-  listForCourse: (token: string, courseId: string) =>
-    apiRequest<ServerNote[]>(`/notes/course/${courseId}`, { token }),
+  // `since` turns a full re-download of the course into "what moved". It is
+  // only ever a value the server handed back, and an omitted one keeps the
+  // whole-list behaviour the other callers rely on.
+  listForCourse: (token: string, courseId: string, since?: string | null) => {
+    const query = since ? `?since=${encodeURIComponent(since)}` : "";
+    return apiRequest<ServerCourseNotesPage>(
+      `/notes/course/${courseId}${query}`,
+      { token },
+    );
+  },
   sync: (token: string, changes: NoteSyncChange[]) =>
     apiRequest<{ notes: ServerNote[]; results?: SyncResult[] }>("/notes/sync", {
       method: "POST",

@@ -217,6 +217,29 @@ app.use((err, req, res, _next) => {
   if (err?.status === 409 && err?.code === "ACCOUNT_CONFLICT") {
     return res.status(409).json({ error: "ACCOUNT_CONFLICT", message: err.message });
   }
+  // A transaction that expired before committing, or a connection that never
+  // arrived, is this API being out of database capacity — not a defect in the
+  // request and not the student's network. Answering a generic 500 made the
+  // client's transport-error path claim "check your connection" while the phone
+  // was online, so the one failure a retry actually fixes was reported as the
+  // one failure a retry can't fix.
+  //
+  // Both P2028 flavours plus the driver's own acquire timeout, which arrives as
+  // a `PrismaClientKnownRequestError`-shaped failure without a P2028 code because
+  // pg reported it before a transaction ever started.
+  const message = String(err?.message ?? "");
+  const capacityLimited =
+    err?.code === "P2028" ||
+    message.includes("Unable to start a transaction") ||
+    message.includes("expired transaction") ||
+    message.includes("timeout exceeded when trying to connect");
+  if (capacityLimited) {
+    res.set("Retry-After", "5");
+    return res.status(503).json({
+      error: "SERVER_BUSY",
+      message: "Sua is busy finishing some database work. Please try again.",
+    });
+  }
   res.status(500).json({ error: "INTERNAL", message: "Something went wrong" });
 });
 

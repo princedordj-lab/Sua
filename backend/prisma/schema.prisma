@@ -1,5 +1,10 @@
 generator client {
   provider            = "prisma-client"
+  // Load-bearing: makes every `include` cost one statement instead of two by
+  // joining the relation (@prisma/adapter-pg reports supportsRelationJoins).
+  // Inside withUser each statement is a WAN round trip to Neon, so removing
+  // this line silently doubles the round trips on note reads.
+  previewFeatures     = ["relationJoins"]
   output              = "../src/generated/prisma"
   runtime             = "nodejs"
   moduleFormat        = "esm"

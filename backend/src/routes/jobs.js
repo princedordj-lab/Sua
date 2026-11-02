@@ -232,10 +232,13 @@ jobsRouter.post("/", async (req, res) => {
   if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
   const job = outcome.existing ?? outcome.job;
 
-  // Cap awareness is warn-only until billing (Milestone 5).
-  const warning = await warnIfOverCaps(
-    (await withUser(identity.clerkId, (tx) => requireUser(tx, identity))).id,
-  );
+  // Cap awareness is warn-only until billing (Milestone 5). `authenticate`
+  // already resolved this row, so the old code opened a whole transaction — a
+  // pinned pooled connection — just to read an id it already had.
+  const userId =
+    identity.user?.id ??
+    (await withUser(identity.clerkId, (tx) => requireUser(tx, identity))).id;
+  const warning = await warnIfOverCaps(userId);
   if (warning) console.warn(`[CAP WARNING] ${identity.email}: ${warning}`);
 
   try {

@@ -15,6 +15,7 @@ import { AppState, Platform } from "react-native";
 import { API_BASE_URL, coursesApi, profileApi, pushApi } from "../lib/api";
 import { useSQLiteContext } from "expo-sqlite";
 import {
+  advanceNotesPullCursor,
   clearStudyDataForAccountSwitch,
   getSetting,
   listNotes,
@@ -22,6 +23,7 @@ import {
   pullCourseNotes,
   pullTombstones,
   purgeCourseLocally,
+  readNotesPullCursor,
   removeLocalCourse,
   replaceLocalCourses,
   saveNote,
@@ -78,6 +80,10 @@ type AppContextValue = {
   // mismatch). Distinct from "offline" so the UI stops telling students to
   // check their connection.
   authRejected: boolean;
+  // True when the API answered 503: it is reachable and deliberately busy
+  // (its database is saturated), which is a different student problem from
+  // "no network" and a different one again from a rejected session.
+  serverBusy: boolean;
   // True once a server profile was hydrated. Routing must not treat an
   // unresolved profile as "not onboarded".
   isProfileResolved: boolean;
@@ -118,6 +124,13 @@ const EMPTY_HYDRATED: HydratedState = {
   courses: [],
 };
 
+// A bootstrap attempt, tagged with the account it was started for and whether a
+// newer refresh arrived while it was running.
+type HydrationAttempt = {
+  userId: string;
+  refreshWanted: boolean;
+};
+
 // Clerk's getToken retries internally when the network is bad and can hang
 // well past every UI fallback; racing it keeps a stuck call bounded. A race
 // loss reads as a token miss and feeds the bounded retry path below.
@@ -129,6 +142,58 @@ const BOOTSTRAP_TIMEOUT_MS = 15_000;
 // verdict right after a completed sign-in. Only a real failure pays this
 // wait: the debounce itself confirms a healthy session long before it.
 const AUTH_CLAIM_MAX_MS = 20_000;
+// A failed hydration pass is retried on a bounded, jittered ladder instead of a
+// flat 15s, and the ladder resets the moment an attempt lands. An API that is
+// rejecting us — or starving on its own connection pool — must not be re-burst
+// every 15 seconds for as long as the app is open.
+const HYDRATION_RETRY_DELAYS_MS = [15_000, 30_000, 60_000];
+// Each course pull holds one pooled database connection for its whole
+// transaction, and the API instance only owns a handful. An unbounded
+// `Promise.all` over every course is how one burst outran that pool.
+const COURSE_PULL_CONCURRENCY = 3;
+
+// A 5xx (including the API's retryable 503 for a saturated database) means the
+// server answered and could not do the work. Telling that student to check
+// their internet is a lie that sends them rebooting a router.
+function isServerFailure(error: unknown) {
+  const status = (error as { status?: number } | null)?.status;
+  return typeof status === "number" && status >= 500;
+}
+
+const SERVER_BUSY_MESSAGE =
+  "Sua's server is busy — your work is safe on this device.";
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight, settling every item so
+ * one failure cannot cancel the others. Like `Promise.allSettled`, an entry
+ * never rejects out of the returned array.
+ */
+async function mapLimited<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<unknown>,
+): Promise<PromiseSettledResult<unknown>[]> {
+  const results: PromiseSettledResult<unknown>[] = [];
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      try {
+        results[index] = { status: "fulfilled", value: await fn(items[index]) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.max(1, Math.min(limit, items.length)) },
+      () => worker(),
+    ),
+  );
+  return results;
+}
 
 async function getTokenWithTimeout(
   getToken: (options?: { skipCache?: boolean }) => Promise<string | null>,
@@ -199,7 +264,28 @@ function cachedCourseToApp(course: LocalCourse): Course {
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const { isLoaded, isSignedIn: isSignedInRaw, getToken, userId } = useAuth();
+  const {
+    isLoaded,
+    isSignedIn: isSignedInRaw,
+    getToken: clerkGetToken,
+    userId,
+  } = useAuth();
+  // @clerk/expo rebuilds `getToken` as a plain arrow function on every render
+  // (its own useCallback-free wrapper around @clerk/react's memoised one, added
+  // to fill SessionJWTCache). Handing that straight to an effect dependency
+  // array re-fires the whole post-sign-in request burst on every render of this
+  // provider — and the burst sets state, so it keeps re-firing itself, which is
+  // how /api/me ends up queueing behind dozens of its own transactions. Clerk
+  // reads session state at call time, so delegating through a ref keeps the
+  // behaviour identical while giving the effects a dependency that holds still.
+  const clerkGetTokenRef = useRef(clerkGetToken);
+  useEffect(() => {
+    clerkGetTokenRef.current = clerkGetToken;
+  }, [clerkGetToken]);
+  const getToken = useCallback(
+    (options?: { skipCache?: boolean }) => clerkGetTokenRef.current(options),
+    [],
+  );
   // Two readings of the same snapshot:
   // - `signedInNow` is Clerk's raw answer, used by the data effects so a real
   //   sign-out stops hydration immediately;
@@ -250,15 +336,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [hydrationIssue, setHydrationIssue] = useState(false);
   const [hydrationError, setHydrationError] = useState<string | null>(null);
   const [authRejected, setAuthRejected] = useState(false);
+  const [serverBusy, setServerBusy] = useState(false);
   // A session can exist in Clerk before it can mint a token (the native client
   // syncs into the JS client asynchronously). Counting the misses keeps the
   // retry bounded instead of spinning forever.
   const tokenMisses = useRef(0);
-  // True while a bootstrap attempt is physically in flight. The fallback timer
-  // checks it when it fires: every step of an attempt is bounded (10s token
-  // race, 15s /me), so a request that is merely slow must never be reported as
-  // "still connecting". A ref, not state — nothing renders from it.
-  const attemptInFlight = useRef(false);
+  // The burst currently in flight, or null once it has settled. The fallback
+  // timer checks it when it fires: every step of an attempt is bounded (10s
+  // token race, 15s /me), so a request that is merely slow must never be
+  // reported as "still connecting". It is also what keeps two bursts from
+  // overlapping for one account — see the guard in the hydration effect. A ref,
+  // not state: nothing renders from it.
+  const activeAttempt = useRef<HydrationAttempt | null>(null);
   // Own timer, not `requestRefresh`: that helper drops a delayed request when
   // another timer is already pending, which would silently swallow the retry.
   const tokenRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -288,12 +377,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setRefreshTick((tick) => tick + 1);
     }, delayMs);
   }, []);
+  const retryStep = useRef(0);
+  const scheduleHydrationRetry = useCallback(() => {
+    const step = Math.min(
+      retryStep.current,
+      HYDRATION_RETRY_DELAYS_MS.length - 1,
+    );
+    retryStep.current += 1;
+    // Jitter so a fleet of devices that failed on the same server hiccup does
+    // not come back in lockstep and repeat the burst that just failed.
+    requestRefresh(
+      HYDRATION_RETRY_DELAYS_MS[step] + Math.floor(Math.random() * 2_000),
+    );
+  }, [requestRefresh]);
   const retryHydration = useCallback(() => {
     // A manual retry is a fresh start: clear the "server rejected the session"
     // verdict and the previous attempt's message so the screen can show
     // progress instead of the old failure copy.
     tokenMisses.current = 0;
+    retryStep.current = 0;
     setAuthRejected(false);
+    setServerBusy(false);
     setHydrationError(null);
     requestRefresh();
   }, [requestRefresh]);
@@ -334,16 +438,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Network-backed bootstrap must not block the signed-in app forever. After
   // a bounded wait, expose cached courses and let connectivity/foreground
   // events retry the server bootstrap in the background. The timer checks
-  // `attemptInFlight` when it fires, so a slow-but-working attempt is never
-  // mistaken for a hang: its real job is covering an attempt that was
-  // cancelled and never restarted. `refreshTick` re-arms it after an attempt
+  // `activeAttempt` when it fires, so a slow-but-working attempt is never
+  // mistaken for a hang: its real job is covering an attempt that stopped
+  // without ever claiming the ref. `refreshTick` re-arms it after an attempt
   // that settled without setting anything (the token-miss retries).
   useEffect(() => {
     if (!isLoaded || !signedInNow || !userId || hydrated.clerkId === userId) {
       return;
     }
     const timeout = setTimeout(() => {
-      if (attemptInFlight.current) return;
+      if (activeAttempt.current) return;
       applyHydrationFallback(userId);
     }, 15_000);
     return () => clearTimeout(timeout);
@@ -352,6 +456,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Flush the note queue and pull fresh copies whenever connectivity returns
   // or the app returns to the foreground — the queue must not wait for a
   // restart to drain.
+  //
+  // Only `requestRefresh` here: the hydration burst it triggers already runs
+  // the upload, generation, reconcile and progress queues. Firing them from the
+  // listener too stacks a second, unguarded set of requests on top of a burst
+  // that is still in flight, and each one opens its own database transaction.
   useEffect(() => {
     let sawInitialNetInfo = false;
     const unsubscribeNet = NetInfo.addEventListener((state) => {
@@ -361,28 +470,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
         sawInitialNetInfo = true;
         return;
       }
-      if (state.isConnected) {
-        requestRefresh();
-        void flushUploads({ db, getAuthToken });
-        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
-        void reconcileAiOutputs({ db, getAuthToken }).catch(() => {});
-        void flushStudyProgress({ db, getAuthToken }).catch(() => {});
-      }
+      if (state.isConnected) requestRefresh();
     });
     const appState = AppState.addEventListener("change", (next) => {
-      if (next === "active") {
-        requestRefresh();
-        void flushUploads({ db, getAuthToken });
-        void drainGenerationQueue({ db, getAuthToken }).catch(() => {});
-        void reconcileAiOutputs({ db, getAuthToken }).catch(() => {});
-        void flushStudyProgress({ db, getAuthToken }).catch(() => {});
-      }
+      if (next === "active") requestRefresh();
     });
     return () => {
       unsubscribeNet();
       appState.remove();
     };
-  }, [db, getAuthToken, requestRefresh]);
+  }, [requestRefresh]);
 
   // Push registration is explicit (profile -> Notifications). Once opted in,
   // keep the server row in step for this session: re-register if a sign-out
@@ -427,9 +524,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [db, getToken, isLoaded, signedInNow, userId]);
 
-  // Daily streak: queue today's open, paint the offline estimate immediately,
-  // then adopt the server's count. `refreshTick` already covers launch,
-  // foreground and reconnect, so no extra listeners are needed here.
+  // Daily streak: queue today's open and paint the offline estimate. The
+  // network half belongs to the hydration burst (its tail), which posts it
+  // after the note pulls — `POST /me/activity` takes a row lock on the user,
+  // and running it alongside the pulls competes with every one of them for it.
+  // `refreshTick` stays in the deps for the *local* repaint only: on a new day
+  // with no connection the burst tail never runs, and this is what stops Home
+  // showing yesterday's count.
   useEffect(() => {
     if (!isLoaded || !signedInNow || !userId) return;
     let cancelled = false;
@@ -444,21 +545,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
         userId,
         value: optimisticStreak(cache, pending, localDayKey()),
       });
-      const synced = await syncAppStreak({ db, getAuthToken, userId }).catch(
-        () => null,
-      );
-      if (!cancelled && synced) setStreakState({ userId, value: synced });
     })();
     return () => {
       cancelled = true;
     };
-  }, [db, getAuthToken, isLoaded, refreshTick, signedInNow, userId]);
+  }, [db, isLoaded, refreshTick, signedInNow, userId]);
 
   useEffect(() => {
     let cancelled = false;
     if (!isLoaded || !signedInNow || !userId) return;
+    if (activeAttempt.current?.userId === userId) {
+      // A burst for this account is already running (foreground, reconnect or a
+      // retry timer asked for another pass while one was in flight). Record the
+      // request and let the running attempt start it when it settles, instead of
+      // firing a second burst on top of the first — those requests each open a
+      // database transaction, and stacking them is what starves the pool.
+      activeAttempt.current.refreshWanted = true;
+      return;
+    }
     const revision = hydrationRevision.current;
-    attemptInFlight.current = true;
+    const attempt: HydrationAttempt = { userId, refreshWanted: false };
+    activeAttempt.current = attempt;
     (async () => {
       try {
         let token = await getTokenWithTimeout(getToken);
@@ -482,6 +589,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           } else {
             setHydrationIssue(true);
             setAuthRejected(true);
+            setServerBusy(false);
             setHydrationError(
               "Sua could not read your session. Sign out and sign in again.",
             );
@@ -542,13 +650,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setHydrationIssue(false);
         setHydrationError(null);
         setAuthRejected(false);
+        setServerBusy(false);
+        // The server answered: later failures start the ladder over at 15s
+        // rather than inheriting a long backoff from a resolved problem.
+        retryStep.current = 0;
         // Keep the offline fallback fresh: an onboarded account may sign in
         // without a connection next time and should go straight to the app.
         // Written here, not after the course list, so a later /courses failure
         // cannot cost the account its offline verdict.
         void writeOnboardedCache(db, userId, onboarded);
 
-        const serverCourses = await coursesApi.list(token).catch(() => null);
+        let coursesFailure: unknown = null;
+        const serverCourses = await coursesApi
+          .list(token)
+          .catch((error: unknown) => {
+            coursesFailure = error;
+            return null;
+          });
         if (cancelled) return;
         if (!serverCourses) {
           // Degrade, do not fail: the profile already routed the student into
@@ -556,6 +674,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           // the reconnect banner offer a retry.
           if (hydrationRevision.current !== revision) return;
           setHydrationIssue(true);
+          setServerBusy(isServerFailure(coursesFailure));
           let cached: LocalCourse[] = [];
           try {
             cached = await listLocalCourses(db);
@@ -568,7 +687,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               ? { ...prev, courses: cached.map(cachedCourseToApp) }
               : prev,
           );
-          requestRefresh(15_000);
+          scheduleHydrationRetry();
           return;
         }
         // A newer local write happened while the courses were loading.
@@ -595,24 +714,61 @@ export function AppProvider({ children }: { children: ReactNode }) {
             "note sync failed:",
             error instanceof Error ? error.message : String(error),
           );
-          if (!cancelled) requestRefresh(15_000);
+          if (!cancelled) scheduleHydrationRetry();
         }
-        try {
-          await Promise.all(
-            serverCourses.map((course) => pullCourseNotes(db, token, course.id)),
-          );
-          // After the notes: apply deletions made on other devices, which the
-          // course pull cannot express (a missing note is indistinguishable
-          // from one this device has not created yet).
-          await pullTombstones(db, token);
-        } catch {
+        // Bounded fan-out, incremental. `readNotesPullCursor` is null on the
+        // first pass after an install or an account switch, which is exactly the
+        // full download a device with no notes cached needs.
+        const pullSince = await readNotesPullCursor(db, userId).catch(() => null);
+        const watermarks: (string | null)[] = [];
+        const pullFailures: unknown[] = [];
+        const pullResults = await mapLimited(
+          serverCourses,
+          COURSE_PULL_CONCURRENCY,
+          async (course) => {
+            watermarks.push(
+              await pullCourseNotes(db, token, course.id, pullSince),
+            );
+          },
+        );
+        for (const result of pullResults) {
+          if (result.status === "rejected") pullFailures.push(result.reason);
+        }
+        // After the notes: apply deletions made on other devices, which the
+        // course pull cannot express (a missing note is indistinguishable
+        // from one this device has not created yet).
+        await pullTombstones(db, token, userId).catch((error: unknown) => {
+          pullFailures.push(error);
+        });
+        if (pullFailures.length) {
           // Reachable server but the pull failed (transient): retry soon
           // instead of waiting for the next reconnect or foreground event.
-          if (!cancelled) requestRefresh(15_000);
+          if (isServerFailure(pullFailures[0])) {
+            setHydrationIssue(true);
+            setServerBusy(true);
+            setHydrationError(SERVER_BUSY_MESSAGE);
+          }
+          if (!cancelled) scheduleHydrationRetry();
+        } else if (hydrationRevision.current === revision) {
+          // Only a pass that applied every course *and* the deletions moves the
+          // window; a partial pass re-downloads everything next time. Slow, but
+          // a cursor that outran a failure would hide notes forever.
+          void advanceNotesPullCursor(db, userId, watermarks);
         }
         // Notes first (a queued upload may reference a note still in the
         // push queue), then drain the upload queue — both self-gate offline.
         if (!cancelled) {
+          // Last, because `POST /me/activity` takes a lock on the user row the
+          // pulls just read. `recordAppOpen` runs first so today's open is in
+          // the local queue before it is submitted (it is idempotent, so the
+          // streak effect's own call is harmless).
+          void recordAppOpen(db, userId)
+            .catch(() => {})
+            .then(() => syncAppStreak({ db, getAuthToken, userId }))
+            .then((synced) => {
+              if (!cancelled && synced) setStreakState({ userId, value: synced });
+            })
+            .catch(() => {});
           void flushUploads({ db, getAuthToken });
           void drainGenerationQueue({
             db,
@@ -634,9 +790,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // hydrated by an earlier successful pass.
         if (cancelled) return;
         // A 401 is not a connectivity problem: the server received the token
-        // and refused it. Saying "check your internet" here sends students in
-        // circles, so keep the two failures apart.
+        // and refused it. A 5xx is not one either: the server answered, and its
+        // own work failed. Saying "check your internet" for either sends
+        // students in circles, so keep the three verdicts apart.
         const rejected = (error as { status?: number } | null)?.status === 401;
+        const busy = isServerFailure(error);
         if (__DEV__) {
           console.warn(
             `[hydration] failed (status ${(error as { status?: number } | null)?.status ?? "none"}) from ${API_BASE_URL}:`,
@@ -645,12 +803,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         setHydrationIssue(true);
         setAuthRejected(rejected);
+        setServerBusy(busy);
         setHydrationError(
           rejected
             ? "Sua could not confirm your session with the server. Sign out and sign in again."
-            : error instanceof Error && error.message
-              ? error.message
-              : "Could not check your account.",
+            : busy
+              ? SERVER_BUSY_MESSAGE
+              : // Nothing below this line reached the server, so the message is
+                // genuinely about the connection (and in dev, about which URL).
+                error instanceof Error && error.message
+                ? error.message
+                : "Could not check your account.",
         );
         let cached: LocalCourse[] = [];
         try {
@@ -664,19 +827,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
             : { clerkId: userId, profile: null, courses: cached.map(cachedCourseToApp) },
         );
       } finally {
-        // Only a natural settlement may clear the flag here: a cancelled
-        // attempt leaves that to its cleanup, so a newer attempt's "true"
-        // is never clobbered.
-        if (!cancelled) attemptInFlight.current = false;
+        // Released by ownership, not by `cancelled`: an attempt that was
+        // cancelled mid-flight is still the one a deferred refresh is waiting
+        // on, and a newer attempt's claim on the ref is never clobbered here.
+        if (activeAttempt.current === attempt) {
+          activeAttempt.current = null;
+          if (attempt.refreshWanted) requestRefresh();
+        }
       }
     })();
     return () => {
       cancelled = true;
-      // The next run re-arms the flag synchronously, so this only clears a
-      // cancelled attempt whose body may still be awaiting.
-      attemptInFlight.current = false;
+      // The attempt ref is deliberately not touched here. This run's attempt is
+      // still in flight and owns it; releasing it is the body's job, and the
+      // only way a deferred refresh is guaranteed to run.
     };
-  }, [db, getAuthToken, getToken, isLoaded, signedInNow, requestRefresh, refreshTick, userId]);
+  }, [
+    db,
+    getAuthToken,
+    getToken,
+    isLoaded,
+    scheduleHydrationRetry,
+    signedInNow,
+    requestRefresh,
+    refreshTick,
+    userId,
+  ]);
 
   // Derive per-user state from `hydrated` instead of clearing it in an
   // effect: switching/losing the session instantly hides stale data.
@@ -720,6 +896,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       // the previous one must not tint its screens.
       tokenMisses.current = 0;
       setAuthRejected(false);
+      setServerBusy(false);
       setHydrationIssue(false);
       setHydrationError(null);
       await clerkSignOut();
@@ -910,10 +1087,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // Best-effort by contract: callers fire it without awaiting, and a failed
     // push simply leaves the delete queued for the next reconnect pass.
     const token = await getToken().catch(() => null);
-    if (!token) return;
+    if (!token || !userId) return;
     await syncPendingNotes(db, token).catch(() => {});
-    await pullTombstones(db, token).catch(() => {});
-  }, [db, getToken]);
+    await pullTombstones(db, token, userId).catch(() => {});
+  }, [db, getToken, userId]);
 
   // Pull-to-refresh forces a fresh server read so another device's open (or a
   // missed sweep) is reflected without waiting for the next day.
@@ -971,6 +1148,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       hydrationIssue,
       hydrationError,
       authRejected,
+      serverBusy,
       isProfileResolved,
       hasCompletedOnboarding,
       profile,
@@ -1013,6 +1191,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       profile,
       refreshAppStreak,
       retryHydration,
+      serverBusy,
       signOut,
       updateCourse,
       updateProfile,

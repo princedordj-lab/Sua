@@ -18,6 +18,8 @@ export default function AppLayout() {
     isSignedOut,
     isSigningOut,
     hydrationIssue,
+    authRejected,
+    serverBusy,
     retryHydration,
     isProfileResolved,
     hasCompletedOnboarding,
@@ -59,13 +61,19 @@ export default function AppLayout() {
   ]);
 
   const isChat = pathname === "/ask-sua";
+  // Three different failures, and only one of them is about the device's
+  // connection: a rejected session and a saturated server are both answers from
+  // Sua itself, so blaming the Wi-Fi sends students off to reboot a router.
+  const bannerText = authRejected
+    ? "Sua could not accept this session. Sign out and sign in again."
+    : serverBusy
+      ? "Sua's server is busy — your work is safe on this device."
+      : "Using saved data while Sua reconnects.";
   return (
     <View className="flex-1 bg-cream">
       {hydrationIssue ? (
         <View className="flex-row items-center justify-between bg-surface px-4 py-2">
-          <Text className="flex-1 text-xs text-ink-soft">
-            Using saved data while Sua reconnects.
-          </Text>
+          <Text className="flex-1 text-xs text-ink-soft">{bannerText}</Text>
           <Pressable onPress={retryHydration} className="px-2 py-1">
             <Text className="text-xs font-bold text-brand">Retry</Text>
           </Pressable>

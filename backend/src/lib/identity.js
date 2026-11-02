@@ -1,9 +1,13 @@
 import { getAuth } from "@clerk/express";
 
 /**
- * Resolve { clerkId, email, name } for the signed-in request. Session claims
- * are used when present. Account provisioning and first-seen Clerk lookups
- * are handled by authenticate middleware.
+ * Resolve { clerkId, email, name, user } for the signed-in request. Session
+ * claims are used when present. Account provisioning and first-seen Clerk
+ * lookups are handled by authenticate middleware.
+ *
+ * `user` is the row `authenticate` already read (`req.suaUser`), so a route's
+ * `requireUser` does not have to spend a WAN round trip inside its transaction
+ * re-fetching the same row.
  */
 export function identityFromRequest(req) {
   const { userId, sessionClaims } = getAuth(req);
@@ -26,5 +30,6 @@ export function identityFromRequest(req) {
     clerkId: userId,
     email,
     name,
+    user: req.suaUser ?? null,
   };
 }

@@ -885,9 +885,65 @@ export async function upsertSyncedNote(db: SQLiteDatabase, note: ServerNote) {
   );
 }
 
-export async function pullCourseNotes(db: SQLiteDatabase, token: string, courseId: string) {
-  const notes = await notesApi.listForCourse(token, courseId);
-  for (const note of notes) await upsertSyncedNote(db, note);
+/**
+ * Incremental course pull cursor, per account (`notes_pull_cursor:<clerkId>`,
+ * the same convention as the streak cache).
+ *
+ * This is a latency device, not an exact-once feed: `updatedAt` can be a device
+ * clock (the server accepts the timestamp a push sends), and each pull sees its
+ * own snapshot, so a row can carry a watermark slightly ahead of the one this
+ * request reported. `advanceNotesPullCursor` therefore stores the *earliest*
+ * watermark of a fully applied pass, shifted back by a margin, and any pass that
+ * fails leaves the cursor untouched — the next one simply re-downloads
+ * everything, which is slow but never lossy.
+ */
+const PULL_CURSOR_TOLERANCE_MS = 120_000;
+
+function pullCursorKey(userId: string) {
+  return `notes_pull_cursor:${userId}`;
+}
+
+export async function readNotesPullCursor(
+  db: SQLiteDatabase,
+  userId: string,
+): Promise<string | null> {
+  const stored = await getSetting(db, pullCursorKey(userId)).catch(() => null);
+  if (!stored) return null;
+  const parsed = Date.parse(stored);
+  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
+}
+
+/** Watermarks from one fully applied pass (a missing/invalid one is ignored). */
+export async function advanceNotesPullCursor(
+  db: SQLiteDatabase,
+  userId: string,
+  watermarks: (string | null)[],
+) {
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const watermark of watermarks) {
+    const parsed = watermark ? Date.parse(watermark) : Number.NaN;
+    if (!Number.isNaN(parsed)) earliest = Math.min(earliest, parsed);
+  }
+  // No usable server clock in the responses: keep whatever cursor we had rather
+  // than trusting a value derived from the device.
+  if (!Number.isFinite(earliest)) return;
+  await setSetting(
+    db,
+    pullCursorKey(userId),
+    new Date(earliest - PULL_CURSOR_TOLERANCE_MS).toISOString(),
+  ).catch(() => {});
+}
+
+/** Returns the server watermark for this course, or null if it did not speak. */
+export async function pullCourseNotes(
+  db: SQLiteDatabase,
+  token: string,
+  courseId: string,
+  since?: string | null,
+): Promise<string | null> {
+  const page = await notesApi.listForCourse(token, courseId, since);
+  for (const note of page.notes) await upsertSyncedNote(db, note);
+  return page.serverTime ?? null;
 }
 
 /**
@@ -896,10 +952,19 @@ export async function pullCourseNotes(db: SQLiteDatabase, token: string, courseI
  * forever. Tombstones are paged from a stored (deletedAt, id) cursor; purging
  * an already-purged id is a cheap no-op, so the cursor only needs to be
  * monotonic, not exact.
+ *
+ * The cursor is per account: a device-wide key lets the first student's deletion
+ * window hide the second student's own deletes, which then resurrect notes their
+ * first owner removed.
  */
-export async function pullTombstones(db: SQLiteDatabase, token: string) {
+export async function pullTombstones(
+  db: SQLiteDatabase,
+  token: string,
+  userId: string,
+) {
+  const cursorKey = `note_tombstone_cursor:${userId}`;
   let cursor: { deletedAt: string; id: string } | null = null;
-  const stored = await getSetting(db, "note_tombstone_cursor").catch(() => null);
+  const stored = await getSetting(db, cursorKey).catch(() => null);
   if (stored) {
     try {
       const parsed = JSON.parse(stored) as { deletedAt?: string; id?: string };
@@ -933,7 +998,7 @@ export async function pullTombstones(db: SQLiteDatabase, token: string) {
     purged += rows.length;
     if (response.cursor) {
       cursor = response.cursor;
-      await setSetting(db, "note_tombstone_cursor", JSON.stringify(cursor));
+      await setSetting(db, cursorKey, JSON.stringify(cursor));
     }
     if (rows.length < 500) break;
   }
@@ -2520,8 +2585,12 @@ export async function wipeLocalData(db: SQLiteDatabase) {
  * student's study data. Every study table is emptied, but `settings` survives
  * because it holds device preferences (appearance, push opt-in, Wi-Fi-only) and
  * per-account caches keyed by the Clerk id, which the next session cannot read.
- * The only settings rows dropped are per-note reading positions, which point at
- * notes that no longer exist.
+ * The settings rows dropped are per-note reading positions and the two sync
+ * cursors: the notes and `note_tombstones` rows they describe are gone, so a
+ * window left pointing at them must not be trusted — and the un-anchored
+ * pattern also clears the legacy device-wide `note_tombstone_cursor`, which a
+ * second account on this device would otherwise start ahead of its own
+ * deletions.
  *
  * Account deletion still uses `wipeLocalData` above: that one removes settings
  * too, so the device leaves no trace at all.
@@ -2545,5 +2614,7 @@ export async function clearStudyDataForAccountSwitch(db: SQLiteDatabase) {
     DELETE FROM note_tombstones;
     DELETE FROM courses;
     DELETE FROM settings WHERE key LIKE 'note_section:%';
+    DELETE FROM settings WHERE key LIKE 'note_tombstone_cursor%';
+    DELETE FROM settings WHERE key LIKE 'notes_pull_cursor%';
   `);
 }

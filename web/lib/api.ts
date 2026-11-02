@@ -153,8 +153,16 @@ export const coursesApi = {
 export const notesApi = {
   get: (token: string, noteId: string) =>
     apiRequest<ServerNote>(token, `/notes/${noteId}`),
-  listForCourse: (token: string, courseId: string) =>
-    apiRequest<ServerNote[]>(token, `/notes/course/${courseId}`),
+  // The endpoint answers an envelope ({ notes, serverTime }) so mobile can pull
+  // incrementally. Web has no local store to keep a cursor for, so it unwraps
+  // and keeps the whole-list behaviour its screens already assume.
+  listForCourse: async (token: string, courseId: string) => {
+    const page = await apiRequest<{ notes: ServerNote[] }>(
+      token,
+      `/notes/course/${courseId}`,
+    );
+    return page.notes ?? [];
+  },
   sync: (token: string, changes: NoteSyncChange[]) =>
     apiRequest<{ notes: ServerNote[]; results?: SyncResult[] }>(token, "/notes/sync", {
       method: "POST",

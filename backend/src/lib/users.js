@@ -38,8 +38,19 @@ function conflict() {
   return error;
 }
 
-async function readByClerkId(clerkId) {
-  return withUser(clerkId, (tx) => tx.user.findUnique({ where: { clerkId } }));
+// The first requests from a brand-new account all miss the local row, and each
+// one used to make its own Clerk Backend fetch, its own INSERT and its own
+// P2002 re-read — five transactions apiece, stacked. Concurrent provisions for
+// one Clerk id share a single attempt inside this instance; the P2002 handling
+// below stays as the safety net across Vercel instances.
+const provisioning = new Map();
+
+async function readUserByClerkId(client, clerkId) {
+  return client.user.findUnique({ where: { clerkId } });
+}
+
+function readByClerkId(clerkId) {
+  return withUser(clerkId, (tx) => readUserByClerkId(tx, clerkId));
 }
 
 async function reread(clerkId, email) {
@@ -58,31 +69,75 @@ async function oldClerkIdIsStale(clerkId, clerkApi = clerkClient) {
   }
 }
 
-/** Provision or refresh the local account from a Clerk user or webhook payload. */
-export async function ensureUser(clerkUser, { tx = null, db = prisma, clerk = clerkClient } = {}) {
-  const clerkId = clerkUser.clerkId ?? clerkUser.id;
-  if (!clerkId) throw new Error("Clerk user id is required.");
-  const { email, verified } = emailDetails(clerkUser);
+/**
+ * The stored fields this request's claims say should be true. A claim the token
+ * does not carry is not a change request: `imageUrl: null` means "this session
+ * token has no picture", not "clear the stored avatar".
+ */
+export function claimsPatchFor(clerkUser) {
+  const { email } = emailDetails(clerkUser);
   const name = nameFor(clerkUser);
   const imageUrl = imageFor(clerkUser);
-
-  // A claim the session actually carries. `imageUrl: null` means "the token
-  // has no picture claim", not "clear the stored avatar", so it is no change.
-  const patch = {
+  return {
     ...(email ? { email } : {}),
     ...(name !== null ? { name } : {}),
     ...(imageUrl != null ? { imageUrl } : {}),
   };
+}
+
+/** True when the stored row no longer matches the claims on this request. */
+export function claimsChanged(profile, patch) {
+  return Object.keys(patch).some((key) => profile[key] !== patch[key]);
+}
+
+/**
+ * Steady-state authenticated lookup, deliberately outside `withUser`. The row is
+ * keyed by the Clerk id already verified from the session JWT, so this answers
+ * "who is calling" without spending a transaction on it. Provisioning and every
+ * write still go through `withUser`.
+ *
+ * Load-bearing caveat: no transaction means no `app.current_user_id`, so this
+ * reads as BYPASSRLS today's `neondb_owner` does. If that role ever loses
+ * BYPASSRLS, this returns null for every caller and every request silently falls
+ * back to the transactional provisioning path — slower, never wrong.
+ */
+export function findUserByClerkId(clerkId) {
+  return prisma.user.findUnique({ where: { clerkId } });
+}
+
+/** Provision or refresh the local account from a Clerk user or webhook payload. */
+export function ensureUser(clerkUser, options = {}) {
+  const clerkId = clerkUser.clerkId ?? clerkUser.id;
+  if (!clerkId) throw new Error("Clerk user id is required.");
+  // A caller that already holds a transaction owns its connection and its own
+  // commit, so it must never be folded into another request's in-flight work.
+  if (options.tx) return provisionUser(clerkUser, options);
+  const pending = provisioning.get(clerkId);
+  if (pending) return pending;
+  const attempt = provisionUser(clerkUser, options).finally(() => {
+    if (provisioning.get(clerkId) === attempt) provisioning.delete(clerkId);
+  });
+  provisioning.set(clerkId, attempt);
+  return attempt;
+}
+
+async function provisionUser(clerkUser, { tx = null, db = prisma, clerk = clerkClient } = {}) {
+  const clerkId = clerkUser.clerkId ?? clerkUser.id;
+  const { email, verified } = emailDetails(clerkUser);
+  const name = nameFor(clerkUser);
+  const patch = claimsPatchFor(clerkUser);
 
   // Read and (only if a claim actually differs) write inside ONE transaction.
-  // Every statement is a WAN round trip to Neon and this runs on every
-  // authenticated request, so the old unconditional UPDATE in a second
-  // transaction charged every screen an extra BEGIN/set_config/UPDATE/COMMIT.
+  // Every statement is a WAN round trip to Neon, so the old unconditional
+  // UPDATE in a second transaction charged this path an extra
+  // BEGIN/set_config/UPDATE/COMMIT. Reached only for a first-seen account or a
+  // claim that changed — the steady-state request never gets here.
   const readOrRefresh = async (client) => {
     const current = await client.user.findUnique({ where: { clerkId } });
     if (!current) return null;
-    const changed = Object.keys(patch).some((key) => current[key] !== patch[key]);
-    return changed ? client.user.update({ where: { clerkId }, data: patch }) : current;
+    return claimsChanged(current, patch)
+      ? client.user.update({ where: { clerkId }, data: patch })
+      : current;
   };
 
   let current = null;
@@ -127,7 +182,12 @@ export async function ensureUser(clerkUser, { tx = null, db = prisma, clerk = cl
         where: { id: matchingEmail.id },
         data: { clerkId, email: normalizedEmail, name: normalizedName, imageUrl: imageFor(fullUser) },
       });
-      return tx ? await update(tx) : await db.$transaction(update);
+      // Same budget as `withUser`: only `maxWait` is configured globally, so
+      // this would otherwise run on Prisma's 5 s default timeout — less than
+      // one cold WAN round trip can cost.
+      return tx
+        ? await update(tx)
+        : await db.$transaction(update, { maxWait: 10_000, timeout: 15_000 });
     }
     const create = (client) => client.user.create({ data: { clerkId, email: normalizedEmail, name: normalizedName, imageUrl: imageFor(fullUser) } });
     return tx ? await create(tx) : await withUser(clerkId, create);
@@ -144,8 +204,13 @@ export async function ensureUser(clerkUser, { tx = null, db = prisma, clerk = cl
 }
 
 /** Existing authenticated route helper; provisioning happens in authenticate. */
-export async function requireUser(tx, { clerkId }) {
-  const user = await tx.user.findUnique({ where: { clerkId } });
+export async function requireUser(client, identity) {
+  // `authenticate` already read this row outside a transaction, so the steady
+  // state is a hand-off, not a query. The read below stays for callers without
+  // a preloaded identity (and for the day the Neon role loses BYPASSRLS, which
+  // makes `findUserByClerkId` return null and every request take this path).
+  if (identity.user) return identity.user;
+  const user = await readUserByClerkId(client, identity.clerkId);
   if (!user) throw new Error("Authenticated user was not provisioned.");
   return user;
 }

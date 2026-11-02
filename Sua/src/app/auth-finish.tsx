@@ -29,6 +29,7 @@ export default function AuthFinish() {
     hasCompletedOnboarding,
     hydrationError,
     authRejected,
+    serverBusy,
     retryHydration,
     signOut,
   } = useApp();
@@ -142,12 +143,18 @@ export default function AuthFinish() {
   // A rejected session is not a connectivity problem, and telling a student to
   // "connect" when the server already refused their token sends them in
   // circles. Say what happened and make signing out the obvious way forward.
+  // A busy server is neither: it answered, so asking for a connection would be
+  // a lie — and the student's work is on the device, not lost.
   const heading = authRejected
     ? "Sua could not accept this session"
-    : "Connect to finish signing in";
+    : serverBusy
+      ? "Sua is busy right now"
+      : "Connect to finish signing in";
   const body = authRejected
     ? "Your sign-in worked, but Sua could not use this session on the server. Sign out, then sign in again."
-    : "Sua needs a connection once to check your account on this device.";
+    : serverBusy
+      ? "Sua's server could not finish checking your account. Nothing you wrote is lost — try again in a moment."
+      : "Sua needs a connection once to check your account on this device.";
 
   return (
     <SafeAreaView className="flex-1 bg-cream" style={{ flex: 1 }}>
@@ -161,7 +168,7 @@ export default function AuthFinish() {
             <Text className="text-center text-base leading-6 text-ink-soft">
               {body}
             </Text>
-            {!authRejected && hydrationError ? (
+            {!authRejected && !serverBusy && hydrationError ? (
               <Text className="text-center text-sm text-ink-faint">
                 {hydrationError}
               </Text>

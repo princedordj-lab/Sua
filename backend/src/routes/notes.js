@@ -11,6 +11,31 @@ export const notesRouter = Router();
 
 const NOTE_KINDS = new Set(["note", "reference"]);
 
+// The asset projection every note read serves, and the include that carries it.
+// Three routes need the same shape (course pull, single note, sync conflicts),
+// and they all read it inside a transaction where each statement is a WAN round
+// trip. `previewFeatures = ["relationJoins"]` in schema.prisma is what keeps
+// this to one statement — the per-query `relationLoadStrategy` arg does not
+// exist without that flag, and a client generated without it rejects the query
+// with PrismaClientValidationError.
+const assetSelect = {
+  id: true,
+  bytes: true,
+  format: true,
+  status: true,
+  extractState: true,
+  pagesDone: true,
+  pagesTotal: true,
+  truncated: true,
+};
+const noteInclude = {
+  assets: { select: assetSelect, orderBy: { createdAt: "asc" } },
+};
+// Changes per transaction in /sync. A queued-up student can push the 100-change
+// cap, and each change is a write; with `timeout: 15000` on `withUser` the batch
+// has to fit in that budget of round trips, not in a row limit.
+const SYNC_CHUNK_CHANGES = 25;
+
 function shapeNote(note) {
   return {
     id: note.id,
@@ -41,31 +66,37 @@ function shapeNote(note) {
   };
 }
 
+// The mobile hydration burst pulls every course the account has, so without
+// `since` this is a full re-download of bodies *and* transcripts (the whole
+// library is megabytes) on one wide fan-out. Each pull holds a pooled connection
+// for its whole interactive transaction — long enough for Prisma to expire the
+// commit and answer P2028. `since` narrows the read to what moved.
+//
+// `serverTime` is the watermark the device stores for its next pass, read from
+// the server's clock and taken *before* the select: a note's `updatedAt` can be a
+// device clock (`/sync` accepts the client's timestamp), so a client must never
+// compare its own clock against stored rows.
 notesRouter.get("/course/:courseId", async (req, res) => {
   const identity = await identityFromRequest(req);
+  const sinceRaw = typeof req.query?.since === "string" ? req.query.since : "";
+  const sinceDate = sinceRaw ? new Date(sinceRaw) : null;
+  if (sinceRaw && Number.isNaN(sinceDate.getTime())) {
+    return res.status(400).json({ error: "invalid since" });
+  }
+  const serverTime = new Date();
   const notes = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
     return tx.note.findMany({
-      where: { userId: user.id, courseId: req.params.courseId },
-      orderBy: { updatedAt: "desc" },
-      include: {
-        assets: {
-          select: {
-            id: true,
-            bytes: true,
-            format: true,
-            status: true,
-            extractState: true,
-            pagesDone: true,
-            pagesTotal: true,
-            truncated: true,
-          },
-          orderBy: { createdAt: "asc" },
-        },
+      where: {
+        userId: user.id,
+        courseId: req.params.courseId,
+        ...(sinceDate ? { updatedAt: { gt: sinceDate } } : {}),
       },
+      orderBy: { updatedAt: "desc" },
+      include: noteInclude,
     });
   });
-  res.json(notes.map(shapeNote));
+  res.json({ notes: notes.map(shapeNote), serverTime });
 });
 
 // Deletions another device must learn about: without this a note deleted on
@@ -115,21 +146,7 @@ notesRouter.get("/:noteId", async (req, res) => {
     const user = await requireUser(tx, identity);
     const note = await tx.note.findFirst({
       where: { id: req.params.noteId, userId: user.id },
-      include: {
-        assets: {
-          select: {
-            id: true,
-            bytes: true,
-            format: true,
-            status: true,
-            extractState: true,
-            pagesDone: true,
-            pagesTotal: true,
-            truncated: true,
-          },
-          orderBy: { createdAt: "asc" },
-        },
-      },
+      include: noteInclude,
     });
     if (!note) return null;
     // A note view is also a resume signal for long jobs, not just extraction.
@@ -163,127 +180,192 @@ notesRouter.get("/:noteId", async (req, res) => {
   res.json(shapeNote(note));
 });
 
+// A student who wrote offline can push the whole 100-change queue in one
+// request, and every change is at least one write. Inside `withUser` that is a
+// budget of WAN round trips, not of rows, so the queue is committed in chunks:
+// each change still resolves exactly as before because a retried chunk is a
+// no-op — the timestamp guard rejects only *strictly* older writes, so an
+// already-accepted change falls through the same branch, and deletes are
+// idempotent (`skipDuplicates` tombstone + `deleteMany`).
 notesRouter.post("/sync", async (req, res) => {
   const identity = await identityFromRequest(req);
   const changes = Array.isArray(req.body?.changes) ? req.body.changes : [];
   if (changes.length > 100) return res.status(400).json({ error: "Too many changes" });
 
-  const outcome = await withUser(identity.clerkId, async (tx) => {
-    const user = await requireUser(tx, identity);
-    const notes = [];
-    const results = [];
-    // Storage deletes are external I/O, so the keys are returned and deleted
-    // after the transaction (withUser caps a transaction at 15 s).
-    const storageKeys = [];
-    for (const change of changes) {
-      if (!change?.id) {
-        results.push({ id: "", status: "rejected", reason: "missing id" });
-        continue;
-      }
-      if (change.operation === "delete") {
-        const tombstone = await tx.noteTombstone.findUnique({
-          where: { id: change.id },
-          select: { userId: true },
-        });
-        if (tombstone && tombstone.userId !== user.id) {
-          results.push({ id: change.id, status: "rejected", reason: "id not available" });
+  // `authenticate` already read this row, and it is needed by every chunk, so
+  // the transactional fallback happens once here rather than once per chunk.
+  const user =
+    identity.user ??
+    (await withUser(identity.clerkId, (tx) => requireUser(tx, identity)));
+
+  const notes = [];
+  const results = [];
+  // Storage deletes are external I/O, so the keys are collected and flushed
+  // after every transaction (withUser caps a transaction at 15 s).
+  const storageKeys = [];
+
+  for (let start = 0; start < changes.length; start += SYNC_CHUNK_CHANGES) {
+    const chunk = changes.slice(start, start + SYNC_CHUNK_CHANGES);
+    const outcome = await withUser(identity.clerkId, async (tx) => {
+      const chunkNotes = [];
+      const chunkResults = [];
+      const chunkStorageKeys = [];
+
+      const ids = chunk
+        .map((change) => (typeof change?.id === "string" ? change.id : ""))
+        .filter(Boolean);
+      const courseIds = [
+        ...new Set(
+          chunk
+            .map((change) =>
+              typeof change?.courseId === "string" ? change.courseId : "",
+            )
+            .filter(Boolean),
+        ),
+      ];
+      // Three batched reads replace the per-change lookups a full queue would
+      // otherwise pay for. They are pre-reads, not a stale cache: the maps are
+      // updated as the loop writes, so a later change in this chunk still sees
+      // a tombstone or note row this transaction has just created.
+      const tombstoneOwners = new Map(
+        (
+          await tx.noteTombstone.findMany({
+            where: { id: { in: ids } },
+            select: { id: true, userId: true },
+          })
+        ).map((row) => [row.id, row.userId]),
+      );
+      const existingById = new Map(
+        (await tx.note.findMany({ where: { id: { in: ids } } })).map(
+          (row) => [row.id, row],
+        ),
+      );
+      const ownedCourses = new Set(
+        (
+          await tx.course.findMany({
+            where: { userId: user.id, id: { in: courseIds } },
+            select: { id: true },
+          })
+        ).map((row) => row.id),
+      );
+
+      // Deferred to one `purgeNoteRows` per chunk: the tombstone above is what
+      // guards the id against being recreated, and it is written in order, so
+      // the rows themselves can go at commit time.
+      const purgeIds = [];
+
+      for (const change of chunk) {
+        if (!change?.id) {
+          chunkResults.push({ id: "", status: "rejected", reason: "missing id" });
           continue;
         }
-        const owned = await tx.note.findUnique({
-          where: { id: change.id },
-          select: { userId: true },
-        });
-        if (owned && owned.userId !== user.id) {
-          results.push({ id: change.id, status: "rejected", reason: "id not available" });
-          continue;
-        }
-        // Record the deletion before touching the note. A concurrent upsert
-        // that lands after this transaction must find the tombstone, not a
-        // free id it can recreate the note under.
-        await tx.noteTombstone.createMany({
-          data: [{ id: change.id, userId: user.id }],
-          skipDuplicates: true,
-        });
-        storageKeys.push(...(await purgeNoteRows(tx, { userId: user.id, noteIds: [change.id] })));
-        // Idempotent: deleting a note that is already gone still succeeds.
-        results.push({ id: change.id, status: "accepted" });
-        continue;
-      }
-      // A tombstoned id can never come back. Tell the device so it removes its
-      // copy instead of retrying the upsert forever.
-      const tombstone = await tx.noteTombstone.findUnique({
-        where: { id: change.id },
-        select: { userId: true },
-      });
-      if (tombstone) {
-        results.push({ id: change.id, status: "deleted" });
-        continue;
-      }
-      if (!change.courseId || typeof change.title !== "string" || typeof change.body !== "string") {
-        results.push({ id: change.id, status: "rejected", reason: "invalid payload" });
-        continue;
-      }
-      const course = await tx.course.findFirst({ where: { id: change.courseId, userId: user.id } });
-      if (!course) {
-        results.push({ id: change.id, status: "rejected", reason: "course not found" });
-        continue;
-      }
-      const existing = await tx.note.findUnique({ where: { id: change.id } });
-      if (existing && existing.userId !== user.id) {
-        results.push({ id: change.id, status: "rejected", reason: "id not available" });
-        continue;
-      }
-      const parsedUpdatedAt = change.updatedAt ? new Date(change.updatedAt) : null;
-      if (parsedUpdatedAt && Number.isNaN(parsedUpdatedAt.getTime())) {
-        results.push({ id: change.id, status: "rejected", reason: "invalid updatedAt" });
-        continue;
-      }
-      // Timestamp guard: reject a write that is older than what the server
-      // already holds and hand the newer copy back so the device can adopt it.
-      if (
-        existing &&
-        parsedUpdatedAt &&
-        parsedUpdatedAt.getTime() < existing.updatedAt.getTime()
-      ) {
-        results.push({ id: change.id, status: "conflict", note: shapeNote(existing) });
-        continue;
-      }
-      // A device that has not received the AI-written body yet pushes an empty
-      // one with a fresh timestamp. Accepting it would wipe the note the student
-      // can already read, so empty incoming text never replaces stored text.
-      const incomingBody = change.body;
-      const keepStoredBody =
-        !incomingBody.trim() && Boolean((existing?.body ?? "").trim());
-      const data = {
-        courseId: change.courseId,
-        title: change.title,
-        body: keepStoredBody ? existing.body : incomingBody,
-        sourceType: change.sourceType || "typed",
-        // A reference stays a reference across edits; new notes default plain.
-        noteKind: NOTE_KINDS.has(change.noteKind)
-          ? change.noteKind
-          : existing?.noteKind ?? "note",
-        ...(parsedUpdatedAt ? { updatedAt: parsedUpdatedAt } : {}),
-      };
-      const note = existing
-        ? await tx.note.update({ where: { id: existing.id }, data })
-        : await tx.note.create({
-            data: { id: change.id, userId: user.id, ...data },
+        if (change.operation === "delete") {
+          if (tombstoneOwners.has(change.id) && tombstoneOwners.get(change.id) !== user.id) {
+            chunkResults.push({ id: change.id, status: "rejected", reason: "id not available" });
+            continue;
+          }
+          const owned = existingById.get(change.id);
+          if (owned && owned.userId !== user.id) {
+            chunkResults.push({ id: change.id, status: "rejected", reason: "id not available" });
+            continue;
+          }
+          // Record the deletion before touching the note. A concurrent upsert
+          // that lands after this transaction must find the tombstone, not a
+          // free id it can recreate the note under.
+          await tx.noteTombstone.createMany({
+            data: [{ id: change.id, userId: user.id }],
+            skipDuplicates: true,
           });
-      notes.push(note);
-      results.push({ id: change.id, status: "accepted" });
-    }
-    return { notes, results, userId: user.id, storageKeys };
-  });
-  res.json({ notes: outcome.notes.map(shapeNote), results: outcome.results });
+          tombstoneOwners.set(change.id, user.id);
+          existingById.delete(change.id);
+          purgeIds.push(change.id);
+          // Idempotent: deleting a note that is already gone still succeeds.
+          chunkResults.push({ id: change.id, status: "accepted" });
+          continue;
+        }
+        // A tombstoned id can never come back. Tell the device so it removes its
+        // copy instead of retrying the upsert forever.
+        if (tombstoneOwners.has(change.id)) {
+          chunkResults.push({ id: change.id, status: "deleted" });
+          continue;
+        }
+        if (!change.courseId || typeof change.title !== "string" || typeof change.body !== "string") {
+          chunkResults.push({ id: change.id, status: "rejected", reason: "invalid payload" });
+          continue;
+        }
+        if (!ownedCourses.has(change.courseId)) {
+          chunkResults.push({ id: change.id, status: "rejected", reason: "course not found" });
+          continue;
+        }
+        const existing = existingById.get(change.id);
+        if (existing && existing.userId !== user.id) {
+          chunkResults.push({ id: change.id, status: "rejected", reason: "id not available" });
+          continue;
+        }
+        const parsedUpdatedAt = change.updatedAt ? new Date(change.updatedAt) : null;
+        if (parsedUpdatedAt && Number.isNaN(parsedUpdatedAt.getTime())) {
+          chunkResults.push({ id: change.id, status: "rejected", reason: "invalid updatedAt" });
+          continue;
+        }
+        // Timestamp guard: reject a write that is older than what the server
+        // already holds and hand the newer copy back so the device can adopt it.
+        if (
+          existing &&
+          parsedUpdatedAt &&
+          parsedUpdatedAt.getTime() < existing.updatedAt.getTime()
+        ) {
+          chunkResults.push({ id: change.id, status: "conflict", note: shapeNote(existing) });
+          continue;
+        }
+        // A device that has not received the AI-written body yet pushes an empty
+        // one with a fresh timestamp. Accepting it would wipe the note the student
+        // can already read, so empty incoming text never replaces stored text.
+        const incomingBody = change.body;
+        const keepStoredBody =
+          !incomingBody.trim() && Boolean((existing?.body ?? "").trim());
+        const data = {
+          courseId: change.courseId,
+          title: change.title,
+          body: keepStoredBody ? existing.body : incomingBody,
+          sourceType: change.sourceType || "typed",
+          // A reference stays a reference across edits; new notes default plain.
+          noteKind: NOTE_KINDS.has(change.noteKind)
+            ? change.noteKind
+            : existing?.noteKind ?? "note",
+          ...(parsedUpdatedAt ? { updatedAt: parsedUpdatedAt } : {}),
+        };
+        const note = existing
+          ? await tx.note.update({ where: { id: existing.id }, data })
+          : await tx.note.create({
+              data: { id: change.id, userId: user.id, ...data },
+            });
+        existingById.set(change.id, note);
+        chunkNotes.push(note);
+        chunkResults.push({ id: change.id, status: "accepted" });
+      }
+
+      if (purgeIds.length) {
+        chunkStorageKeys.push(
+          ...(await purgeNoteRows(tx, { userId: user.id, noteIds: purgeIds })),
+        );
+      }
+
+      return { notes: chunkNotes, results: chunkResults, storageKeys: chunkStorageKeys };
+    });
+    notes.push(...outcome.notes);
+    results.push(...outcome.results);
+    storageKeys.push(...outcome.storageKeys);
+  }
+
+  res.json({ notes: notes.map(shapeNote), results });
 
   // Storage cleanup for deleted notes, outside the transaction. Failures are
   // queued for the janitor instead of being lost with the asset row.
-  await flushStorageDeletes(outcome.storageKeys, outcome.userId);
+  await flushStorageDeletes(storageKeys, user.id);
 
   // A pushed note may be the missing half of a conversion-marked upload that
   // landed first (the /complete route covers the reverse order). Idempotent.
-  for (const note of outcome.notes) {
+  for (const note of notes) {
     try {
       await maybeEnqueueGeneration(identity.clerkId, note.id);
     } catch (error) {

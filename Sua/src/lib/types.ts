@@ -204,6 +204,14 @@ export type ServerTombstonePage = {
   cursor: TombstoneCursor | null;
 };
 
+// A course pull is an envelope, not a bare array: `serverTime` is the watermark
+// for the next incremental pull, and only the server's clock can be trusted
+// because a note's `updatedAt` may have been written by another device.
+export type ServerCourseNotesPage = {
+  notes: ServerNote[];
+  serverTime: string | null;
+};
+
 export type AssetKind = "audio" | "document" | "image";
 
 export type ServerAsset = {
