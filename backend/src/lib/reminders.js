@@ -62,8 +62,10 @@ export async function sendDueReminders({ limit = 200, transports = ["web"] } = {
     if (!isDue(setting, now)) continue;
     let due = 0;
     try {
+      // Retired cards are not studyable on either surface, so counting them
+      // would push "6 cards are due" to a student whose deck is empty.
       due = await prisma.flashcard.count({
-        where: { userId: setting.userId, dueAt: { lte: now } },
+        where: { userId: setting.userId, retiredAt: null, dueAt: { lte: now } },
       });
     } catch (error) {
       console.warn(`Reminder count failed: ${error?.message ?? error}`);
