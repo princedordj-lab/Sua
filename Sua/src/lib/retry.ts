@@ -47,6 +47,17 @@ export function retryDelayMs(header?: string | null): number {
   return clamp(at - Date.now());
 }
 
+/**
+ * React Native has no `DOMException`, so this is the one place the two copies of
+ * this file differ in code rather than comment. `name` is what a caller checks,
+ * and the browser copy rejects with `name: "AbortError"` too.
+ */
+function abortError(): Error {
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
+}
+
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -55,12 +66,12 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     function onCancel() {
       clearTimeout(timer);
-      reject(new Error("Aborted"));
+      reject(abortError());
     }
     if (signal) {
       if (signal.aborted) {
         clearTimeout(timer);
-        reject(new Error("Aborted"));
+        reject(abortError());
         return;
       }
       signal.addEventListener("abort", onCancel, { once: true });
