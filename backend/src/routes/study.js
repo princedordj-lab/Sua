@@ -113,7 +113,10 @@ studyRouter.post("/sync/reviews", async (req, res) => {
         (
           await tx.reviewLog.groupBy({
             by: ["cardId"],
-            where: { cardId: { in: cardIds } },
+            // Scoped to this account like every other read here: the watermark is
+            // this student's own scheduling history, and the role behind
+            // DATABASE_URL still bypasses RLS, so the query is the isolation.
+            where: { cardId: { in: cardIds }, userId: user.id },
             _max: { reviewedAt: true },
           })
         ).map((row) => [row.cardId, row._max.reviewedAt]),
