@@ -2,17 +2,22 @@ import { Router } from "express";
 import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
-import { aiConfigured } from "../lib/ai.js";
-import {
-  studyQueueConfigured,
-  enqueueStudyJob,
-  triggerRunner,
-  STALE_QUEUED_MS,
-  STALE_RUNNING_MS,
-} from "../lib/queue.js";
+import { prisma } from "../config/prisma.js";
 import { warnIfOverCaps } from "../lib/pipeline.js";
-import { triggerExtraction } from "../lib/extraction.js";
-import { USER_MESSAGES } from "../config/ai-pipeline.js";
+import {
+  cancelProcessingRun,
+  ensureProcessingJob,
+  needsResubmit,
+  processingConfigured,
+  retryProcessing,
+  startProcessing,
+} from "../lib/processing/start.js";
+import {
+  MATERIALS,
+  PROCESSING_STATES,
+  materialStates,
+  shapeProcessing,
+} from "../lib/processing/state.js";
 
 export const jobsRouter = Router();
 
@@ -73,6 +78,12 @@ function shapeJob(job) {
     progressUnit: PROGRESS_UNITS[job.stage] ?? null,
     // Server-computed sentence so mobile and web cannot disagree about units.
     stageDetail: stageDetail(job),
+    // Trigger.dev processing state (additive; the lifecycle the app renders).
+    processingState: job.processingState ?? null,
+    triggerState: job.triggerState ?? "none",
+    runId: job.runId ?? null,
+    errorCategory: job.errorCategory ?? null,
+    materials: materialStates(job),
     // Proof of life: a running job with an old heartbeat is not progressing.
     heartbeatAt: job.heartbeatAt ?? job.updatedAt ?? null,
     startedAt: job.startedAt,
@@ -82,97 +93,35 @@ function shapeJob(job) {
 }
 
 function requirePipeline(res) {
-  if (!studyQueueConfigured() || !process.env.DATABASE_URL || !aiConfigured()) {
+  if (!processingConfigured()) {
     res.status(503).json({ error: "AI processing is not configured" });
     return false;
   }
   return true;
 }
 
-function isStale(job) {
-  const now = Date.now();
-  if (job.state === "queued" && !job.startedAt) {
-    return now - job.createdAt.getTime() > STALE_QUEUED_MS;
-  }
-  if (job.state === "running" && job.startedAt) {
-    // A worker proves liveness with heartbeats; startedAt only marks the first
-    // attempt and is reset by every resumed pass.
-    const aliveAt = job.heartbeatAt ?? job.startedAt;
-    return now - aliveAt.getTime() > STALE_RUNNING_MS;
-  }
-  return false;
-}
-
 /**
- * Reads are the client's only heartbeat on a job, so a job whose worker never
- * picked it up (or died mid-run) is closed here as a normal failure: the app
- * then shows the standard retry card instead of waiting forever.
+ * How the client should read a processing row.
+ *
+ * The queue-era reaper is gone: Trigger.dev owns retries and timeouts, so a
+ * stale "running" row is never guessed at from timestamps. The only recovery
+ * this API performs is re-submitting a row whose trigger call never landed
+ * (`triggerState === "failed"`, or stuck "submitting"), which cannot create a
+ * second run: Trigger.dev deduplicates on the document's idempotency key.
  */
-async function reapIfStale(tx, job) {
-  if (!job || !isStale(job)) return job;
-  try {
-    const updated = await tx.job.update({
-      where: { id: job.id },
-      data: {
-        state: "failed",
-        stage: "failed",
-        error: USER_MESSAGES.generic,
-        finishedAt: new Date(),
-      },
-    });
-    await tx.note.updateMany({
-      where: { id: job.noteId },
-      data: { aiState: "failed" },
-    });
-    console.warn(
-      `[STALE JOB] ${job.id} reaped after ${Math.round(
-        (Date.now() - (job.startedAt ?? job.createdAt).getTime()) / 60_000,
-      )} min in ${job.state}`,
-    );
-    return updated;
-  } catch (error) {
-    // Missing row (note deleted mid-read) is not an error worth failing on.
-    console.warn(`[STALE JOB] ${job.id} could not be reaped: ${error?.message ?? error}`);
-    return job;
-  }
-}
-
-/**
- * Polls are the student's heartbeat, so they also drive the queue. A queued
- * job needs a worker; so does a running job whose lease expired — that means
- * the invocation that claimed it was killed (serverless timeout, deploy, or an
- * older early-return path) and without a kick it would sit until the nightly
- * cron or the stale reaper. A missing lease is recovered too.
- */
-function needsWorker(job) {
-  if (!job) return false;
-  if (job.state === "queued") return true;
-  return (
-    job.state === "running" &&
-    (!job.lockedUntil || job.lockedUntil.getTime() <= Date.now())
-  );
-}
-
-/** A failed enqueue must not leave a phantom "queued" job the app will poll. */
-async function failUnqueuedJob(clerkId, job) {
-  const data = {
-    state: "failed",
-    stage: "failed",
-    error: USER_MESSAGES.generic,
-    finishedAt: new Date(),
+async function recoverRow(job) {
+  if (!job) return job;
+  if (!needsResubmit(job)) return job;
+  const retried = await retryProcessing(job).catch((error) => {
+    console.warn(`could not re-submit job ${job.id}: ${error?.message ?? error}`);
+    return null;
+  });
+  if (!retried?.job) return job;
+  return {
+    ...job,
+    triggerState: retried.triggered ? "submitted" : "failed",
+    runId: retried.runId ?? job.runId,
   };
-  try {
-    await withUser(clerkId, async (tx) => {
-      await tx.job.update({ where: { id: job.id }, data });
-      await tx.note.updateMany({
-        where: { id: job.noteId },
-        data: { aiState: "failed" },
-      });
-    });
-    Object.assign(job, data);
-  } catch (error) {
-    console.warn(`could not mark job ${job.id} failed: ${error?.message ?? error}`);
-  }
 }
 
 // Enqueue a generation for a note (study set or course reference). Local-first
@@ -204,19 +153,17 @@ jobsRouter.post("/", async (req, res) => {
         error: "This note is a course reference; only the reference can be regenerated.",
       };
     }
+    // One row per (note, kind, processing version): a repeated request finds the
+    // running row instead of starting a second run.
     const active = await tx.job.findFirst({
-      where: { noteId: note.id, state: { in: ACTIVE_STATES } },
+      where: { noteId: note.id, kind, state: { in: ACTIVE_STATES } },
       orderBy: { createdAt: "desc" },
     });
-    // A dead job (never picked up, or a run that never settled) must not block
-    // the retry the student is asking for: close it and create a fresh one.
-    if (active) {
-      const settled = await reapIfStale(tx, active);
-      if (settled.state !== "failed") return { existing: settled };
-    }
-    const created = await tx.job.create({
-      data: { userId: user.id, noteId: note.id, kind },
-    });
+    if (active) return { existing: active };
+    const created = await ensureProcessingJob(
+      { noteId: note.id, userId: user.id, kind },
+      tx,
+    ).then((result) => result.job);
     // Mirror the destination immediately; the pipeline re-asserts it when the
     // attempt starts and on finish.
     await tx.note.update({
@@ -241,34 +188,37 @@ jobsRouter.post("/", async (req, res) => {
   const warning = await warnIfOverCaps(userId);
   if (warning) console.warn(`[CAP WARNING] ${identity.email}: ${warning}`);
 
-  try {
-    await enqueueStudyJob({
-      jobId: job.id,
-      noteId: job.noteId,
-      userId: job.userId,
-      kind: job.kind,
-    });
-  } catch (error) {
-    // The row exists but nothing will ever consume it. Close it now so the
-    // student gets the standard retry card instead of a job that never runs.
-    console.warn(`enqueue failed for job ${job.id}: ${error?.message ?? error}`);
-    await failUnqueuedJob(identity.clerkId, job);
-  }
-  res.status(outcome.existing ? 200 : 201).json(shapeJob(job));
+  // Trigger.dev owns the run. A trigger failure is not fatal: the row stays with
+  // triggerState "failed" and `POST /api/jobs/:id/retry` (or the next poll's
+  // recovery) re-submits it without creating a second run.
+  const started =
+    !outcome.existing || job.triggerState === "failed"
+      ? await startProcessing({
+          noteId: job.noteId,
+          userId: job.userId,
+          kind: job.kind,
+        }).catch((error) => {
+          console.warn(`trigger failed for job ${job.id}: ${error?.message ?? error}`);
+          return null;
+        })
+      : null;
+  const fresh = started?.job
+    ? await prisma.job.findUnique({ where: { id: job.id } })
+    : job;
+  res
+    .status(outcome.existing ? 200 : 201)
+    .json({ ...shapeJob(fresh ?? job), processing: shapeProcessing(fresh ?? job) });
 });
 
 jobsRouter.get("/:id", async (req, res) => {
   const identity = await identityFromRequest(req);
   const job = await withUser(identity.clerkId, async (tx) => {
     await requireUser(tx, identity);
-    const found = await tx.job.findFirst({ where: { id: req.params.id } });
-    // Hobby-plan compensation for the daily-only cron: the watching student's
-    // own polls drive the queue instead of waiting for the nightly sweep.
-    if (needsWorker(found)) triggerRunner(found.id);
-    return reapIfStale(tx, found);
+    return tx.job.findFirst({ where: { id: req.params.id } });
   });
   if (!job) return res.status(404).json({ error: "Job not found" });
-  res.json(shapeJob(job));
+  const recovered = await recoverRow(job);
+  res.json({ ...shapeJob(recovered), processing: shapeProcessing(recovered) });
 });
 
 // Latest job for a note (the app polls while the note screen is open).
@@ -276,32 +226,16 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
   const identity = await identityFromRequest(req);
   const job = await withUser(identity.clerkId, async (tx) => {
     await requireUser(tx, identity);
-    const found = await tx.job.findFirst({
+    return tx.job.findFirst({
       where: { noteId: req.params.noteId },
       orderBy: { createdAt: "desc" },
     });
-    // Opportunistic extraction resume: a failed load may have interrupted a
-    // long file's pass halfway. Fire-and-forget; the nightly cron is the
-    // guaranteed path, these kicks just shorten the wait while the student
-    // is watching (the cron runs once a day on the Hobby plan).
-    const stuck = await tx.asset.findFirst({
-      where: {
-        noteId: req.params.noteId,
-        status: "active",
-        extractState: { in: ["pending", "partial"] },
-      },
-      select: { id: true },
-    });
-    if (stuck) triggerExtraction(stuck.id);
-    // Same idea for the queue: a queued job's polls run runner passes
-    // (release → extraction resume → next pass) without any cron, and a job
-    // whose worker died mid-run is reclaimed once its lease expires.
-    if (needsWorker(found)) triggerRunner(found.id);
-    return reapIfStale(tx, found);
   });
   if (!job) return res.json(null);
-  res.json(shapeJob(job));
+  const recovered = await recoverRow(job);
+  res.json({ ...shapeJob(recovered), processing: shapeProcessing(recovered) });
 });
+
 
 // Report a mistake on any AI output, saved with its source text (PRD 10).
 const TARGET_TYPES = new Set(["summary", "flashcard", "quiz_question", "transcript"]);
@@ -322,6 +256,7 @@ jobsRouter.post("/:id/cancel", async (req, res) => {
       data: {
         state: "cancelled",
         stage: "cancelled",
+        processingState: PROCESSING_STATES.cancelled,
         finishedAt: new Date(),
         lockedUntil: null,
       },
@@ -335,7 +270,50 @@ jobsRouter.post("/:id/cancel", async (req, res) => {
     return { id: job.id, cancelled: claim.count > 0 };
   });
   if (!cancelled) return res.status(404).json({ error: "Job not found" });
+  // Stop the Trigger.dev run too (best-effort: the row is the source of truth).
+  const row = await prisma.job.findUnique({ where: { id: cancelled.id }, select: { runId: true } });
+  if (row?.runId) await cancelProcessingRun(row.runId);
   res.json(cancelled);
+});
+
+/**
+ * Retry failed processing for a whole document.
+ * Only the incomplete materials re-run: anything already generated stays.
+ */
+jobsRouter.post("/:id/retry", async (req, res) => {
+  if (!requirePipeline(res)) return;
+  const identity = await identityFromRequest(req);
+  const job = await withUser(identity.clerkId, async (tx) => {
+    await requireUser(tx, identity);
+    return tx.job.findFirst({ where: { id: req.params.id } });
+  });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+  if (job.processingState === "completed") {
+    return res.status(409).json({ error: "This note is already complete" });
+  }
+  const result = await retryProcessing(job);
+  if (!result) return res.status(404).json({ error: "Job not found" });
+  const fresh = await prisma.job.findUnique({ where: { id: job.id } });
+  res.status(202).json({ ...shapeJob(fresh), processing: shapeProcessing(fresh) });
+});
+
+/** Retry one failed material (for example only the quiz). */
+jobsRouter.post("/:id/materials/:material/retry", async (req, res) => {
+  if (!requirePipeline(res)) return;
+  const material = String(req.params.material);
+  if (!MATERIALS.includes(material)) {
+    return res.status(400).json({ error: `material must be one of: ${MATERIALS.join(", ")}` });
+  }
+  const identity = await identityFromRequest(req);
+  const job = await withUser(identity.clerkId, async (tx) => {
+    await requireUser(tx, identity);
+    return tx.job.findFirst({ where: { id: req.params.id } });
+  });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+  const result = await retryProcessing(job, { material });
+  if (!result) return res.status(404).json({ error: "Job not found" });
+  const fresh = await prisma.job.findUnique({ where: { id: job.id } });
+  res.status(202).json({ ...shapeJob(fresh), processing: shapeProcessing(fresh) });
 });
 
 jobsRouter.post("/feedback", async (req, res) => {

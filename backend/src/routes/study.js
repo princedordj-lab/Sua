@@ -2,8 +2,7 @@ import { Router } from "express";
 import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
-import { studyQueueConfigured, enqueueStudyJob } from "../lib/queue.js";
-import { aiConfigured } from "../lib/ai.js";
+import { processingConfigured, triggerQuizMarking } from "../lib/processing/start.js";
 import { nextCardState } from "../lib/srs.js";
 import { streakViewForUser } from "../lib/streak.js";
 import { dayKeyInTimeZone, isValidTimezone } from "../lib/streak-rules.js";
@@ -19,7 +18,7 @@ const MAX_CARD_CHARS = {
 };
 
 function requirePipeline(res) {
-  if (!studyQueueConfigured() || !process.env.DATABASE_URL || !aiConfigured()) {
+  if (!processingConfigured()) {
     res.status(503).json({ error: "AI processing is not configured" });
     return false;
   }
@@ -640,9 +639,9 @@ studyRouter.post("/attempts", async (req, res) => {
       });
     });
     try {
-      await enqueueStudyJob(job.id);
+      await triggerQuizMarking(job.id);
     } catch (error) {
-      console.warn(`enqueue failed for marking job ${job.id}: ${error?.message ?? error}`);
+      console.warn(`marking trigger failed for job ${job.id}: ${error?.message ?? error}`);
     }
   }
 

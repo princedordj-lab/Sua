@@ -3,9 +3,12 @@ import { flushStorageDeletes, purgeNoteRows } from "../lib/note-deletion.js";
 import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
-import { maybeEnqueueGeneration } from "../lib/pipeline.js";
-import { triggerExtraction } from "../lib/extraction.js";
-import { triggerRunner } from "../lib/queue.js";
+import {
+  needsResubmit,
+  retryProcessing,
+  startProcessing,
+  triggerAssetExtraction,
+} from "../lib/processing/start.js";
 
 export const notesRouter = Router();
 
@@ -167,15 +170,14 @@ notesRouter.get("/:noteId", async (req, res) => {
       asset.status === "active" &&
       ["pending", "partial"].includes(asset.extractState ?? "none"),
   );
-  if (stuck) triggerExtraction(stuck.id);
+  if (stuck) {
+    triggerAssetExtraction(stuck.id).catch(() => {});
+  }
+  // Repair (never duplicate) a generation whose Trigger.dev submission never
+  // landed: Trigger.dev's idempotency key makes a re-submit the same run.
   const latest = loaded.latestJob;
-  if (
-    latest &&
-    (latest.state === "queued" ||
-      (latest.state === "running" &&
-        (!latest.lockedUntil || latest.lockedUntil.getTime() <= Date.now())))
-  ) {
-    triggerRunner(latest.id);
+  if (latest && needsResubmit(latest)) {
+    retryProcessing(latest).catch(() => {});
   }
   res.json(shapeNote(note));
 });
@@ -364,15 +366,29 @@ notesRouter.post("/sync", async (req, res) => {
   await flushStorageDeletes(storageKeys, user.id);
 
   // A pushed note may be the missing half of a conversion-marked upload that
-  // landed first (the /complete route covers the reverse order). Idempotent.
+  // landed first (the /complete route covers the reverse order). One row per
+  // note + kind + processing version, so this is safe to repeat.
   for (const note of notes) {
     try {
-      await maybeEnqueueGeneration(identity.clerkId, note.id);
-    } catch (error) {
-      console.warn(
-        `Generation enqueue failed for note ${note.id}:`,
-        error?.message ?? error,
+      const asset = await withUser(identity.clerkId, (tx) =>
+        tx.asset.findFirst({
+          where: {
+            noteId: note.id,
+            status: "active",
+            task: { in: ["lecture_note", "course_reference"] },
+          },
+          select: { id: true, task: true, kind: true },
+        }),
       );
+      if (!asset) continue;
+      await startProcessing({
+        noteId: note.id,
+        userId: note.userId,
+        kind: asset.task,
+        assetId: asset.kind === "document" ? asset.id : null,
+      });
+    } catch (error) {
+      console.warn(`processing start failed for note ${note.id}: ${error?.message ?? error}`);
     }
   }
 });

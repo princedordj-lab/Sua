@@ -163,8 +163,8 @@ export async function claimExtractionAsset({ targetAssetId = null, db = prisma }
 }
 
 /**
- * Fire-and-forget trigger; mirrors lib/queue.js's triggerRunner (waitUntil on
- * Vercel, floating promise in local dev).
+ * Fire-and-forget trigger used by the Trigger.dev extract-document task for a
+ * plain upload; a generation job triggers the same pass through the pipeline.
  */
 export async function triggerExtraction(assetId) {
   const run = extractNext({ targetAssetId: assetId }).catch((error) => {

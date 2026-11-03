@@ -10,8 +10,8 @@ import {
   verifyNeonObject,
 } from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
-import { triggerExtraction } from "../lib/extraction.js";
-import { maybeEnqueueGeneration } from "../lib/pipeline.js";
+import { shapeProcessing } from "../lib/processing/state.js";
+import { startProcessing, triggerAssetExtraction } from "../lib/processing/start.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 
@@ -307,33 +307,38 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
   // verified above; its page-wise extraction runs in a background invocation
   // (waitUntil here, or the jobs/tick cron if this response dies with it).
   // Legacy assets keep their extractedText as the compat field.
+  // Validate + register + trigger. The request never extracts or generates: the
+  // object was verified above, the state is written below, and Trigger.dev runs
+  // the work. This endpoint is safe to call repeatedly — one idempotency key per
+  // document + kind + processing version means a retry cannot start a second run.
   if (asset.kind === "document") {
-    const markedPending = await withUser(identity.clerkId, async (tx) => {
+    await withUser(identity.clerkId, async (tx) => {
       const current = await tx.asset.findFirst({ where: { id: asset.id } });
-      if (!current || current.extractedText || (current.extractState ?? "none") !== "none") return false;
-      await tx.asset.update({
-        where: { id: asset.id },
-        data: { extractState: "pending" },
-      });
-      return true;
-    }).catch(() => false);
-    if (markedPending) triggerExtraction(asset.id);
+      if (!current || current.extractedText || (current.extractState ?? "none") !== "none") return;
+      await tx.asset.update({ where: { id: asset.id }, data: { extractState: "pending" } });
+    }).catch(() => {});
   }
 
-  // A conversion-marked upload starts its AI job as soon as both halves are
-  // on the server (extraction may offset the note-sync race either way; the
-  // sync route triggers the other direction).
-  if (asset.noteId && asset.task && asset.task !== "none") {
-    try {
-      await maybeEnqueueGeneration(identity.clerkId, asset.noteId);
-    } catch (error) {
-      console.warn(
-        `Generation enqueue failed for asset ${asset.id}:`,
-        error?.message ?? error,
-      );
-    }
+  let processing = null;
+  const conversion = asset.task && asset.task !== "none" ? asset.task : null;
+  if (asset.noteId && conversion) {
+    const started = await startProcessing({
+      noteId: asset.noteId,
+      userId: asset.userId,
+      kind: conversion,
+      assetId: asset.kind === "document" ? asset.id : null,
+    }).catch((error) => {
+      console.warn(`processing start failed for asset ${asset.id}: ${error?.message ?? error}`);
+      return null;
+    });
+    processing = shapeProcessing(started?.job ?? null);
+  } else if (asset.kind === "document") {
+    // Plain upload: extract the text for reading only, generate nothing.
+    await triggerAssetExtraction(asset.id).catch((error) => {
+      console.warn(`extraction trigger failed for asset ${asset.id}: ${error?.message ?? error}`);
+    });
   }
-  res.status(outcome.status).json(shapeAsset(asset));
+  res.status(outcome.status).json({ ...shapeAsset(asset), processing });
 });
 
 assetsRouter.get("/:id/url", async (req, res) => {

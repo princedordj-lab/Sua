@@ -11,8 +11,6 @@ import { assetsRouter, uploadsRouter } from "./routes/uploads.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { chatRouter } from "./routes/chat.js";
 import { timingSafeEqual } from "node:crypto";
-import { runJobs } from "./lib/runner.js";
-import { extractNext } from "./lib/extraction.js";
 import { pruneNoteTombstones, retryStorageDeletions } from "./lib/note-deletion.js";
 import { sendDueReminders } from "./lib/reminders.js";
 import { sendStreakNotices } from "./lib/streak.js";
@@ -106,17 +104,10 @@ async function handleTick(req, res) {
   }
 
   try {
-    const maxJobs = Math.min(10, Math.max(1, Number(req.query?.maxJobs ?? 5)));
-    const budgetMs = Math.min(270_000, Math.max(10_000, Number(req.query?.budgetMs ?? 240_000)));
-    const result = await runJobs({ maxJobs, budgetMs });
-    // Extraction is separate from generation jobs: pending/partial assets
-    // resume here with their own (smaller) time budget per pass.
-    const maxAssets = Math.min(5, Math.max(1, Number(req.query?.maxAssets ?? 2)));
-    const extractBudgetMs = Math.min(
-      200_000,
-      Math.max(15_000, Number(req.query?.extractBudgetMs ?? 120_000)),
-    );
-    const extraction = await extractNext({ maxAssets, budgetMs: extractBudgetMs });
+    // Document processing does NOT run here: Trigger.dev owns extraction, OCR
+    // and generation (see src/trigger/*). This endpoint is only the janitor —
+    // storage-deletion retries, tombstone pruning, the web reminder sweep and
+    // the streak notices — so it never competes with a processing run.
     // Deletion housekeeping: retry object deletes that failed with their note,
     // and drop tombstones no device can still need. Neither may fail the tick.
     const storage = await retryStorageDeletions({ limit: 10 }).catch((error) => {
@@ -150,8 +141,6 @@ async function handleTick(req, res) {
           });
     res.json({
       ok: true,
-      ...result,
-      extraction,
       janitor: { storage, tombstones },
       reminders,
       streakNotices,
@@ -248,14 +237,8 @@ export default app;
 
 // Start server locally if not running on Vercel
 if (!process.env.VERCEL) {
-  // Local development background runner loop
-  const devInterval = setInterval(() => {
-    runJobs({ maxJobs: 2, budgetMs: 15_000 }).catch((err) => {
-      console.warn("[dev-runner] loop error:", err?.message ?? err);
-    });
-  }, 3000);
-  devInterval.unref?.();
-
+  // Local development: Trigger.dev runs the tasks (`npx trigger.dev dev`), so the
+  // API process has no background loop of its own.
   app.listen(port, () => {
     if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
       console.warn(
