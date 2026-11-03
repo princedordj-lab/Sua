@@ -12,8 +12,20 @@ import { interruptedAfterMs } from "../lib/budget.js";
 import { decideJobCreation } from "../lib/job-dedupe.js";
 import { lockNote } from "../lib/note-lock.js";
 import { warnIfOverCaps } from "../lib/pipeline.js";
-import { triggerExtraction } from "../lib/extraction.js";
-import { USER_MESSAGES } from "../config/ai-pipeline.js";
+import {
+  cancelProcessingRun,
+  ensureProcessingJob,
+  needsResubmit,
+  processingConfigured,
+  retryProcessing,
+  startProcessing,
+} from "../lib/processing/start.js";
+import {
+  MATERIALS,
+  PROCESSING_STATES,
+  materialStates,
+  shapeProcessing,
+} from "../lib/processing/state.js";
 
 export const jobsRouter = Router();
 
@@ -74,6 +86,12 @@ function shapeJob(job) {
     progressUnit: PROGRESS_UNITS[job.stage] ?? null,
     // Server-computed sentence so mobile and web cannot disagree about units.
     stageDetail: stageDetail(job),
+    // Trigger.dev processing state (additive; the lifecycle the app renders).
+    processingState: job.processingState ?? null,
+    triggerState: job.triggerState ?? "none",
+    runId: job.runId ?? null,
+    errorCategory: job.errorCategory ?? null,
+    materials: materialStates(job),
     // Proof of life: a running job with an old heartbeat is not progressing.
     heartbeatAt: job.heartbeatAt ?? job.updatedAt ?? null,
     startedAt: job.startedAt,
@@ -226,7 +244,7 @@ jobsRouter.post("/", async (req, res) => {
       return { status: 404, error: "Note not found" };
     }
     const active = await tx.job.findFirst({
-      where: { noteId: note.id, state: { in: ACTIVE_STATES } },
+      where: { noteId: note.id, kind, state: { in: ACTIVE_STATES } },
       orderBy: { createdAt: "desc" },
     });
     // A dead job (never picked up, or a run that never settled) must not block
@@ -297,7 +315,8 @@ jobsRouter.get("/:id", async (req, res) => {
   });
   if (kick) triggerRunner(kick);
   if (!job) return res.status(404).json({ error: "Job not found" });
-  res.json(shapeJob(job));
+  const recovered = await recoverRow(job);
+  res.json({ ...shapeJob(recovered), processing: shapeProcessing(recovered) });
 });
 
 // Latest job for a note (the app polls while the note screen is open).
@@ -307,7 +326,7 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
   let kick = null;
   const job = await withUser(identity.clerkId, async (tx) => {
     await requireUser(tx, identity);
-    const found = await tx.job.findFirst({
+    return tx.job.findFirst({
       where: { noteId: req.params.noteId },
       orderBy: { createdAt: "desc" },
     });
@@ -332,8 +351,10 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
   if (extractId) triggerExtraction(extractId);
   if (kick) triggerRunner(kick);
   if (!job) return res.json(null);
-  res.json(shapeJob(job));
+  const recovered = await recoverRow(job);
+  res.json({ ...shapeJob(recovered), processing: shapeProcessing(recovered) });
 });
+
 
 // Report a mistake on any AI output, saved with its source text (PRD 10).
 const TARGET_TYPES = new Set(["summary", "flashcard", "quiz_question", "transcript"]);
@@ -354,6 +375,7 @@ jobsRouter.post("/:id/cancel", async (req, res) => {
       data: {
         state: "cancelled",
         stage: "cancelled",
+        processingState: PROCESSING_STATES.cancelled,
         finishedAt: new Date(),
         lockedUntil: null,
       },
@@ -367,7 +389,50 @@ jobsRouter.post("/:id/cancel", async (req, res) => {
     return { id: job.id, cancelled: claim.count > 0 };
   });
   if (!cancelled) return res.status(404).json({ error: "Job not found" });
+  // Stop the Trigger.dev run too (best-effort: the row is the source of truth).
+  const row = await prisma.job.findUnique({ where: { id: cancelled.id }, select: { runId: true } });
+  if (row?.runId) await cancelProcessingRun(row.runId);
   res.json(cancelled);
+});
+
+/**
+ * Retry failed processing for a whole document.
+ * Only the incomplete materials re-run: anything already generated stays.
+ */
+jobsRouter.post("/:id/retry", async (req, res) => {
+  if (!requirePipeline(res)) return;
+  const identity = await identityFromRequest(req);
+  const job = await withUser(identity.clerkId, async (tx) => {
+    await requireUser(tx, identity);
+    return tx.job.findFirst({ where: { id: req.params.id } });
+  });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+  if (job.processingState === "completed") {
+    return res.status(409).json({ error: "This note is already complete" });
+  }
+  const result = await retryProcessing(job);
+  if (!result) return res.status(404).json({ error: "Job not found" });
+  const fresh = await prisma.job.findUnique({ where: { id: job.id } });
+  res.status(202).json({ ...shapeJob(fresh), processing: shapeProcessing(fresh) });
+});
+
+/** Retry one failed material (for example only the quiz). */
+jobsRouter.post("/:id/materials/:material/retry", async (req, res) => {
+  if (!requirePipeline(res)) return;
+  const material = String(req.params.material);
+  if (!MATERIALS.includes(material)) {
+    return res.status(400).json({ error: `material must be one of: ${MATERIALS.join(", ")}` });
+  }
+  const identity = await identityFromRequest(req);
+  const job = await withUser(identity.clerkId, async (tx) => {
+    await requireUser(tx, identity);
+    return tx.job.findFirst({ where: { id: req.params.id } });
+  });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+  const result = await retryProcessing(job, { material });
+  if (!result) return res.status(404).json({ error: "Job not found" });
+  const fresh = await prisma.job.findUnique({ where: { id: job.id } });
+  res.status(202).json({ ...shapeJob(fresh), processing: shapeProcessing(fresh) });
 });
 
 jobsRouter.post("/feedback", async (req, res) => {

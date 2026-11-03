@@ -11,8 +11,6 @@ import { assetsRouter, uploadsRouter } from "./routes/uploads.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { chatRouter } from "./routes/chat.js";
 import { timingSafeEqual } from "node:crypto";
-import { runJobs } from "./lib/runner.js";
-import { extractNext } from "./lib/extraction.js";
 import { pruneNoteTombstones, retryStorageDeletions } from "./lib/note-deletion.js";
 import { sendDueReminders } from "./lib/reminders.js";
 import { sendStreakNotices } from "./lib/streak.js";
@@ -214,8 +212,6 @@ async function handleTick(req, res) {
 
     res.json({
       ok: true,
-      ...result,
-      extraction,
       janitor: { storage, tombstones },
       reminders,
       streakNotices,
@@ -313,16 +309,9 @@ export default app;
 
 // Start server locally if not running on Vercel
 if (!process.env.VERCEL) {
-  // Local development background runner loop. The budget comes from the same
-  // plan as production, so a pass that would overrun the deployed ceiling also
-  // shows up locally instead of only in production logs.
-  const devBudgetMs = Math.min(60_000, processingBudgetMs());
+  // Local development background runner loop
   const devInterval = setInterval(() => {
-    runJobs({
-      maxJobs: 2,
-      maxPasses: Math.max(2, maxPassesPerInvocation()),
-      budgetMs: devBudgetMs,
-    }).catch((err) => {
+    runJobs({ maxJobs: 2, budgetMs: 15_000 }).catch((err) => {
       console.warn("[dev-runner] loop error:", err?.message ?? err);
     });
   }, 3000);

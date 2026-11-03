@@ -170,15 +170,14 @@ notesRouter.get("/:noteId", async (req, res) => {
       asset.status === "active" &&
       ["pending", "partial"].includes(asset.extractState ?? "none"),
   );
-  if (stuck) triggerExtraction(stuck.id);
+  if (stuck) {
+    triggerAssetExtraction(stuck.id).catch(() => {});
+  }
+  // Repair (never duplicate) a generation whose Trigger.dev submission never
+  // landed: Trigger.dev's idempotency key makes a re-submit the same run.
   const latest = loaded.latestJob;
-  if (
-    latest &&
-    (latest.state === "queued" ||
-      (latest.state === "running" &&
-        (!latest.lockedUntil || latest.lockedUntil.getTime() <= Date.now())))
-  ) {
-    triggerRunner(latest.id);
+  if (latest && needsResubmit(latest)) {
+    retryProcessing(latest).catch(() => {});
   }
   res.json(shapeNote(note));
 });

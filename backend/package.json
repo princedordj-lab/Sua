@@ -12,7 +12,6 @@
     "test:pdf": "tsx scripts/test-pdf-extraction.mjs",
     "test:llamaparse": "tsx scripts/test-llamaparse.mjs",
     "test:ai": "tsx scripts/test-ai-errors.mjs",
-    "test:recovery": "tsx scripts/test-job-recovery.mjs",
     "test:long-recovery": "tsx scripts/test-long-doc-recovery.mjs",
     "test:merge": "tsx scripts/test-merge-resume.mjs",
     "test:streak": "tsx scripts/test-streak.mjs",
@@ -27,13 +26,17 @@
     "setup:neon-storage": "tsx scripts/create-neon-bucket.js",
     "prisma": "prisma",
     "postinstall": "prisma generate",
-    "build": "prisma generate && esbuild src/index.js --bundle --platform=node --format=esm --outfile=dist/index.js --external:@napi-rs/canvas --external:@prisma/client --external:express --external:cors --external:@clerk/express --external:pg --external:@vercel/functions --external:cloudinary --external:svix --external:dotenv --external:pdf-parse --external:pdfjs-dist --external:jszip --external:web-push",
+    "build": "prisma generate && esbuild src/index.js --bundle --platform=node --format=esm --outfile=dist/index.js --external:@napi-rs/canvas --external:@prisma/client --external:express --external:cors --external:@clerk/express --external:pg --external:@vercel/functions --external:cloudinary --external:svix --external:dotenv --external:pdf-parse --external:pdfjs-dist --external:jszip --external:web-push --external:@trigger.dev/sdk --external:@trigger.dev/core",
     "r2:login": "wrangler login",
     "r2:whoami": "wrangler whoami",
     "r2:bucket:create": "wrangler r2 bucket create sua-downloads",
     "r2:bucket:list": "wrangler r2 bucket list",
     "r2:domain:add": "wrangler r2 bucket domain add sua-downloads",
-    "r2:upload": "wrangler r2 object put"
+    "r2:upload": "wrangler r2 object put",
+    "test:processing": "tsx scripts/test-processing-pipeline.mjs",
+    "trigger:dev": "trigger.dev dev",
+    "trigger:deploy": "trigger.dev deploy",
+    "trigger:deploy:prod": "trigger.dev deploy --env prod"
   },
   "keywords": [],
   "author": "",
@@ -45,6 +48,7 @@
     "@napi-rs/canvas": "0.1.80",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "7.10.0",
+    "@trigger.dev/sdk": "^4.8.3",
     "@vercel/functions": "^2.1.0",
     "cloudinary": "^2.11.0",
     "cors": "^2.8.6",
@@ -62,6 +66,7 @@
     "@types/node": "^26.6.5",
     "@types/pg": "^8.23.1",
     "esbuild": "^0.25.12",
+    "trigger.dev": "^4.8.3",
     "tsx": "^4.23.15",
     "wrangler": "^4.156.0"
   }

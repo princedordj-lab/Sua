@@ -263,6 +263,28 @@ model Job {
   // Last proof of life from a worker pass (stage, progress or checkpoint write).
   heartbeatAt   DateTime?
   finishedAt    DateTime?
+  // ---- Trigger.dev processing state (migration 22) -------------------------
+  // The custom Postgres queue is gone; Trigger.dev runs the work. `state` and
+  // `stage` stay as the client-facing contract, `processingState` carries the
+  // document lifecycle (uploaded | queued | extracting | ocr_processing |
+  // generating | completed | failed | cancelled).
+  processingVersion String    @default("v1")
+  processingState   String    @default("queued")
+  // none | submitting | submitted | failed — the DB-write / trigger-API boundary.
+  triggerState      String    @default("none")
+  // Unique per (note, kind, processing version): a repeated /complete or /jobs
+  // call finds this row instead of creating a second run.
+  idempotencyKey    String?   @unique
+  runId             String?
+  // Per-material state: { notes, summary, flashcards, quiz } -> { state, error, at }
+  materials         Json?
+  // transient | permanent — how the last failure must be handled.
+  errorCategory     String?
+  // AI-ready source text (extracted + normalized + condensed) persisted once so
+  // every material stage reads it from Postgres instead of re-reading the file
+  // or re-paying for digests. Never sent through a Trigger.dev payload.
+  sourceText        String?   @db.Text
+  sourceMeta        Json?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -273,6 +295,8 @@ model Job {
   @@index([state, runAfter])
   @@index([lockedUntil])
   @@index([state, heartbeatAt])
+  @@index([runId])
+  @@index([processingState, updatedAt])
   @@map("jobs")
 }
 
