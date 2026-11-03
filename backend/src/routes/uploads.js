@@ -2,6 +2,7 @@ import { Router } from "express";
 import { cloudinary, cloudinaryConfigured } from "../config/cloudinary.js";
 import { neonStorageConfigured, presignNeonObject } from "../config/neon-storage.js";
 import {
+  MAX_BYTES,
   MAX_UPLOAD_BYTES,
   MAX_AUDIO_BYTES,
   assetDownloadUrl,
@@ -10,6 +11,8 @@ import {
   verifyNeonObject,
 } from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
+import { runAfterResponse } from "../lib/background.js";
+import { checkCompletion, needsExtraction, needsVerification } from "../lib/upload-intake.js";
 import { triggerExtraction } from "../lib/extraction.js";
 import { maybeEnqueueGeneration } from "../lib/pipeline.js";
 import { requireUser } from "../lib/users.js";
@@ -32,13 +35,6 @@ function mimeForFormat(format, kind) {
   };
   return mimeByFormat[format] ?? (kind === "image" ? "image/jpeg" : "application/octet-stream");
 }
-
-const MAX_BYTES = {
-  document: MAX_UPLOAD_BYTES,
-  image: MAX_UPLOAD_BYTES,
-  // 60-minute Pro recordings at the ~0.5 MB/min compression target.
-  audio: MAX_AUDIO_BYTES,
-};
 
 // Where the student wants a document/photo converted once it lands.
 const TASKS = new Set(["lecture_note", "course_reference"]);
@@ -218,121 +214,138 @@ uploadsRouter.post("/sign", async (req, res) => {
 // The client confirms an upload; the server verifies the asset actually
 // exists in the selected provider before marking it active (never trusts a
 // client URL or object metadata).
+//
+// Three database transactions, not five: read (asset + whether its note still
+// exists), verify storage outside any transaction, then one locked write that
+// activates the asset and marks it for extraction together. The response is
+// the row as the database now holds it — the old version answered with the
+// pre-update object, so a freshly completed document reported
+// `extractState: "none"` while the row said `pending`.
 uploadsRouter.post("/:id/complete", async (req, res) => {
   const identity = await identityFromRequest(req);
   const { id } = req.params;
   const claimedPublicId = String(req.body?.publicId ?? "");
 
-  const existingAsset = await withUser(identity.clerkId, async (tx) => {
+  const loaded = await withUser(identity.clerkId, async (tx) => {
     const user = await requireUser(tx, identity);
-    return tx.asset.findFirst({ where: { id, userId: user.id } });
+    const asset = await tx.asset.findFirst({ where: { id, userId: user.id } });
+    if (!asset) return { asset: null, noteAlive: false };
+    // The note may have been deleted while the bytes were in flight.
+    // Asset.noteId is SetNull, so no noteId means the upload was detached.
+    const noteAlive = asset.noteId
+      ? Boolean(
+          await tx.note.findFirst({
+            where: { id: asset.noteId, userId: user.id },
+            select: { id: true },
+          }),
+        )
+      : false;
+    return { asset, noteAlive };
   });
 
-  if (!existingAsset) return res.status(404).json({ error: "Asset not found" });
-  let remote = null;
-  let outcome;
-  if (existingAsset.status === "active") {
-    outcome = { status: 200, asset: existingAsset };
-  } else {
-    if (!claimedPublicId || claimedPublicId !== existingAsset.publicId) {
-      return res.status(400).json({ error: "publicId does not match this upload" });
-    }
+  if (!loaded.asset) return res.status(404).json({ error: "Asset not found" });
+  const existingAsset = loaded.asset;
 
+  // A dead parent means the upload must not be extracted or turned into a job.
+  if (existingAsset.noteId && !loaded.noteAlive) {
+    await withUser(identity.clerkId, async (tx) => {
+      const user = await requireUser(tx, identity);
+      await tx.asset.deleteMany({ where: { id: existingAsset.id, userId: user.id } });
+    }).catch(() => {});
+    try {
+      await deleteAssetObject(existingAsset);
+    } catch (error) {
+      console.warn(`Orphan asset cleanup failed for ${existingAsset.publicId}:`, error);
+    }
+    return res.status(410).json({ error: "Note was deleted" });
+  }
+
+  const provider = storageProviderOf(existingAsset);
+  let remote = null;
+  if (needsVerification(existingAsset)) {
+    // Same rule the locked write below applies: a publicId that no longer
+    // matches is a conflict, not a file to verify.
+    const pre = checkCompletion(existingAsset, { claimedPublicId, provider });
+    if (!pre.ok) return res.status(pre.status).json({ error: pre.error });
     // Verify storage outside the RLS transaction. Neon's object read can take
     // longer than Prisma's interactive transaction window, so keeping network
     // I/O here prevents holding a database connection while waiting on storage.
     try {
-      remote = storageProviderOf(existingAsset) === "neon"
-        ? await verifyNeonObject(existingAsset.publicId, MAX_BYTES[existingAsset.kind])
-        : await fetchRemoteWithRetry(existingAsset.publicId, existingAsset.resourceType);
+      remote =
+        provider === "neon"
+          ? await verifyNeonObject(existingAsset.publicId, MAX_BYTES[existingAsset.kind])
+          : await fetchRemoteWithRetry(existingAsset.publicId, existingAsset.resourceType);
     } catch (err) {
-      console.error(`${storageProviderOf(existingAsset)} complete verification failed for ${existingAsset.publicId}:`, err);
+      console.error(`${provider} complete verification failed for ${existingAsset.publicId}:`, err);
       if (/exceeds the allowed size/i.test(err?.message ?? "")) {
         return res.status(413).json({ error: "Uploaded file exceeds the allowed size" });
       }
       return res.status(400).json({ error: "Upload not found on storage provider" });
     }
+  }
 
-    outcome = await withUser(identity.clerkId, async (tx) => {
-      const user = await requireUser(tx, identity);
-      const current = await tx.asset.findFirst({ where: { id, userId: user.id } });
-      if (!current) return { status: 404, error: "Asset not found" };
-      // A concurrent completion may already have activated this same asset.
-      if (current.status === "active") return { status: 200, asset: current };
-      if (current.publicId !== claimedPublicId || storageProviderOf(current) !== storageProviderOf(existingAsset)) {
-        return { status: 409, error: "Asset changed during upload; retry completion" };
-      }
-      const updated = await tx.asset.update({
-        where: { id: current.id },
+  const outcome = await withUser(identity.clerkId, async (tx) => {
+    const user = await requireUser(tx, identity);
+    // Serialise duplicate completions: two concurrent requests must produce one
+    // activation, not two "not active yet" reads followed by two updates.
+    const locked = await tx.$queryRaw`
+      SELECT "id" FROM "assets"
+      WHERE "id" = ${id} AND "userId" = ${user.id}
+      FOR UPDATE
+    `;
+    if (!Array.isArray(locked) || !locked.length) {
+      return { status: 404, error: "Asset not found" };
+    }
+    let asset = await tx.asset.findFirst({ where: { id, userId: user.id } });
+    const check = checkCompletion(asset, { claimedPublicId, provider });
+    if (!check.ok) return check;
+
+    if (asset.status !== "active") {
+      asset = await tx.asset.update({
+        where: { id: asset.id },
         data: {
           status: "active",
-          bytes: remote.bytes ?? 0,
-          secureUrl: remote.secure_url ?? null,
+          bytes: remote?.bytes ?? asset.bytes ?? 0,
+          secureUrl: remote?.secure_url ?? asset.secureUrl ?? null,
         },
       });
-      return { status: 200, asset: updated };
-    });
-  }
-
-  if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
-
-  let asset = outcome.asset;
-  // The note may have been deleted while the bytes were in flight. Asset.noteId
-  // is SetNull, so a null here means the note was removed after signing; do not
-  // extract text for, or enqueue work against, a note the student deleted.
-  if (asset.noteId) {
-    const noteAlive = await withUser(identity.clerkId, async (tx) => {
-      const user = await requireUser(tx, identity);
-      const note = await tx.note.findFirst({
-        where: { id: asset.noteId, userId: user.id },
-        select: { id: true },
-      });
-      return Boolean(note);
-    });
-    if (!noteAlive) {
-      const orphan = asset;
-      await withUser(identity.clerkId, async (tx) => {
-        const user = await requireUser(tx, identity);
-        await tx.asset.deleteMany({ where: { id: orphan.id, userId: user.id } });
-      }).catch(() => {});
-      try {
-        await deleteAssetObject(orphan);
-      } catch (error) {
-        console.warn(`Orphan asset cleanup failed for ${orphan.publicId}:`, error);
-      }
-      return res.status(410).json({ error: "Note was deleted" });
     }
-  }
-  // Fast intake: never parse the file inside the request. The document was
-  // verified above; its page-wise extraction runs in a background invocation
-  // (waitUntil here, or the jobs/tick cron if this response dies with it).
-  // Legacy assets keep their extractedText as the compat field.
-  if (asset.kind === "document") {
-    const markedPending = await withUser(identity.clerkId, async (tx) => {
-      const current = await tx.asset.findFirst({ where: { id: asset.id } });
-      if (!current || current.extractedText || (current.extractState ?? "none") !== "none") return false;
-      await tx.asset.update({
+
+    // Fast intake: never parse the file inside the request. Marking the row
+    // pending is all /complete does; the page-wise pass runs after the response.
+    const startExtraction = needsExtraction(asset);
+    if (startExtraction) {
+      asset = await tx.asset.update({
         where: { id: asset.id },
         data: { extractState: "pending" },
       });
-      return true;
-    }).catch(() => false);
-    if (markedPending) triggerExtraction(asset.id);
+    }
+    return { status: 200, asset, startedExtraction: startExtraction };
+  });
+
+  if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
+
+  const asset = outcome.asset;
+
+  // Post-response work, registered before the response is sent so the platform
+  // keeps the invocation open (lib/background.js registers synchronously) —
+  // and started after the commit, never while a database connection is held.
+  if (outcome.startedExtraction) triggerExtraction(asset.id);
+
+  // A conversion-marked upload starts its AI job as soon as both halves are on
+  // the server (extraction may offset the note-sync race either way; the sync
+  // route triggers the other direction).
+  if (asset.noteId && asset.task && asset.task !== "none") {
+    runAfterResponse(`enqueue ${asset.id}`, () =>
+      maybeEnqueueGeneration(identity.clerkId, asset.noteId).catch((error) => {
+        console.warn(
+          `Generation enqueue failed for asset ${asset.id}:`,
+          error?.message ?? error,
+        );
+      }),
+    );
   }
 
-  // A conversion-marked upload starts its AI job as soon as both halves are
-  // on the server (extraction may offset the note-sync race either way; the
-  // sync route triggers the other direction).
-  if (asset.noteId && asset.task && asset.task !== "none") {
-    try {
-      await maybeEnqueueGeneration(identity.clerkId, asset.noteId);
-    } catch (error) {
-      console.warn(
-        `Generation enqueue failed for asset ${asset.id}:`,
-        error?.message ?? error,
-      );
-    }
-  }
   res.status(outcome.status).json(shapeAsset(asset));
 });
 

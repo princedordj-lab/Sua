@@ -90,8 +90,13 @@ export const longDoc = {
   reduceReserveMs: int("REDUCE_RESERVE_MS", 8_000),
   // A merge that cannot get at least this long is not worth starting: it would
   // be clamped to the deadline and time out, which costs work instead of
-  // parking it.
-  reduceMinWindowMs: int("REDUCE_MIN_WINDOW_MS", 20_000),
+  // parking it. Raised to MIN_AI_CALL_WINDOW_MS (lib/budget.js) because a
+  // platform with a short function budget turns "start it anyway" into a
+  // repeated timeout the stall accounting eventually fails.
+  reduceMinWindowMs: Math.max(
+    int("REDUCE_MIN_WINDOW_MS", 20_000),
+    int("MIN_AI_CALL_WINDOW_MS", 25_000),
+  ),
   // Coverage and verification.
   minCoverage: ratio("MIN_COVERAGE", 0.85),
   // Generate-stage word caps for long outputs.
@@ -258,6 +263,10 @@ export const USER_MESSAGES = {
     "Something went wrong. Tap to try again. This didn't use your monthly allowance.",
   tooShort:
     "There isn't enough text here to study yet. Add a bit more and try again.",
+  // Processing really stopped (the invocation that owned the job was killed).
+  // Not a defect in the file, and finished pages are on the checkpoint.
+  interrupted:
+    "Processing stopped before it finished. Tap to try again — finished pages are kept.",
 };
 
 /** An error whose message is safe to show the student verbatim. */

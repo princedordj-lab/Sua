@@ -8,6 +8,8 @@
  * Combining" symptom.
  */
 
+import { isUserFacing } from "../config/ai-pipeline.js";
+
 export const YIELD_DEFAULTS = {
   maxRuntimeMs: 45 * 60_000,
   maxYields: 60,
@@ -70,4 +72,78 @@ export function yieldDelayMs(error, random = Math.random) {
     return clampDelay(base + Math.floor(random() * 5_000));
   }
   return 2_000;
+}
+
+/**
+ * A budget yield is "out of time for this invocation", not "wait for the
+ * provider". Only those may be re-claimed immediately by the same invocation;
+ * a rate-limit yield must keep its delay or the provider is hammered.
+ */
+export function isBudgetYield(error) {
+  return error?.reason !== "rate_limit";
+}
+
+/**
+ * Should this invocation keep working the same job after a yield?
+ *
+ * A targeted run (a kick for one job) used to exit after a single pass even
+ * with most of its budget unused, so a long document advanced one pass per
+ * client poll. Continuing is safe because the checkpoint is durable: a pass
+ * that made no progress is caught by the stall accounting, and the pass count
+ * keeps one job from monopolising the invocation.
+ */
+export function shouldContinueInInvocation({
+  remainingMs,
+  passes,
+  minContinueMs = 15_000,
+  maxPasses = 6,
+}) {
+  if (!Number.isFinite(remainingMs) || remainingMs < minContinueMs) return false;
+  return (passes ?? 0) < maxPasses;
+}
+
+/**
+ * Stable error code for a failed job. Moved here from the runner so the
+ * pipeline's `setFailed` writes the same codes the runner does — a failure
+ * without a code is a failure the diagnostics cannot group.
+ */
+export function errorCodeFor(error) {
+  if (!error) return null;
+  if (error.name === "NoteDeletedError" || error.code === "P2025") return "NOTE_DELETED";
+  if (error.name === "JobCancelledError" || error.cancelled) return "CANCELLED";
+  if (isUserFacing(error)) return "USER_FACING";
+
+  const kind = error.kind;
+  if (kind === "rate_limit") return "RATE_LIMIT";
+  if (kind === "timeout") return "TIMEOUT";
+  if (kind === "too_large") return "INPUT_TOO_LARGE";
+  if (kind === "auth") return "AI_AUTH";
+  if (kind === "quota") return "AI_QUOTA";
+  if (kind === "invalid_output") return "PARSE_ERROR";
+  if (kind === "transient") return "AI_TRANSIENT";
+  if (kind === "bad_request") return "AI_BAD_REQUEST";
+  // A checkpoint that cannot be written is not the model's fault: the durable
+  // state is missing, so the pass must be retried rather than reported as bad
+  // output.
+  if (kind === "checkpoint_write") return "CHECKPOINT_WRITE";
+
+  const msg = String(error.message ?? error).toLowerCase();
+  if (msg.includes("too short")) return "NOTE_TOO_SHORT";
+  if (msg.includes("disallowed")) return "DISALLOWED_KIND";
+  if (
+    error.status === 429 ||
+    error.statusCode === 429 ||
+    msg.includes("rate limit") ||
+    msg.includes("429")
+  ) {
+    return "RATE_LIMIT";
+  }
+  if (msg.includes("timeout") || msg.includes("timed out") || error.code === "ETIMEDOUT") {
+    return "TIMEOUT";
+  }
+  if (msg.includes("json") || msg.includes("parse")) return "PARSE_ERROR";
+  if (msg.includes("schema") || msg.includes("validation")) return "SCHEMA_INVALID";
+  if (error.code && typeof error.code === "string") return error.code.toUpperCase().slice(0, 32);
+
+  return "INTERNAL_ERROR";
 }

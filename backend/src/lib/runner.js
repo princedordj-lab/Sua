@@ -2,12 +2,15 @@ import { prisma } from "../config/prisma.js";
 import { processJob } from "./pipeline.js";
 import { extractDocument, isRenderedPageBlank, renderPdfPage } from "./extract.js";
 import { extractNext } from "./extraction.js";
-import { isUserFacing, isJobYield, USER_MESSAGES, longDoc } from "../config/ai-pipeline.js";
+import { isUserFacing, isJobYield, longDoc } from "../config/ai-pipeline.js";
 import {
+  errorCodeFor,
+  isBudgetYield,
   nextYieldState,
   progressSignal,
   yieldDelayMs,
 } from "./job-recovery.js";
+import { leaseMsFor, processingBudgetMs } from "./budget.js";
 
 export const ALLOWED_JOB_KINDS = [
   "study_set",
@@ -17,8 +20,6 @@ export const ALLOWED_JOB_KINDS = [
 ];
 
 export const MIN_NOTE_CHARS = 40;
-export const DEFAULT_BUDGET_MS = 240_000;
-export const DEFAULT_LEASE_MS = 360_000;
 export const BACKOFF_DELAYS_SEC = [30, 120, 600];
 
 /**
@@ -112,53 +113,10 @@ export function isTransient(error) {
 }
 
 /**
- * Concise classification code for telemetry and troubleshooting.
- */
-export function errorCodeFor(error) {
-  if (!error) return null;
-  if (error.name === "NoteDeletedError" || error.code === "P2025") return "NOTE_DELETED";
-  if (isUserFacing(error)) return "USER_FACING";
-
-  const kind = error.kind;
-  if (kind === "rate_limit") return "RATE_LIMIT";
-  if (kind === "timeout") return "TIMEOUT";
-  if (kind === "too_large") return "INPUT_TOO_LARGE";
-  if (kind === "auth") return "AI_AUTH";
-  if (kind === "quota") return "AI_QUOTA";
-  if (kind === "invalid_output") return "PARSE_ERROR";
-  if (kind === "transient") return "AI_TRANSIENT";
-  if (kind === "bad_request") return "AI_BAD_REQUEST";
-  // A checkpoint that cannot be written is not the model's fault: the durable
-  // state is missing, so the pass must be retried rather than reported as bad
-  // output.
-  if (kind === "checkpoint_write") return "CHECKPOINT_WRITE";
-
-  const msg = String(error.message ?? error).toLowerCase();
-  if (msg.includes("too short")) return "NOTE_TOO_SHORT";
-  if (msg.includes("disallowed")) return "DISALLOWED_KIND";
-  if (
-    error.status === 429 ||
-    error.statusCode === 429 ||
-    msg.includes("rate limit") ||
-    msg.includes("429")
-  ) {
-    return "RATE_LIMIT";
-  }
-  if (msg.includes("timeout") || msg.includes("timed out") || error.code === "ETIMEDOUT") {
-    return "TIMEOUT";
-  }
-  if (msg.includes("json") || msg.includes("parse")) return "PARSE_ERROR";
-  if (msg.includes("schema") || msg.includes("validation")) return "SCHEMA_INVALID";
-  if (error.code && typeof error.code === "string") return error.code.toUpperCase().slice(0, 32);
-
-  return "INTERNAL_ERROR";
-}
-
-/**
  * Claims the next eligible job atomically using Postgres FOR UPDATE SKIP LOCKED.
  * If targetJobId is specified, attempts to claim that specific job first.
  */
-export async function claimJob({ leaseMs = DEFAULT_LEASE_MS, targetJobId = null } = {}) {
+export async function claimJob({ leaseMs = leaseMsFor(processingBudgetMs()), targetJobId = null } = {}) {
   const leaseSeconds = Math.max(30, Math.ceil(leaseMs / 1000));
   const leaseInterval = `${leaseSeconds} seconds`;
 
@@ -259,20 +217,6 @@ export async function claimJob({ leaseMs = DEFAULT_LEASE_MS, targetJobId = null 
 }
 
 /**
- * Extends lease time for a currently running job.
- */
-export async function extendLease(jobId, extraMs = 180_000) {
-  const extraSec = Math.max(10, Math.ceil(extraMs / 1000));
-  const interval = `${extraSec} seconds`;
-  await prisma.$executeRaw`
-    UPDATE "jobs"
-    SET "lockedUntil" = GREATEST("lockedUntil", NOW()) + (${interval})::interval,
-        "updatedAt" = NOW()
-    WHERE "id" = ${jobId} AND "state" = 'running'
-  `.catch(() => {});
-}
-
-/**
  * Releases a running job back to queued without incrementing attempts.
  */
 export async function releaseJob(jobId) {
@@ -288,7 +232,9 @@ export async function releaseJob(jobId) {
  * the job is queued again for the next poll/tick to continue.
  */
 export async function releaseJobForResume(jobId, delayMs = 2_000) {
-  const seconds = Math.max(2, Math.round(Number(delayMs) / 1000));
+  // 0 is a real value: the invocation that yielded still has budget, so it
+  // wants to claim the same job again in this same pass.
+  const seconds = Math.max(0, Math.round(Number(delayMs) / 1000));
   await prisma
     .$executeRaw`
       UPDATE "jobs"
@@ -310,14 +256,14 @@ export async function releaseJobForResume(jobId, delayMs = 2_000) {
  * without adding a digest or a reduce entry is a stall, and is failed honestly
  * instead of looping on "Combining" forever.
  */
-async function handleYield(job, error, passStarted) {
+async function handleYield(job, error, passStarted, { continueInInvocation = false } = {}) {
   const fresh = await prisma.job
     .findUnique({
       where: { id: job.id },
       select: { state: true, progressDone: true, checkpoint: true, stage: true },
     })
     .catch(() => null);
-  if (!fresh || fresh.state !== "running") return;
+  if (!fresh || fresh.state !== "running") return "parked";
 
   const state = nextYieldState(fresh.checkpoint?.recovery ?? {}, {
     signal: progressSignal(fresh),
@@ -367,14 +313,19 @@ async function handleYield(job, error, passStarted) {
     console.warn(
       `[yield] job=${job.id} failed reason=${state.fail} runtimeMs=${state.runtimeMs} yields=${state.yields} stalled=${state.stalled}`,
     );
-    return;
+    return "failed";
   }
 
-  const delayMs = yieldDelayMs(error);
+  // A budget yield on a targeted run leaves the job immediately claimable, so
+  // this same invocation resumes it instead of leaving the remaining budget
+  // unused and waiting for the student's next poll. Provider delays are kept.
+  const immediate = continueInInvocation && isBudgetYield(error);
+  const delayMs = immediate ? 0 : yieldDelayMs(error);
   await releaseJobForResume(job.id, delayMs);
   console.log(
     `[yield] job=${job.id} stage=${error?.stage ?? "-"} reason=${error?.reason ?? "budget"} delayMs=${delayMs} runtimeMs=${state.runtimeMs} yields=${state.yields} stalled=${state.stalled}${error?.detail ? ` detail=${error.detail}` : ""}`,
   );
+  return immediate ? "continuing" : "parked";
 }
 
 /** Extraction failed for a document the job depends on — permanent, honest, no retry. */
@@ -465,7 +416,7 @@ async function handleJobFailure(job, error) {
   }
 }
 
-async function processClaimedJob(claimed, deadline = null) {
+async function processClaimedJob(claimed, deadline = null, continueInInvocation = false) {
   const jobId = claimed.id;
   const job = await prisma.job.findUnique({
     where: { id: jobId },
@@ -601,7 +552,15 @@ async function processClaimedJob(claimed, deadline = null) {
       for (const asset of unfinished) {
         await extractNext({
           targetAssetId: asset.id,
-          budgetMs: Math.min(120_000, longDoc.extractBudgetMs),
+          // Never plan past this invocation's own deadline: extraction would be
+          // killed mid-page and the lease would have to reclaim the job.
+          budgetMs: Math.min(
+            longDoc.extractBudgetMs,
+            deadline ? Math.max(15_000, deadline - Date.now()) : longDoc.extractBudgetMs,
+          ),
+          // This invocation continues inline once the pages are in, so it must
+          // not kick a second runner pass at itself.
+          resumeJobs: false,
         }).catch((error) => {
           console.warn(`Extraction pass failed for asset ${asset.id}: ${error?.message ?? error}`);
         });
@@ -660,21 +619,26 @@ async function processClaimedJob(claimed, deadline = null) {
     }).catch(() => {});
   } catch (error) {
     if (isJobYield(error)) {
-      await handleYield(job, error, passStarted);
-      return;
+      return handleYield(job, error, passStarted, { continueInInvocation });
     }
     console.warn(`Job ${jobId} failed: ${error?.message ?? error}`);
     await handleJobFailure(job, error);
+    return "failed";
   }
 }
 
 /**
  * Runner entry point: processes up to maxJobs within budgetMs.
- * Designed to be invoked by Vercel waitUntil, tick cron, or dev interval.
+ *
+ * Invoked by waitUntil (a kick for one job), the tick cron, or the dev interval.
+ * `maxPasses` exists because a yielded long document can legitimately need many
+ * passes; without it a targeted run returned after one pass with most of its
+ * budget unused, and the document only advanced on the student's next poll.
  */
 export async function runJobs({
   maxJobs = 1,
-  budgetMs = DEFAULT_BUDGET_MS,
+  maxPasses = 6,
+  budgetMs = processingBudgetMs(),
   targetJobId = null,
 } = {}) {
   const startTime = Date.now();
@@ -682,9 +646,13 @@ export async function runJobs({
   // the release/complete update after a stage boundary.
   const deadline = startTime + Math.max(30_000, budgetMs - 15_000);
   let processed = 0;
+  let passes = 0;
   let errors = 0;
+  // Only the first pass is aimed at a specific job; a continuation re-aims at
+  // the same one because the yield left it immediately claimable.
+  let target = targetJobId;
 
-  while (processed < maxJobs && Date.now() - startTime < budgetMs) {
+  while (processed < maxJobs && passes < maxPasses && Date.now() - startTime < budgetMs) {
     const remainingMs = budgetMs - (Date.now() - startTime);
     if (remainingMs < 10_000) {
       // Less than 10 seconds remaining in budget; stop to avoid timeout
@@ -692,25 +660,37 @@ export async function runJobs({
     }
 
     const claimed = await claimJob({
-      leaseMs: Math.min(360_000, Math.max(remainingMs + 60_000, 120_000)),
-      targetJobId: processed === 0 ? targetJobId : null,
+      leaseMs: leaseMsFor(budgetMs),
+      targetJobId: target,
     }).catch((err) => {
       console.warn("claimJob error:", err?.message ?? err);
       return null;
     });
 
     if (!claimed) break;
+    passes++;
 
     try {
       // The invocation's own budget, not just a job budget: stages stop
       // starting calls past this point and yield the job back to the queue.
-      await processClaimedJob(claimed, deadline);
+      // Continuation is only for the job this invocation was started for; a
+      // job picked up incidentally is left to the normal poll/tick cadence.
+      const outcome = await processClaimedJob(
+        claimed,
+        deadline,
+        Boolean(target) && claimed.id === target,
+      );
+      // "continuing" means the pass yielded with work and time left: claim the
+      // same job again instead of returning and waiting for the next poll.
+      if (outcome === "continuing") continue;
       processed++;
     } catch (err) {
       errors++;
+      processed++;
       console.error(`Unexpected runner failure on job ${claimed.id}:`, err);
     }
+    target = null;
   }
 
-  return { processed, errors, durationMs: Date.now() - startTime };
+  return { processed, passes, errors, durationMs: Date.now() - startTime };
 }

@@ -2,14 +2,15 @@ import { Router } from "express";
 import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
-import { aiConfigured } from "../lib/ai.js";
 import {
-  studyQueueConfigured,
+  pipelineConfigured,
   enqueueStudyJob,
   triggerRunner,
   STALE_QUEUED_MS,
-  STALE_RUNNING_MS,
 } from "../lib/queue.js";
+import { interruptedAfterMs } from "../lib/budget.js";
+import { decideJobCreation } from "../lib/job-dedupe.js";
+import { lockNote } from "../lib/note-lock.js";
 import { warnIfOverCaps } from "../lib/pipeline.js";
 import { triggerExtraction } from "../lib/extraction.js";
 import { USER_MESSAGES } from "../config/ai-pipeline.js";
@@ -82,7 +83,7 @@ function shapeJob(job) {
 }
 
 function requirePipeline(res) {
-  if (!studyQueueConfigured() || !process.env.DATABASE_URL || !aiConfigured()) {
+  if (!pipelineConfigured()) {
     res.status(503).json({ error: "AI processing is not configured" });
     return false;
   }
@@ -91,14 +92,21 @@ function requirePipeline(res) {
 
 function isStale(job) {
   const now = Date.now();
-  if (job.state === "queued" && !job.startedAt) {
-    return now - job.createdAt.getTime() > STALE_QUEUED_MS;
+  if (job.state === "queued") {
+    // A queued job that already ran was parked on purpose (a yielded pass, or
+    // the extraction gate) and carries a heartbeat. Once that goes quiet the
+    // invocation is gone, exactly like a dead `running` row.
+    const aliveAt = job.startedAt ? (job.heartbeatAt ?? job.startedAt) : job.createdAt;
+    const window = job.startedAt ? interruptedAfterMs() : STALE_QUEUED_MS;
+    return now - aliveAt.getTime() > window;
   }
   if (job.state === "running" && job.startedAt) {
     // A worker proves liveness with heartbeats; startedAt only marks the first
-    // attempt and is reset by every resumed pass.
+    // attempt and is reset by every resumed pass. The window is derived from
+    // the lease (never shorter than a pass can run) instead of the flat 90
+    // minutes that left a dead job showing "Combining" for an hour.
     const aliveAt = job.heartbeatAt ?? job.startedAt;
-    return now - aliveAt.getTime() > STALE_RUNNING_MS;
+    return now - aliveAt.getTime() > interruptedAfterMs();
   }
   return false;
 }
@@ -116,7 +124,12 @@ async function reapIfStale(tx, job) {
       data: {
         state: "failed",
         stage: "failed",
-        error: USER_MESSAGES.generic,
+        // Processing really did stop: the invocation that owned this row is
+        // gone, so say that instead of a vague "something went wrong".
+        error: USER_MESSAGES.interrupted,
+        errorCode: "JOB_INTERRUPTED",
+        errorStage: job.stage ?? null,
+        lockedUntil: null,
         finishedAt: new Date(),
       },
     });
@@ -159,6 +172,8 @@ async function failUnqueuedJob(clerkId, job) {
     state: "failed",
     stage: "failed",
     error: USER_MESSAGES.generic,
+    errorCode: "NOT_STARTED",
+    lockedUntil: null,
     finishedAt: new Date(),
   };
   try {
@@ -204,6 +219,12 @@ jobsRouter.post("/", async (req, res) => {
         error: "This note is a course reference; only the reference can be regenerated.",
       };
     }
+    // Serialise the check-then-create. Two devices (or a double-tapped Retry)
+    // would otherwise both read "no active job" and both create one: two model
+    // spends, two notifications, two writers over the same cards.
+    if (!(await lockNote(tx, note.id, user.id))) {
+      return { status: 404, error: "Note not found" };
+    }
     const active = await tx.job.findFirst({
       where: { noteId: note.id, state: { in: ACTIVE_STATES } },
       orderBy: { createdAt: "desc" },
@@ -212,7 +233,9 @@ jobsRouter.post("/", async (req, res) => {
     // the retry the student is asking for: close it and create a fresh one.
     if (active) {
       const settled = await reapIfStale(tx, active);
-      if (settled.state !== "failed") return { existing: settled };
+      if (decideJobCreation(settled, { staleQueuedMs: STALE_QUEUED_MS, staleRunningMs: interruptedAfterMs() }) === "reuse") {
+        return { existing: settled };
+      }
     }
     const created = await tx.job.create({
       data: { userId: user.id, noteId: note.id, kind },
@@ -241,17 +264,19 @@ jobsRouter.post("/", async (req, res) => {
   const warning = await warnIfOverCaps(userId);
   if (warning) console.warn(`[CAP WARNING] ${identity.email}: ${warning}`);
 
-  try {
-    await enqueueStudyJob({
-      jobId: job.id,
-      noteId: job.noteId,
-      userId: job.userId,
-      kind: job.kind,
-    });
-  } catch (error) {
-    // The row exists but nothing will ever consume it. Close it now so the
-    // student gets the standard retry card instead of a job that never runs.
-    console.warn(`enqueue failed for job ${job.id}: ${error?.message ?? error}`);
+  // The kick happens after the transaction committed, so the runner never
+  // competes for a pooled connection with the request that created the job.
+  const { scheduled } = enqueueStudyJob({
+    jobId: job.id,
+    noteId: job.noteId,
+    userId: job.userId,
+    kind: job.kind,
+  });
+  if (!scheduled) {
+    // The row exists but nothing will keep this invocation alive to consume it.
+    // Close it now so the student gets the standard retry card instead of a job
+    // that never runs.
+    console.warn(`enqueue could not be scheduled for job ${job.id}`);
     await failUnqueuedJob(identity.clerkId, job);
   }
   res.status(outcome.existing ? 200 : 201).json(shapeJob(job));
@@ -259,14 +284,18 @@ jobsRouter.post("/", async (req, res) => {
 
 jobsRouter.get("/:id", async (req, res) => {
   const identity = await identityFromRequest(req);
+  let kick = null;
   const job = await withUser(identity.clerkId, async (tx) => {
     await requireUser(tx, identity);
     const found = await tx.job.findFirst({ where: { id: req.params.id } });
+    const settled = await reapIfStale(tx, found);
     // Hobby-plan compensation for the daily-only cron: the watching student's
     // own polls drive the queue instead of waiting for the nightly sweep.
-    if (needsWorker(found)) triggerRunner(found.id);
-    return reapIfStale(tx, found);
+    // Decided inside the transaction, started after it commits.
+    if (needsWorker(settled)) kick = settled.id;
+    return settled;
   });
+  if (kick) triggerRunner(kick);
   if (!job) return res.status(404).json({ error: "Job not found" });
   res.json(shapeJob(job));
 });
@@ -274,6 +303,8 @@ jobsRouter.get("/:id", async (req, res) => {
 // Latest job for a note (the app polls while the note screen is open).
 jobsRouter.get("/note/:noteId", async (req, res) => {
   const identity = await identityFromRequest(req);
+  let extractId = null;
+  let kick = null;
   const job = await withUser(identity.clerkId, async (tx) => {
     await requireUser(tx, identity);
     const found = await tx.job.findFirst({
@@ -281,9 +312,8 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
       orderBy: { createdAt: "desc" },
     });
     // Opportunistic extraction resume: a failed load may have interrupted a
-    // long file's pass halfway. Fire-and-forget; the nightly cron is the
-    // guaranteed path, these kicks just shorten the wait while the student
-    // is watching (the cron runs once a day on the Hobby plan).
+    // long file's pass halfway. The nightly cron is the guaranteed path; this
+    // just shortens the wait while the student is watching.
     const stuck = await tx.asset.findFirst({
       where: {
         noteId: req.params.noteId,
@@ -292,13 +322,15 @@ jobsRouter.get("/note/:noteId", async (req, res) => {
       },
       select: { id: true },
     });
-    if (stuck) triggerExtraction(stuck.id);
-    // Same idea for the queue: a queued job's polls run runner passes
-    // (release → extraction resume → next pass) without any cron, and a job
-    // whose worker died mid-run is reclaimed once its lease expires.
-    if (needsWorker(found)) triggerRunner(found.id);
-    return reapIfStale(tx, found);
+    if (stuck) extractId = stuck.id;
+    // Same idea for the queue: a queued job's polls run runner passes, and a
+    // job whose worker died mid-run is reclaimed once its lease expires.
+    const settled = await reapIfStale(tx, found);
+    if (needsWorker(settled)) kick = settled.id;
+    return settled;
   });
+  if (extractId) triggerExtraction(extractId);
+  if (kick) triggerRunner(kick);
   if (!job) return res.json(null);
   res.json(shapeJob(job));
 });

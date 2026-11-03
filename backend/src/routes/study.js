@@ -2,8 +2,8 @@ import { Router } from "express";
 import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
-import { studyQueueConfigured, enqueueStudyJob } from "../lib/queue.js";
-import { aiConfigured } from "../lib/ai.js";
+import { pipelineConfigured, enqueueStudyJob } from "../lib/queue.js";
+import { lockNote } from "../lib/note-lock.js";
 import { nextCardState } from "../lib/srs.js";
 import { streakViewForUser } from "../lib/streak.js";
 import { dayKeyInTimeZone, isValidTimezone } from "../lib/streak-rules.js";
@@ -19,7 +19,7 @@ const MAX_CARD_CHARS = {
 };
 
 function requirePipeline(res) {
-  if (!studyQueueConfigured() || !process.env.DATABASE_URL || !aiConfigured()) {
+  if (!pipelineConfigured()) {
     res.status(503).json({ error: "AI processing is not configured" });
     return false;
   }
@@ -617,8 +617,12 @@ studyRouter.post("/attempts", async (req, res) => {
   let job = null;
   if (created.needsMarking) {
     // One live marking job per attempt; a stale failed job can be resubmitted.
+    // The note row is locked first: a double-submitted attempt (offline retry
+    // racing the first response) would otherwise find no job in both
+    // transactions and create two marking jobs for the same attempt.
     job = await withUser(identity.clerkId, async (tx) => {
       const user = await requireUser(tx, identity);
+      if (!(await lockNote(tx, created.noteId, user.id))) return null;
       const activeStates = ["queued", "running"];
       const existing = await tx.job.findFirst({
         where: {
@@ -639,10 +643,11 @@ studyRouter.post("/attempts", async (req, res) => {
         },
       });
     });
-    try {
-      await enqueueStudyJob(job.id);
-    } catch (error) {
-      console.warn(`enqueue failed for marking job ${job.id}: ${error?.message ?? error}`);
+    if (job) {
+      const { scheduled } = enqueueStudyJob({ jobId: job.id });
+      if (!scheduled) {
+        console.warn(`marking job ${job.id} was created but could not be started`);
+      }
     }
   }
 

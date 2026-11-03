@@ -1,70 +1,70 @@
 /**
  * Postgres-backed job queue for Sua AI operations.
- * Replaces Redis/BullMQ with Neon Postgres row locking (FOR UPDATE SKIP LOCKED).
- * Jobs are triggered immediately via Vercel waitUntil in serverless environments,
- * or processed via tick crons and dev-mode background timers.
+ *
+ * Neon Postgres is the queue and the source of truth (FOR UPDATE SKIP LOCKED);
+ * there is no Redis, no BullMQ and no separate worker. Work starts immediately
+ * from the request that caused it — via `waitUntil`, registered synchronously
+ * by lib/background.js — and the cron tick is only a janitor and a safety net.
  */
 
-export const STUDY_QUEUE = "sua-study-set";
+import { runAfterResponse } from "./background.js";
+import { processingBudgetMs } from "./budget.js";
+import { aiConfigured } from "./ai.js";
 
-// Stale limits shared by reaper and submit path
+// Stale limits shared by reaper and submit path.
 export const STALE_QUEUED_MS = 10 * 60_000;
-export const STALE_RUNNING_MS = 90 * 60_000;
 
-export function studyQueueConfigured() {
-  return Boolean(process.env.DATABASE_URL);
+/**
+ * How many claiming passes one invocation may perform. A yield re-queues the
+ * job with no delay, so a targeted run can spend its whole budget on one long
+ * document instead of returning after a single pass.
+ */
+export function maxPassesPerInvocation() {
+  const value = Number(process.env.MAX_PASSES_PER_INVOCATION);
+  return Number.isFinite(value) && value > 0 ? Math.round(value) : 6;
+}
+
+/** True when the AI pipeline can actually run. */
+export function pipelineConfigured() {
+  return Boolean(process.env.DATABASE_URL) && aiConfigured();
 }
 
 /**
- * Triggers runner processing asynchronously.
- * In Vercel serverless environments, uses waitUntil so the execution extends beyond response delivery.
- * In local dev or standalone scripts, invokes runJobs asynchronously.
+ * Start a runner pass after the response.
+ *
+ * Synchronous by design: the waitUntil registration has to happen before the
+ * handler returns, or the platform may freeze the invocation and the work —
+ * including the job just created — silently never starts.
+ *
+ * @returns {{scheduled: boolean}}
  */
-export async function triggerRunner(targetJobId) {
-  try {
+export function triggerRunner(targetJobId = null) {
+  const scheduled = runAfterResponse(`runner ${targetJobId ?? "queue"}`, async () => {
+    // Imported inside the task: runner → pipeline → queue would otherwise be a
+    // static import cycle.
     const { runJobs } = await import("./runner.js");
-
-    try {
-      const vercel = await import("@vercel/functions");
-      if (typeof vercel?.waitUntil === "function") {
-        vercel.waitUntil(
-          runJobs({ targetJobId, maxJobs: 1, budgetMs: 240_000 }).catch((err) => {
-            console.warn("waitUntil runner error:", err?.message ?? err);
-          }),
-        );
-        return;
-      }
-    } catch {
-      // Not in Vercel or @vercel/functions unavailable
-    }
-
-    // Fire-and-forget fallback for local dev
-    runJobs({ targetJobId, maxJobs: 1, budgetMs: 240_000 }).catch((err) => {
-      console.warn("Runner error:", err?.message ?? err);
+    return runJobs({
+      targetJobId,
+      maxJobs: targetJobId ? maxPassesPerInvocation() : 2,
+      maxPasses: maxPassesPerInvocation(),
+      budgetMs: processingBudgetMs(),
     });
-  } catch (err) {
-    console.warn("Failed to trigger runner:", err?.message ?? err);
-  }
+  });
+  return { scheduled };
 }
 
 /**
- * Enqueue a study job. The job row is already created in Postgres;
- * this triggers execution via waitUntil or the internal runner loop.
+ * A job row already exists in Postgres; this only asks the platform to keep
+ * the invocation alive long enough to run it.
+ *
+ * @returns {{scheduled: boolean}}
  */
-export async function enqueueStudyJob(payload) {
-  const data =
+export function enqueueStudyJob(payload) {
+  const jobId =
     typeof payload === "object" && payload !== null
-      ? {
-          jobId: payload.jobId ?? payload.id,
-          noteId: payload.noteId,
-          userId: payload.userId,
-          kind: payload.kind ?? "study_set",
-        }
-      : { jobId: String(payload) };
+      ? (payload.jobId ?? payload.id)
+      : payload;
 
-  const jobId = data.jobId;
-  if (!jobId) return;
-
-  // Fire runner in the background
-  triggerRunner(jobId);
+  if (!jobId) return { scheduled: false };
+  return triggerRunner(String(jobId));
 }
