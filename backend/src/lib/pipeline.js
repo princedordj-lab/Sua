@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { readAssetBytes } from "./storage.js";
 import { withUser } from "./db.js";
-import { bulkModel, chatCompletion, aiConfigured, timeoutForDeadline } from "./ai.js";
+import { bulkModel, chatCompletion, timeoutForDeadline } from "./ai.js";
+import { enqueueStudyJob, pipelineConfigured, STALE_QUEUED_MS } from "./queue.js";
+import { leaseMsFor, processingBudgetMs, interruptedAfterMs } from "./budget.js";
+import { ACTIVE_JOB_STATES, decideJobCreation, hasSettledKind } from "./job-dedupe.js";
+import { lockNote } from "./note-lock.js";
+import { errorCodeFor } from "./job-recovery.js";
 import {
   condenseMaterial,
   prepareMaterial,
@@ -70,12 +75,20 @@ async function fetchAssetBytes(asset) {
 async function setStage(job, stage, state = "running", progress = null) {
   // Cancel check: the claim no-ops when the job is no longer queued/running
   // (deleted or cancelled). A claim count of zero means "stop quietly".
+  //
+  // The same write renews the lease. `setStage` is the one place every stage
+  // transition already goes through, so a pass that is still working keeps its
+  // claim alive without an extra round trip — the lease can no longer expire
+  // under a live pass and let a second invocation duplicate the work.
   const claim = await prisma.job.updateMany({
     where: { id: job.id, state: { in: ["queued", "running"] } },
     data: {
       stage,
       state,
       heartbeatAt: new Date(),
+      ...(state === "running"
+        ? { lockedUntil: new Date(Date.now() + leaseMsFor(processingBudgetMs())) }
+        : {}),
       ...(progress
         ? {
             progressDone: Math.max(0, Number(progress.done ?? 0)),
@@ -576,6 +589,12 @@ async function setFailed(job, error) {
     state: "failed",
     stage: "failed",
     error: message.slice(0, 2000),
+    // A failed job must never keep a lease: the row would look "owned" and the
+    // queue would refuse to recover it. Every failure records a code so the
+    // diagnostics can group it instead of reading prose.
+    lockedUntil: null,
+    errorCode: errorCodeFor(error) ?? "PIPELINE_ERROR",
+    errorStage: job.stage ?? null,
     finishedAt: new Date(),
   };
   // Two independent writes: a missing job must not hide the note update, and a
@@ -742,6 +761,116 @@ async function persistStudySet(job, note, set) {
   await persistStudySetPreservingSrs(job.user.clerkId, note, set, true);
 }
 
+
+/** The asset that asks for AI conversion, if this one qualifies. */
+export function isConversionAsset(row) {
+  return (
+    row.status === "active" &&
+    (row.task === "lecture_note" || row.task === "course_reference") &&
+    (row.kind === "image" || row.kind === "document")
+  );
+}
+
+/**
+ * Cheap pre-check for bulk callers: a sync of 100 typed notes must not open
+ * 100 transactions to discover that none of them wants a conversion.
+ */
+export function noteHasConversionCandidate(note) {
+  const assets = note?.assets;
+  return Array.isArray(assets) && assets.some(isConversionAsset);
+}
+
+/**
+ * One statement for a whole sync chunk: which of these notes still want a
+ * conversion? Replaces a per-note transaction (up to 100 of them) that ran
+ * after the response had already been sent.
+ */
+export async function notesAwaitingConversion(clerkId, noteIds) {
+  const ids = (noteIds ?? []).filter((id) => typeof id === "string" && id);
+  if (!ids.length || !pipelineConfigured()) return [];
+  const rows = await withUser(clerkId, (tx) =>
+    tx.note.findMany({
+      where: {
+        id: { in: ids },
+        assets: {
+          some: {
+            status: "active",
+            task: { in: ["lecture_note", "course_reference"] },
+            kind: { in: ["image", "document"] },
+          },
+        },
+      },
+      select: { id: true },
+    }),
+  );
+  return rows.map((row) => row.id);
+}
+
+/**
+ * Pick up a finished upload whose note just arrived server-side (or vice
+ * versa): when a note exists, has an active asset the student marked for AI
+ * conversion, and no live job is already handling it, enqueue the conversion
+ * job once. Runs in the caller's identity context, idempotent across repeated
+ * syncs. Returns the created job or null.
+ *
+ * Idempotency is enforced by locking the note row before the check-then-create:
+ * upload completion and the note sync routinely arrive together, and without
+ * the lock both would read "no active job" and both create one.
+ */
+export async function maybeEnqueueGeneration(clerkId, noteId) {
+  if (!pipelineConfigured()) return null;
+  const job = await withUser(clerkId, async (tx) => {
+    const note = await tx.note.findFirst({
+      where: { id: noteId },
+      include: { jobs: true, assets: true },
+    });
+    if (!note) return null;
+    // One conversion per requested destination: dedupe on active work and on
+    // a job that already produced this kind for the note. A completed
+    // study_set must not block a later lecture_note or reference conversion.
+    const asset = (note.assets ?? []).find(
+      (row) => isConversionAsset(row) && !hasSettledKind(note.jobs, row.task),
+    );
+    if (!asset) return null;
+
+    // Serialise the decision against every other creator for this note.
+    if (!(await lockNote(tx, note.id, note.userId))) return null;
+    const active = await tx.job.findFirst({
+      where: { noteId: note.id, state: { in: ACTIVE_JOB_STATES } },
+      orderBy: { createdAt: "desc" },
+    });
+    // A job that was queued but never picked up (a killed invocation) is dead:
+    // it must not block the conversion forever.
+    if (
+      decideJobCreation(active, {
+        staleQueuedMs: STALE_QUEUED_MS,
+        staleRunningMs: interruptedAfterMs(),
+      }) === "reuse"
+    ) {
+      return null;
+    }
+
+    const created = await tx.job.create({
+      data: { userId: note.userId, noteId: note.id, kind: asset.task },
+    });
+    await tx.note.update({
+      where: { id: note.id },
+      data: { aiState: "queued" },
+    });
+    return created;
+  });
+  if (!job) return null;
+  const { scheduled } = enqueueStudyJob({
+    jobId: job.id,
+    noteId: job.noteId,
+    userId: job.userId,
+    kind: job.kind,
+  });
+  if (!scheduled) {
+    console.warn(`generation job ${job.id} was created but could not be started`);
+  }
+  return job;
+}
 
 // ---------------------------------------------------------------------------
 // Usage, cost, notifications

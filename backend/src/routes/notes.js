@@ -4,11 +4,11 @@ import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 import {
-  needsResubmit,
-  retryProcessing,
-  startProcessing,
-  triggerAssetExtraction,
-} from "../lib/processing/start.js";
+  maybeEnqueueGeneration,
+  notesAwaitingConversion,
+} from "../lib/pipeline.js";
+import { triggerExtraction } from "../lib/extraction.js";
+import { triggerRunner } from "../lib/queue.js";
 
 export const notesRouter = Router();
 
@@ -366,30 +366,23 @@ notesRouter.post("/sync", async (req, res) => {
   await flushStorageDeletes(storageKeys, user.id);
 
   // A pushed note may be the missing half of a conversion-marked upload that
-  // landed first (the /complete route covers the reverse order). One row per
-  // note + kind + processing version, so this is safe to repeat.
-  for (const note of notes) {
-    try {
-      const asset = await withUser(identity.clerkId, (tx) =>
-        tx.asset.findFirst({
-          where: {
-            noteId: note.id,
-            status: "active",
-            task: { in: ["lecture_note", "course_reference"] },
-          },
-          select: { id: true, task: true, kind: true },
-        }),
+  // landed first (the /complete route covers the reverse order). One batched
+  // lookup instead of one transaction per note: a 100-note sync usually has
+  // nothing to convert at all. Idempotent either way.
+  const waiting = await notesAwaitingConversion(
+    identity.clerkId,
+    notes.map((note) => note.id),
+  ).catch((error) => {
+    console.warn("Conversion lookup failed:", error?.message ?? error);
+    return [];
+  });
+  for (const noteId of waiting) {
+    await maybeEnqueueGeneration(identity.clerkId, noteId).catch((error) => {
+      console.warn(
+        `Generation enqueue failed for note ${noteId}:`,
+        error?.message ?? error,
       );
-      if (!asset) continue;
-      await startProcessing({
-        noteId: note.id,
-        userId: note.userId,
-        kind: asset.task,
-        assetId: asset.kind === "document" ? asset.id : null,
-      });
-    } catch (error) {
-      console.warn(`processing start failed for note ${note.id}: ${error?.message ?? error}`);
-    }
+    });
   }
 });
 

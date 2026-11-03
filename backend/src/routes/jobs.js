@@ -2,7 +2,15 @@ import { Router } from "express";
 import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
-import { prisma } from "../config/prisma.js";
+import {
+  pipelineConfigured,
+  enqueueStudyJob,
+  triggerRunner,
+  STALE_QUEUED_MS,
+} from "../lib/queue.js";
+import { interruptedAfterMs } from "../lib/budget.js";
+import { decideJobCreation } from "../lib/job-dedupe.js";
+import { lockNote } from "../lib/note-lock.js";
 import { warnIfOverCaps } from "../lib/pipeline.js";
 import {
   cancelProcessingRun,
@@ -93,35 +101,111 @@ function shapeJob(job) {
 }
 
 function requirePipeline(res) {
-  if (!processingConfigured()) {
+  if (!pipelineConfigured()) {
     res.status(503).json({ error: "AI processing is not configured" });
     return false;
   }
   return true;
 }
 
+function isStale(job) {
+  const now = Date.now();
+  if (job.state === "queued") {
+    // A queued job that already ran was parked on purpose (a yielded pass, or
+    // the extraction gate) and carries a heartbeat. Once that goes quiet the
+    // invocation is gone, exactly like a dead `running` row.
+    const aliveAt = job.startedAt ? (job.heartbeatAt ?? job.startedAt) : job.createdAt;
+    const window = job.startedAt ? interruptedAfterMs() : STALE_QUEUED_MS;
+    return now - aliveAt.getTime() > window;
+  }
+  if (job.state === "running" && job.startedAt) {
+    // A worker proves liveness with heartbeats; startedAt only marks the first
+    // attempt and is reset by every resumed pass. The window is derived from
+    // the lease (never shorter than a pass can run) instead of the flat 90
+    // minutes that left a dead job showing "Combining" for an hour.
+    const aliveAt = job.heartbeatAt ?? job.startedAt;
+    return now - aliveAt.getTime() > interruptedAfterMs();
+  }
+  return false;
+}
+
 /**
- * How the client should read a processing row.
- *
- * The queue-era reaper is gone: Trigger.dev owns retries and timeouts, so a
- * stale "running" row is never guessed at from timestamps. The only recovery
- * this API performs is re-submitting a row whose trigger call never landed
- * (`triggerState === "failed"`, or stuck "submitting"), which cannot create a
- * second run: Trigger.dev deduplicates on the document's idempotency key.
+ * Reads are the client's only heartbeat on a job, so a job whose worker never
+ * picked it up (or died mid-run) is closed here as a normal failure: the app
+ * then shows the standard retry card instead of waiting forever.
  */
-async function recoverRow(job) {
-  if (!job) return job;
-  if (!needsResubmit(job)) return job;
-  const retried = await retryProcessing(job).catch((error) => {
-    console.warn(`could not re-submit job ${job.id}: ${error?.message ?? error}`);
-    return null;
-  });
-  if (!retried?.job) return job;
-  return {
-    ...job,
-    triggerState: retried.triggered ? "submitted" : "failed",
-    runId: retried.runId ?? job.runId,
+async function reapIfStale(tx, job) {
+  if (!job || !isStale(job)) return job;
+  try {
+    const updated = await tx.job.update({
+      where: { id: job.id },
+      data: {
+        state: "failed",
+        stage: "failed",
+        // Processing really did stop: the invocation that owned this row is
+        // gone, so say that instead of a vague "something went wrong".
+        error: USER_MESSAGES.interrupted,
+        errorCode: "JOB_INTERRUPTED",
+        errorStage: job.stage ?? null,
+        lockedUntil: null,
+        finishedAt: new Date(),
+      },
+    });
+    await tx.note.updateMany({
+      where: { id: job.noteId },
+      data: { aiState: "failed" },
+    });
+    console.warn(
+      `[STALE JOB] ${job.id} reaped after ${Math.round(
+        (Date.now() - (job.startedAt ?? job.createdAt).getTime()) / 60_000,
+      )} min in ${job.state}`,
+    );
+    return updated;
+  } catch (error) {
+    // Missing row (note deleted mid-read) is not an error worth failing on.
+    console.warn(`[STALE JOB] ${job.id} could not be reaped: ${error?.message ?? error}`);
+    return job;
+  }
+}
+
+/**
+ * Polls are the student's heartbeat, so they also drive the queue. A queued
+ * job needs a worker; so does a running job whose lease expired — that means
+ * the invocation that claimed it was killed (serverless timeout, deploy, or an
+ * older early-return path) and without a kick it would sit until the nightly
+ * cron or the stale reaper. A missing lease is recovered too.
+ */
+function needsWorker(job) {
+  if (!job) return false;
+  if (job.state === "queued") return true;
+  return (
+    job.state === "running" &&
+    (!job.lockedUntil || job.lockedUntil.getTime() <= Date.now())
+  );
+}
+
+/** A failed enqueue must not leave a phantom "queued" job the app will poll. */
+async function failUnqueuedJob(clerkId, job) {
+  const data = {
+    state: "failed",
+    stage: "failed",
+    error: USER_MESSAGES.generic,
+    errorCode: "NOT_STARTED",
+    lockedUntil: null,
+    finishedAt: new Date(),
   };
+  try {
+    await withUser(clerkId, async (tx) => {
+      await tx.job.update({ where: { id: job.id }, data });
+      await tx.note.updateMany({
+        where: { id: job.noteId },
+        data: { aiState: "failed" },
+      });
+    });
+    Object.assign(job, data);
+  } catch (error) {
+    console.warn(`could not mark job ${job.id} failed: ${error?.message ?? error}`);
+  }
 }
 
 // Enqueue a generation for a note (study set or course reference). Local-first
@@ -153,17 +237,27 @@ jobsRouter.post("/", async (req, res) => {
         error: "This note is a course reference; only the reference can be regenerated.",
       };
     }
-    // One row per (note, kind, processing version): a repeated request finds the
-    // running row instead of starting a second run.
+    // Serialise the check-then-create. Two devices (or a double-tapped Retry)
+    // would otherwise both read "no active job" and both create one: two model
+    // spends, two notifications, two writers over the same cards.
+    if (!(await lockNote(tx, note.id, user.id))) {
+      return { status: 404, error: "Note not found" };
+    }
     const active = await tx.job.findFirst({
       where: { noteId: note.id, kind, state: { in: ACTIVE_STATES } },
       orderBy: { createdAt: "desc" },
     });
-    if (active) return { existing: active };
-    const created = await ensureProcessingJob(
-      { noteId: note.id, userId: user.id, kind },
-      tx,
-    ).then((result) => result.job);
+    // A dead job (never picked up, or a run that never settled) must not block
+    // the retry the student is asking for: close it and create a fresh one.
+    if (active) {
+      const settled = await reapIfStale(tx, active);
+      if (decideJobCreation(settled, { staleQueuedMs: STALE_QUEUED_MS, staleRunningMs: interruptedAfterMs() }) === "reuse") {
+        return { existing: settled };
+      }
+    }
+    const created = await tx.job.create({
+      data: { userId: user.id, noteId: note.id, kind },
+    });
     // Mirror the destination immediately; the pipeline re-asserts it when the
     // attempt starts and on finish.
     await tx.note.update({
@@ -188,34 +282,38 @@ jobsRouter.post("/", async (req, res) => {
   const warning = await warnIfOverCaps(userId);
   if (warning) console.warn(`[CAP WARNING] ${identity.email}: ${warning}`);
 
-  // Trigger.dev owns the run. A trigger failure is not fatal: the row stays with
-  // triggerState "failed" and `POST /api/jobs/:id/retry` (or the next poll's
-  // recovery) re-submits it without creating a second run.
-  const started =
-    !outcome.existing || job.triggerState === "failed"
-      ? await startProcessing({
-          noteId: job.noteId,
-          userId: job.userId,
-          kind: job.kind,
-        }).catch((error) => {
-          console.warn(`trigger failed for job ${job.id}: ${error?.message ?? error}`);
-          return null;
-        })
-      : null;
-  const fresh = started?.job
-    ? await prisma.job.findUnique({ where: { id: job.id } })
-    : job;
-  res
-    .status(outcome.existing ? 200 : 201)
-    .json({ ...shapeJob(fresh ?? job), processing: shapeProcessing(fresh ?? job) });
+  // The kick happens after the transaction committed, so the runner never
+  // competes for a pooled connection with the request that created the job.
+  const { scheduled } = enqueueStudyJob({
+    jobId: job.id,
+    noteId: job.noteId,
+    userId: job.userId,
+    kind: job.kind,
+  });
+  if (!scheduled) {
+    // The row exists but nothing will keep this invocation alive to consume it.
+    // Close it now so the student gets the standard retry card instead of a job
+    // that never runs.
+    console.warn(`enqueue could not be scheduled for job ${job.id}`);
+    await failUnqueuedJob(identity.clerkId, job);
+  }
+  res.status(outcome.existing ? 200 : 201).json(shapeJob(job));
 });
 
 jobsRouter.get("/:id", async (req, res) => {
   const identity = await identityFromRequest(req);
+  let kick = null;
   const job = await withUser(identity.clerkId, async (tx) => {
     await requireUser(tx, identity);
-    return tx.job.findFirst({ where: { id: req.params.id } });
+    const found = await tx.job.findFirst({ where: { id: req.params.id } });
+    const settled = await reapIfStale(tx, found);
+    // Hobby-plan compensation for the daily-only cron: the watching student's
+    // own polls drive the queue instead of waiting for the nightly sweep.
+    // Decided inside the transaction, started after it commits.
+    if (needsWorker(settled)) kick = settled.id;
+    return settled;
   });
+  if (kick) triggerRunner(kick);
   if (!job) return res.status(404).json({ error: "Job not found" });
   const recovered = await recoverRow(job);
   res.json({ ...shapeJob(recovered), processing: shapeProcessing(recovered) });
@@ -224,13 +322,34 @@ jobsRouter.get("/:id", async (req, res) => {
 // Latest job for a note (the app polls while the note screen is open).
 jobsRouter.get("/note/:noteId", async (req, res) => {
   const identity = await identityFromRequest(req);
+  let extractId = null;
+  let kick = null;
   const job = await withUser(identity.clerkId, async (tx) => {
     await requireUser(tx, identity);
     return tx.job.findFirst({
       where: { noteId: req.params.noteId },
       orderBy: { createdAt: "desc" },
     });
+    // Opportunistic extraction resume: a failed load may have interrupted a
+    // long file's pass halfway. The nightly cron is the guaranteed path; this
+    // just shortens the wait while the student is watching.
+    const stuck = await tx.asset.findFirst({
+      where: {
+        noteId: req.params.noteId,
+        status: "active",
+        extractState: { in: ["pending", "partial"] },
+      },
+      select: { id: true },
+    });
+    if (stuck) extractId = stuck.id;
+    // Same idea for the queue: a queued job's polls run runner passes, and a
+    // job whose worker died mid-run is reclaimed once its lease expires.
+    const settled = await reapIfStale(tx, found);
+    if (needsWorker(settled)) kick = settled.id;
+    return settled;
   });
+  if (extractId) triggerExtraction(extractId);
+  if (kick) triggerRunner(kick);
   if (!job) return res.json(null);
   const recovered = await recoverRow(job);
   res.json({ ...shapeJob(recovered), processing: shapeProcessing(recovered) });

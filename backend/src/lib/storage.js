@@ -9,7 +9,7 @@ import {
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 
-const MAX_BYTES = {
+export const MAX_BYTES = {
   audio: MAX_AUDIO_BYTES,
   document: MAX_UPLOAD_BYTES,
   image: MAX_UPLOAD_BYTES,

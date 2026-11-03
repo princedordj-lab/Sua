@@ -14,6 +14,14 @@ import { timingSafeEqual } from "node:crypto";
 import { pruneNoteTombstones, retryStorageDeletions } from "./lib/note-deletion.js";
 import { sendDueReminders } from "./lib/reminders.js";
 import { sendStreakNotices } from "./lib/streak.js";
+import {
+  budgetReport,
+  minPhaseMs,
+  processingBudgetMs,
+  remainingMs,
+  tickBudgetPlan,
+} from "./lib/budget.js";
+import { maxPassesPerInvocation } from "./lib/queue.js";
 import { prisma } from "./config/prisma.js";
 import { studyRouter } from "./routes/study.js";
 
@@ -98,52 +106,116 @@ function checkCronAuth(req) {
 // get another bounded pass here even when no client is polling. Mounted
 // before clerkMiddleware so it does not require student session auth.
 // Accepts both GET and POST: Vercel cron always sends GET.
+//
+// One deadline for the whole tick. The phases used to carry three independent
+// budgets (240 s + 120 s + the sweeps), so the function could be terminated
+// partway through extraction — leaving a claimed lease and a row that looked
+// like it was still being read. Now the tick divides a single budget
+// (lib/budget.js) and each phase only starts while a useful amount of it is
+// left.
 async function handleTick(req, res) {
   if (!checkCronAuth(req)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
+  const startedAt = Date.now();
+  const requested = Number(req.query?.budgetMs);
+  const totalBudgetMs = Math.min(
+    processingBudgetMs(),
+    Math.max(minPhaseMs(), Number.isFinite(requested) ? requested : processingBudgetMs()),
+  );
+  const plan = tickBudgetPlan(totalBudgetMs);
+  const deadline = startedAt + totalBudgetMs;
+  const left = () => remainingMs(deadline, Date.now());
+  const skipped = [];
+
   try {
-    // Document processing does NOT run here: Trigger.dev owns extraction, OCR
-    // and generation (see src/trigger/*). This endpoint is only the janitor —
-    // storage-deletion retries, tombstone pruning, the web reminder sweep and
-    // the streak notices — so it never competes with a processing run.
+    const maxJobs = Math.min(10, Math.max(1, Number(req.query?.maxJobs ?? 5)));
+
+    // Generation first: it is what the student is waiting on, and a pass that
+    // runs out mid-stage yields its job back with the checkpoint intact.
+    let result = { processed: 0, passes: 0, errors: 0, durationMs: 0 };
+    if (left() >= minPhaseMs()) {
+      result = await runJobs({
+        maxJobs,
+        // Untargeted, so one job's passes must not use up the row budget.
+        maxPasses: Math.max(maxPassesPerInvocation(), maxJobs),
+        budgetMs: Math.min(plan.generationMs, left()),
+      });
+    } else {
+      skipped.push("generation");
+    }
+
+    // Extraction is separate from generation jobs: pending/partial assets
+    // resume here with the extraction share of the same deadline.
+    let extraction = { passes: 0, skipped: true };
+    if (left() >= minPhaseMs()) {
+      const maxAssets = Math.min(5, Math.max(1, Number(req.query?.maxAssets ?? 2)));
+      extraction = await extractNext({
+        maxAssets,
+        budgetMs: Math.min(plan.extractionMs, left()),
+      });
+    } else {
+      skipped.push("extraction");
+    }
+
     // Deletion housekeeping: retry object deletes that failed with their note,
     // and drop tombstones no device can still need. Neither may fail the tick.
-    const storage = await retryStorageDeletions({ limit: 10 }).catch((error) => {
-      console.warn("Storage deletion retry failed:", error?.message ?? error);
-      return null;
-    });
-    const tombstones = await pruneNoteTombstones()
-      .then((count) => ({ pruned: count }))
-      .catch((error) => {
-        console.warn("Tombstone prune failed:", error?.message ?? error);
+    let storage = null;
+    let tombstones = null;
+    if (left() >= minPhaseMs()) {
+      storage = await retryStorageDeletions({ limit: 10 }).catch((error) => {
+        console.warn("Storage deletion retry failed:", error?.message ?? error);
         return null;
       });
+      tombstones = await pruneNoteTombstones()
+        .then((count) => ({ pruned: count }))
+        .catch((error) => {
+          console.warn("Tombstone prune failed:", error?.message ?? error);
+          return null;
+        });
+    } else {
+      skipped.push("janitor");
+    }
+
     // Web-only daily reminder; mobile schedules its own locally. Never fails
-    // the tick, and no-ops when VAPID is unset.
-    const reminders =
-      process.env.REMINDERS_ENABLED === "0"
-        ? null
-        : await sendDueReminders().catch((error) => {
-            console.warn("Reminder sweep failed:", error?.message ?? error);
-            return null;
-          });
+    // the tick, and no-ops when VAPID is unset. Skipped when the deadline is
+    // spent: the next tick is a day away, but a killed invocation sends nothing
+    // either and also leaves a claimed lease behind.
+    let reminders = null;
+    if (left() >= minPhaseMs()) {
+      reminders =
+        process.env.REMINDERS_ENABLED === "0"
+          ? null
+          : await sendDueReminders().catch((error) => {
+              console.warn("Reminder sweep failed:", error?.message ?? error);
+              return null;
+            });
+    } else {
+      skipped.push("reminders");
+    }
     // Streak sweep: warn after two quiet days, reset after three. The count
     // the app shows is computed on read, so a missed sweep cannot show stale
     // numbers — this only drives the two notifications and the cached row.
-    const streakNotices =
-      process.env.STREAK_NOTICES === "0"
-        ? null
-        : await sendStreakNotices().catch((error) => {
-            console.warn("Streak notice sweep failed:", error?.message ?? error);
-            return null;
-          });
+    let streakNotices = null;
+    if (left() >= minPhaseMs()) {
+      streakNotices =
+        process.env.STREAK_NOTICES === "0"
+          ? null
+          : await sendStreakNotices().catch((error) => {
+              console.warn("Streak notice sweep failed:", error?.message ?? error);
+              return null;
+            });
+    } else {
+      skipped.push("streakNotices");
+    }
+
     res.json({
       ok: true,
       janitor: { storage, tombstones },
       reminders,
       streakNotices,
+      budget: { totalMs: totalBudgetMs, plan, usedMs: Date.now() - startedAt, skipped },
     });
   } catch (err) {
     console.error("Tick error:", err);
@@ -237,9 +309,19 @@ export default app;
 
 // Start server locally if not running on Vercel
 if (!process.env.VERCEL) {
-  // Local development: Trigger.dev runs the tasks (`npx trigger.dev dev`), so the
-  // API process has no background loop of its own.
+  // Local development background runner loop
+  const devInterval = setInterval(() => {
+    runJobs({ maxJobs: 2, budgetMs: 15_000 }).catch((err) => {
+      console.warn("[dev-runner] loop error:", err?.message ?? err);
+    });
+  }, 3000);
+  devInterval.unref?.();
+
   app.listen(port, () => {
+    // One line that makes a plan/limit mismatch visible: if this says
+    // platformMaxMs=300000 on a project capped at 60 s, every long pass will be
+    // killed and the lease has to expire before the work resumes.
+    console.log("[budget]", JSON.stringify(budgetReport()));
     if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
       console.warn(
         "CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY not set — authenticated routes will fail.",
