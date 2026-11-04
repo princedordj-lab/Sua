@@ -205,6 +205,94 @@ export function sourceFromText(value, options = {}) {
   );
 }
 
+/**
+ * A file whose whole stored text fits one generation call skips the map/reduce
+ * machinery: the stored page rows become the source directly, so the writer
+ * (and the study set) see the entire document in one pass. Only pure-document
+ * notes qualify — recordings and photos still need source assembly.
+ *
+ * Returns the prepared `source`, or null when the long-file path must run.
+ */
+export function singlePassSource(note, chunks) {
+  if (!chunks?.rows?.length) return null;
+  if (!(notePipeline.shortSourceChars > 0)) return null;
+  const assets = (note.assets ?? []).filter(
+    (asset) => asset.status === "active" && asset.publicId !== "pending",
+  );
+  if (!assets.length) return null;
+  if (assets.some((asset) => asset.kind !== "document")) return null;
+
+  const rows = chunks.rows.filter((row) => String(row.text ?? "").trim());
+  if (!rows.length) return null;
+
+  const segments = rows.map((row) => ({
+    index: row.index,
+    label: row.label ?? (row.startPage ? `p. ${row.startPage}` : null),
+    text: row.text,
+  }));
+
+  // A file note may also carry typed context the student wrote around the
+  // upload. assembleSource merges it the same way — the note body while there
+  // is no transcript yet — and taking this shortcut without it would hide text
+  // the student typed from the writer, the summary and the cards.
+  const typed = String(note.body ?? "").trim();
+  if (typed && !String(note.transcript ?? "").trim()) {
+    segments.unshift({ index: 0, label: null, text: typed });
+  }
+
+  const chars = segments.reduce((sum, segment) => sum + segment.text.length, 0);
+  if (chars > notePipeline.shortSourceChars) return null;
+
+  const pageCount = Math.max(
+    ...rows.map((row) => row.endPage ?? row.startPage ?? row.index),
+    rows.length,
+  );
+  return sourceFromSegments(segments, {
+    sourceType: "file",
+    pageCount,
+    truncated: assets.some((asset) => asset.truncated),
+  });
+}
+
+/**
+ * A note that mixes documents with photos has no chunk rows for the pictures,
+ * so the long-file path would silently drop them. Assembling the full source
+ * settles whether the note fits one generation call; the photos are read once
+ * here and would be read anyway on the way to generation.
+ *
+ * Returns the prepared `source`, or null when the note is too big (or is not
+ * this kind of note), in which case the caller keeps the long-file path.
+ */
+export async function assembledShortSource(note, deps, chunks) {
+  if (!(notePipeline.shortSourceChars > 0)) return null;
+  const assets = (note.assets ?? []).filter(
+    (asset) => asset.status === "active" && asset.publicId !== "pending",
+  );
+  if (!assets.some((asset) => asset.kind === "image")) return null;
+  if (assets.some((asset) => asset.kind !== "document" && asset.kind !== "image")) {
+    return null;
+  }
+  // The document text alone already exceeds one call: assembling would read
+  // every photo only for the long-file path to run anyway.
+  const documentChars = (chunks?.rows ?? []).reduce(
+    (sum, row) => sum + String(row.text ?? "").length,
+    0,
+  );
+  if (documentChars > notePipeline.shortSourceChars) return null;
+
+  let source;
+  try {
+    source = await assembleSource(note, deps);
+  } catch (error) {
+    console.warn(`Mixed source assembly skipped: ${error?.message ?? error}`);
+    return null;
+  }
+  if (!source?.rawText || source.rawText.length > notePipeline.shortSourceChars) {
+    return null;
+  }
+  return source;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Extract
 // ---------------------------------------------------------------------------

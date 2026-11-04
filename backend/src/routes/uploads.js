@@ -4,17 +4,19 @@ import { neonStorageConfigured, presignNeonObject } from "../config/neon-storage
 import {
   MAX_BYTES,
   MAX_UPLOAD_BYTES,
-  MAX_AUDIO_BYTES,
   assetDownloadUrl,
   deleteAssetObject,
   storageProviderOf,
   verifyNeonObject,
 } from "../lib/storage.js";
 import { withUser } from "../lib/db.js";
-import { runAfterResponse } from "../lib/background.js";
-import { checkCompletion, needsExtraction, needsVerification } from "../lib/upload-intake.js";
-import { triggerExtraction } from "../lib/extraction.js";
-import { maybeEnqueueGeneration } from "../lib/pipeline.js";
+import {
+  checkCompletion,
+  needsExtraction,
+  needsVerification,
+} from "../lib/upload-intake.js";
+import { shapeProcessing } from "../lib/processing/state.js";
+import { startProcessing, triggerAssetExtraction } from "../lib/processing/start.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
 
@@ -215,12 +217,12 @@ uploadsRouter.post("/sign", async (req, res) => {
 // exists in the selected provider before marking it active (never trusts a
 // client URL or object metadata).
 //
-// Three database transactions, not five: read (asset + whether its note still
-// exists), verify storage outside any transaction, then one locked write that
-// activates the asset and marks it for extraction together. The response is
-// the row as the database now holds it — the old version answered with the
-// pre-update object, so a freshly completed document reported
-// `extractState: "none"` while the row said `pending`.
+// Three transactions, not five: read (the asset and whether its note still
+// exists), verify the object outside any transaction, then one locked write that
+// activates the asset and marks it for extraction together. The response is the
+// row as the database now holds it — answering with the pre-update object made a
+// freshly completed document report `extractState: "none"` while the row said
+// `pending`, and the client stopped asking for its text.
 uploadsRouter.post("/:id/complete", async (req, res) => {
   const identity = await identityFromRequest(req);
   const { id } = req.params;
@@ -230,8 +232,8 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     const user = await requireUser(tx, identity);
     const asset = await tx.asset.findFirst({ where: { id, userId: user.id } });
     if (!asset) return { asset: null, noteAlive: false };
-    // The note may have been deleted while the bytes were in flight.
-    // Asset.noteId is SetNull, so no noteId means the upload was detached.
+    // The note may have been deleted while the bytes were in flight. Asset.noteId
+    // is SetNull, so no noteId means the upload was already detached.
     const noteAlive = asset.noteId
       ? Boolean(
           await tx.note.findFirst({
@@ -263,8 +265,8 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
   const provider = storageProviderOf(existingAsset);
   let remote = null;
   if (needsVerification(existingAsset)) {
-    // Same rule the locked write below applies: a publicId that no longer
-    // matches is a conflict, not a file to verify.
+    // The same rule the locked write below applies: a publicId that no longer
+    // matches is a conflict, not a file worth a storage round trip.
     const pre = checkCompletion(existingAsset, { claimedPublicId, provider });
     if (!pre.ok) return res.status(pre.status).json({ error: pre.error });
     // Verify storage outside the RLS transaction. Neon's object read can take
@@ -312,7 +314,9 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     }
 
     // Fast intake: never parse the file inside the request. Marking the row
-    // pending is all /complete does; the page-wise pass runs after the response.
+    // pending is all /complete does; the page-wise pass runs on Trigger.dev.
+    // Legacy assets keep their extractedText as the compat field, which is why
+    // a row that already holds text is never re-parsed.
     const startExtraction = needsExtraction(asset);
     if (startExtraction) {
       asset = await tx.asset.update({
@@ -327,26 +331,32 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
 
   const asset = outcome.asset;
 
-  // Post-response work, registered before the response is sent so the platform
-  // keeps the invocation open (lib/background.js registers synchronously) —
-  // and started after the commit, never while a database connection is held.
-  if (outcome.startedExtraction) triggerExtraction(asset.id);
-
-  // A conversion-marked upload starts its AI job as soon as both halves are on
-  // the server (extraction may offset the note-sync race either way; the sync
-  // route triggers the other direction).
-  if (asset.noteId && asset.task && asset.task !== "none") {
-    runAfterResponse(`enqueue ${asset.id}`, () =>
-      maybeEnqueueGeneration(identity.clerkId, asset.noteId).catch((error) => {
-        console.warn(
-          `Generation enqueue failed for asset ${asset.id}:`,
-          error?.message ?? error,
-        );
-      }),
-    );
+  // Nothing is extracted or generated here: the object is verified, the row says
+  // what it wants, and Trigger.dev runs it. This endpoint is safe to call
+  // repeatedly — one idempotency key per document + kind + processing version
+  // means a retry cannot start a second run.
+  let processing = null;
+  const conversion = asset.task && asset.task !== "none" ? asset.task : null;
+  if (asset.noteId && conversion) {
+    const started = await startProcessing({
+      noteId: asset.noteId,
+      userId: asset.userId,
+      kind: conversion,
+      assetId: asset.kind === "document" ? asset.id : null,
+    }).catch((error) => {
+      console.warn(`processing start failed for asset ${asset.id}: ${error?.message ?? error}`);
+      return null;
+    });
+    processing = shapeProcessing(started?.job ?? null);
+  } else if (outcome.startedExtraction) {
+    // Plain upload: extract the text for reading only, generate nothing. A
+    // conversion above carries its own extraction stage, so it needs no second
+    // run over the same file.
+    await triggerAssetExtraction(asset.id).catch((error) => {
+      console.warn(`extraction trigger failed for asset ${asset.id}: ${error?.message ?? error}`);
+    });
   }
-
-  res.status(outcome.status).json(shapeAsset(asset));
+  res.status(outcome.status).json({ ...shapeAsset(asset), processing });
 });
 
 assetsRouter.get("/:id/url", async (req, res) => {

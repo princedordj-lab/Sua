@@ -90,10 +90,13 @@ notices) — document processing never runs on a schedule.
 
 ## Known limitations
 
-- Long documents route the notes stage through the sectioned writer
-  (`lib/long-doc.js`), which produces the summary/cards/quiz for that document; the
-  per-material stages then see them as done. Short and typed notes use the fully
-  independent stages.
+- The notes stage picks its writer by size, not by file type. A document whose stored
+  page text (plus any typed context) fits `SHORT_SOURCE_CHARS` (60k) is written in one
+  call — `singlePassSource`/`assembledShortSource` in `lib/note-pipeline.js` — so map/reduce
+  is never paid for on a short upload; a note that mixes a document with photos is
+  assembled first, because pictures have no chunk rows and the sectioned writer would drop
+  them. Only when both return null does `lib/long-doc.js` run, and it then produces the
+  summary/cards/quiz for that document too, so the per-material stages see them as done.
 - `partial` extraction (a parked LlamaParse parse) is reported honestly as
   "Processing scanned pages"; the run resumes on the next attempt.
 - Trigger.dev machine presets and concurrency caps are configured per task

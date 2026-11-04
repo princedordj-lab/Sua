@@ -28,6 +28,7 @@ import {
   prepareSource,
 } from "./stages.js";
 import { adoptRunId } from "../lib/processing/start.js";
+import { safeFailureMessage } from "../lib/processing/errors.js";
 import {
   PROCESSING_STATES,
   markStage,
@@ -35,6 +36,23 @@ import {
   shapeProcessing,
 } from "../lib/processing/state.js";
 import { prisma } from "../config/prisma.js";
+
+/**
+ * Write a stage failure the student can act on. `errorCategory` stays
+ * "transient": the same run retries this shortly, and a manual retry later
+ * resumes from the earliest stage that is not marked done, so this is an
+ * honest pause indicator, never a claim that the file is broken.
+ */
+async function reportStageFailure(jobId, stage, error) {
+  await markStage(jobId, {
+    processingState: PROCESSING_STATES.failed,
+    stage: "failed",
+    state: "failed",
+    error: safeFailureMessage(error),
+    errorCategory: "transient",
+    errorStage: stage,
+  }).catch(() => {});
+}
 
 export const processDocument = task({
   id: "process-document",
@@ -71,10 +89,14 @@ export const processDocument = task({
     if (assetId) {
       const extracted = await extractDocument.triggerAndWait({ jobId, assetId });
       if (!extracted.ok) {
-        // Extraction exhausted its own retries. Leave the row recoverable and
-        // let the orchestrator retry later; nothing was lost.
+        // Extraction exhausted its own retries. Record it on the row before
+        // retrying the document: nothing was lost (the parse is resumable), but
+        // a row left "running" by a run that has stopped working is a spinner
+        // with no way out.
+        const error = new Error("document extraction failed");
         logger.error("extraction stage failed", { jobId, assetId });
-        throw new Error("document extraction failed");
+        await reportStageFailure(jobId, "extracting", error);
+        throw error;
       }
       if (["failed", "partial"].includes(extracted.output?.state)) {
         logger.warn("extraction settled without full text", {
@@ -87,7 +109,9 @@ export const processDocument = task({
     // ---- 2. AI-ready source text, saved on the row -------------------------
     const source = await prepareSource.triggerAndWait({ jobId });
     if (!source.ok) {
-      throw new Error("source preparation failed");
+      const error = new Error("source preparation failed");
+      await reportStageFailure(jobId, "preparing", error);
+      throw error;
     }
 
     // ---- 3. Materials, one independent run each ----------------------------

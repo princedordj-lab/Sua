@@ -10,14 +10,16 @@
  *      fits one generation call. It must carry the student's typed context, and
  *      it must step aside (return null) once the combined source is too big for
  *      the shortcut.
- *   2. condenseMaterial — the study-set input. Above the cap every chunk must be
+ *   2. assembledShortSource — the same shortcut for a note that mixes a document
+ *      with photos: it is only taken while the source can still fit one call, so
+ *      the pictures are never read for nothing.
+ *   3. condenseMaterial — the study-set input. Above the cap every chunk must be
  *      digested (nothing dropped); below it the text must be passed through
  *      untouched with no model call at all.
  */
 
 import assert from "node:assert/strict";
-import { singlePassSource } from "../src/lib/pipeline.js";
-import { condenseMaterial } from "../src/lib/note-pipeline.js";
+import { assembledShortSource, condenseMaterial, singlePassSource } from "../src/lib/note-pipeline.js";
 import { notePipeline } from "../src/config/ai-pipeline.js";
 
 const cap = notePipeline.shortSourceChars;
@@ -191,6 +193,39 @@ const row = (index, text) => ({
   );
   assert.ok(result.text.includes("part 1"), "digest output is what the study set reads");
   console.log(`✓ 7. Over the cap: ${seen.length} digests cover the whole material`);
+}
+
+// ---------------------------------------------------------------------------
+// 8. A mixed document+photos note only assembles when the document can fit
+// ---------------------------------------------------------------------------
+{
+  const mixed = documentNote({
+    assets: [
+      { kind: "document", status: "active", publicId: "file-1", truncated: false },
+      { kind: "image", status: "active", publicId: "img-1", truncated: false },
+    ],
+  });
+  let assembled = 0;
+  const deps = {
+    readBytes: async () => {
+      assembled += 1;
+      throw new Error("must not read a source that cannot fit one call");
+    },
+  };
+  // Documents only: the pure-document fast path owns this note.
+  assert.equal(
+    await assembledShortSource(documentNote(), deps, { rows: [row(1, "text")] }),
+    null,
+    "a note without photos never takes the assembly route",
+  );
+  // The document text alone is over the cap: reading the pictures first is waste.
+  assert.equal(
+    await assembledShortSource(mixed, deps, { rows: [row(1, "z".repeat(cap + 1))] }),
+    null,
+    "an oversized document is not assembled just to be rejected",
+  );
+  assert.equal(assembled, 0, "no asset bytes were read");
+  console.log("✓ 8. A mixed note assembles its photos only while the source can still fit");
 }
 
 console.log("\nAll single-pass routing checks passed.");

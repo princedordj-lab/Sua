@@ -107,11 +107,43 @@ export function stageSentence(job) {
 }
 
 /** Whether the client should show a retry affordance. */
-export function canRetryProcessing(job) {
+const ACTIVE_PROCESSING_STATES = [
+  PROCESSING_STATES.uploaded,
+  PROCESSING_STATES.queued,
+  PROCESSING_STATES.extracting,
+  PROCESSING_STATES.ocr,
+  PROCESSING_STATES.generating,
+];
+
+/**
+ * How long a row may look active without writing anything. Every stage and
+ * every material update renews `heartbeatAt`, and the longest single stage
+ * (`extract-document`) runs ~66 minutes, so silence past this window means the
+ * run is gone — killed at its platform ceiling or cancelled in the dashboard —
+ * rather than working. Deliberately generous: a wrong "still running" costs one
+ * retry tap, a wrong "stale" interrupts a live run.
+ */
+export const STALE_ACTIVE_RUN_MS = Math.max(
+  600_000,
+  Number(process.env.PROCESSING_STALE_RUN_MS ?? 7_200_000),
+);
+
+export function canRetryProcessing(job, { now = Date.now() } = {}) {
   if (!job) return false;
-  if (["failed", "cancelled"].includes(job.processingState)) return true;
+  if ([PROCESSING_STATES.failed, PROCESSING_STATES.cancelled].includes(job.processingState)) return true;
+  if (job.processingState === PROCESSING_STATES.completed) return false;
   // A row whose trigger call never landed can never run; let the student retry.
-  return job.triggerState === "failed" && ["queued", "uploaded"].includes(job.processingState);
+  if (job.triggerState === "failed") return true;
+  // Trigger.dev owns retries and never calls back on a hard stop, so an active
+  // row that has fallen silent is offered for retry instead of showing
+  // progress forever. The retry resumes from the first material that is not
+  // done, so a run that is still alive loses nothing.
+  if (!ACTIVE_PROCESSING_STATES.includes(job.processingState)) return false;
+  if (job.triggerState !== "submitted") return false;
+  const stamp = job.heartbeatAt ?? job.updatedAt;
+  const beat = stamp instanceof Date ? stamp.getTime() : Date.parse(stamp ?? "");
+  if (!Number.isFinite(beat)) return false;
+  return now - beat > STALE_ACTIVE_RUN_MS;
 }
 
 /**

@@ -21,12 +21,15 @@ import { withUser } from "../db.js";
 import { readAssetBytes } from "../storage.js";
 import { claimExtractionAsset, runExtractionPass } from "../extraction.js";
 import {
+  assembledShortSource,
   condenseMaterial,
   parseJsonObject,
   prepareMaterial,
+  singlePassSource,
   writeNote,
 } from "../note-pipeline.js";
 import { chatCompletion, bulkModel, timeoutForDeadline } from "../ai.js";
+import { notifyUser } from "../push.js";
 import { longDoc } from "../../config/ai-pipeline.js";
 import { loadChunkedSource, runLongDocJob } from "../long-doc.js";
 import {
@@ -48,6 +51,8 @@ export const processingDeps = {
   claimExtractionAsset,
   runExtractionPass,
   prepareMaterial,
+  singlePassSource,
+  assembledShortSource,
   condenseMaterial,
   chatCompletion,
   writeNote,
@@ -56,6 +61,7 @@ export const processingDeps = {
   withUser,
   markStage,
   markMaterial,
+  notifyUser,
   record: async () => {},
   recordFailure: async () => {},
 };
@@ -601,7 +607,14 @@ async function runNotesMaterial(job, deps) {
   const aiDeps = buildAiDeps(job, deps);
 
   const chunks = await deps.loadChunkedSource(job.user.clerkId, note);
-  if (chunks?.rows?.length) {
+  // A document whose whole stored text fits one generation call skips map/reduce
+  // entirely — digesting it first would charge the student for a step the writer
+  // does not need. Photos have no chunk rows, so a mixed note is assembled here
+  // instead of being quietly reduced to its document text.
+  const shortSource = chunks?.rows?.length
+    ? (deps.singlePassSource(note, chunks) ?? (await deps.assembledShortSource(note, aiDeps, chunks)))
+    : null;
+  if (chunks?.rows?.length && !shortSource) {
     const result = await deps.runLongDocJob({
       job: { ...job, checkpoint: job.checkpoint ?? {} },
       note,
@@ -618,7 +631,13 @@ async function runNotesMaterial(job, deps) {
     };
   }
 
-  const prepared = await deps.prepareMaterial({ note, kind: job.kind, courseContext, deps: aiDeps });
+  const prepared = await deps.prepareMaterial({
+    note,
+    kind: job.kind,
+    courseContext,
+    deps: aiDeps,
+    ...(shortSource ? { source: shortSource } : {}),
+  });
   const written = await deps.writeNote({ prepared, kind: job.kind, courseContext });
   await deps.withUser(job.user.clerkId, (tx) =>
     tx.note.update({
@@ -739,8 +758,11 @@ export async function finalizeStage({ jobId, materialStates: states = null }, ov
   const required = requiredMaterials(job.kind);
   const failed = required.filter((material) => materials[material]?.state === MATERIAL_STATES.failed);
   const done = required.filter((material) => materials[material]?.state === MATERIAL_STATES.done);
+  // A material that never reached a verdict (its run died before writing one)
+  // is not a success: only what the row says is done may be reported as ready.
+  const unfinished = required.filter((material) => !done.includes(material));
 
-  if (failed.length) {
+  if (failed.length || unfinished.length) {
     const message =
       "Some study materials could not be prepared. Tap Try again — the finished parts are saved.";
     await deps.markStage(
@@ -766,10 +788,16 @@ export async function finalizeStage({ jobId, materialStates: states = null }, ov
     { processingState: PROCESSING_STATES.completed, stage: "ready", state: "done", progressDone: 1, progressTotal: 1, error: null, errorCategory: null, finished: true },
     db,
   );
+  // The destination is asserted where the work is claimed to be finished: an
+  // upload converted to a reference must read as a reference even if the client
+  // created the note before that choice existed. Never the other way round — a
+  // study set on an existing reference must not downgrade it.
+  const noteKind = job.kind === "course_reference" ? { noteKind: "reference" } : {};
   await db.note
-    .updateMany({ where: { id: job.noteId }, data: { aiState: "ready" } })
+    .updateMany({ where: { id: job.noteId }, data: { aiState: "ready", ...noteKind } })
     .catch(() => {});
   await bumpUsage(db, job.userId, job.kind).catch(() => {});
+  await notifyCompletion(job, deps);
   return { state: "completed", materials, done };
 }
 
@@ -794,6 +822,42 @@ async function bumpUsage(db, userId, kind) {
     update: { summaries: { increment: 1 }, studySets: { increment: 1 } },
     create: { userId, month, summaries: 1, studySets: 1 },
   });
+}
+
+const COMPLETION_NOTICE = {
+  study_set: {
+    title: "Your study set is ready",
+    body: (note) => `${note?.title || "Your note"} now has a summary, flashcards and a quiz.`,
+  },
+  lecture_note: {
+    title: "Your lecture note is ready",
+    body: (note) => `${note?.title || "Your note"} now has a full note, summary, flashcards and a quiz.`,
+  },
+  course_reference: {
+    title: "Your course reference is ready",
+    body: (note) => `${note?.title || "Your upload"} was saved to your course reference.`,
+  },
+};
+
+/**
+ * Tell the student their study set is on the device. Awaited, not detached:
+ * a Trigger.dev task is frozen the moment it returns, so an unawaited push
+ * would never reach Expo. A failed delivery is never a failed run.
+ */
+async function notifyCompletion(job, deps) {
+  const copy = COMPLETION_NOTICE[job.kind] ?? COMPLETION_NOTICE.study_set;
+  try {
+    await deps.notifyUser(job.userId, {
+      title: copy.title,
+      body: copy.body(job.note),
+      mobilePath: `/note/${job.noteId}`,
+      webPath: `/app/note/${job.noteId}`,
+      tag: `job-${job.id}`,
+      priority: "high",
+    });
+  } catch (error) {
+    console.warn(`completion push failed for job ${job.id}: ${error?.message ?? error}`);
+  }
 }
 
 

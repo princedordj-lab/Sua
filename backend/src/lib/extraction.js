@@ -26,9 +26,6 @@
 import { createHash } from "node:crypto";
 import { prisma } from "../config/prisma.js";
 import { readAssetBytes } from "./storage.js";
-import { runAfterResponse } from "./background.js";
-import { extractionBudgetMs } from "./budget.js";
-import { triggerRunner } from "./queue.js";
 import {
   classifyPageText,
   extractPdfPages,
@@ -166,17 +163,22 @@ export async function claimExtractionAsset({ targetAssetId = null, db = prisma }
 }
 
 /**
- * Start one extraction pass after the response.
- *
- * Synchronous, so the waitUntil registration happens in the same turn as the
- * request handler: the old version awaited two dynamic imports before
- * registering, which is a race the invocation can lose.
+ * Fire-and-forget trigger used by the Trigger.dev extract-document task for a
+ * plain upload; a generation job triggers the same pass through the pipeline.
  */
-export function triggerExtraction(assetId) {
-  const scheduled = runAfterResponse(`extract ${assetId}`, () =>
-    extractNext({ targetAssetId: assetId, budgetMs: extractionBudgetMs() }),
-  );
-  return { scheduled };
+export async function triggerExtraction(assetId) {
+  const run = extractNext({ targetAssetId: assetId }).catch((error) => {
+    warn("TRIGGER_ERROR", error?.message ?? error);
+  });
+  try {
+    const vercel = await import("@vercel/functions").catch(() => null);
+    if (typeof vercel?.waitUntil === "function") {
+      vercel.waitUntil(run);
+      return;
+    }
+  } catch {
+    // Not on Vercel.
+  }
 }
 
 /**
@@ -187,23 +189,15 @@ export async function extractNext({
   maxAssets = 1,
   targetAssetId = null,
   budgetMs = longDoc.extractBudgetMs,
-  // Resume a generation job parked on this asset once the pass ends. Only the
-  // callers outside the runner enable it (see resumeWaitingJob); the runner's
-  // own extraction gate continues inline and must not kick itself.
-  resumeJobs = null,
   deps = extractionDeps,
 } = {}) {
   const db = deps.db;
-  // Injected deps mean a test harness, not the real queue: never reach for the
-  // job runner from a unit test.
-  const shouldResume = resumeJobs ?? deps === extractionDeps;
   let passes = 0;
   for (let i = 0; i < maxAssets; i += 1) {
     const assetId = await claimExtractionAsset({ targetAssetId, db });
     if (!assetId) break;
-    let result = null;
     try {
-      result = await runExtractionPass(assetId, budgetMs, deps);
+      await runExtractionPass(assetId, budgetMs, deps);
       passes += 1;
     } catch (error) {
       warn("PASS_ERROR", `asset ${assetId}: ${error?.message ?? error}`);
@@ -213,46 +207,9 @@ export async function extractNext({
         data: { extractState: "partial", updatedAt: new Date() },
       }).catch(() => {});
     }
-    // A finished (or failed) file is exactly what a waiting generation job is
-    // parked on. Without this the job sits out its one-minute retry delay and
-    // the student watches "Reading pages" with nothing reading.
-    if (shouldResume && (result?.state === "done" || result?.state === "failed")) {
-      await resumeWaitingJob(assetId, db).catch((error) => {
-        warn("RESUME_JOB", `asset ${assetId}: ${error?.message ?? error}`);
-      });
-    }
     if (targetAssetId) break;
   }
   return { passes };
-}
-
-/**
- * Kick the generation job that is waiting on this asset's extraction.
- *
- * Only a job parked in the `reading` stage is touched: that is the runner's
- * extraction gate (`releaseJob` + a one-minute `runAfter`). A queued job in
- * another stage is either waiting for a worker or parked on a provider delay,
- * and neither should be released here.
- */
-async function resumeWaitingJob(assetId, db) {
-  const asset = await db.asset
-    .findUnique({ where: { id: assetId }, select: { noteId: true } })
-    .catch(() => null);
-  if (!asset?.noteId) return false;
-  const job = await db.job
-    .findFirst({
-      where: { noteId: asset.noteId, state: "queued", stage: "reading" },
-      orderBy: { createdAt: "desc" },
-      select: { id: true },
-    })
-    .catch(() => null);
-  if (!job) return false;
-  // Extraction is finished, so the delay has nothing left to wait for.
-  await db.job
-    .updateMany({ where: { id: job.id, state: "queued" }, data: { runAfter: new Date() } })
-    .catch(() => {});
-  triggerRunner(job.id);
-  return true;
 }
 
 // ---------------------------------------------------------------------------

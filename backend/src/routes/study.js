@@ -2,7 +2,7 @@ import { Router } from "express";
 import { withUser } from "../lib/db.js";
 import { requireUser } from "../lib/users.js";
 import { identityFromRequest } from "../lib/identity.js";
-import { pipelineConfigured, enqueueStudyJob } from "../lib/queue.js";
+import { processingConfigured, triggerQuizMarking } from "../lib/processing/start.js";
 import { lockNote } from "../lib/note-lock.js";
 import { nextCardState } from "../lib/srs.js";
 import { streakViewForUser } from "../lib/streak.js";
@@ -19,7 +19,7 @@ const MAX_CARD_CHARS = {
 };
 
 function requirePipeline(res) {
-  if (!pipelineConfigured()) {
+  if (!processingConfigured()) {
     res.status(503).json({ error: "AI processing is not configured" });
     return false;
   }
@@ -617,7 +617,7 @@ studyRouter.post("/attempts", async (req, res) => {
   let job = null;
   if (created.needsMarking) {
     // One live marking job per attempt; a stale failed job can be resubmitted.
-    // The note row is locked first: a double-submitted attempt (offline retry
+    // The note row is locked first: a double-submitted attempt (an offline retry
     // racing the first response) would otherwise find no job in both
     // transactions and create two marking jobs for the same attempt.
     job = await withUser(identity.clerkId, async (tx) => {
@@ -644,9 +644,10 @@ studyRouter.post("/attempts", async (req, res) => {
       });
     });
     if (job) {
-      const { scheduled } = enqueueStudyJob({ jobId: job.id });
-      if (!scheduled) {
-        console.warn(`marking job ${job.id} was created but could not be started`);
+      try {
+        await triggerQuizMarking(job.id);
+      } catch (error) {
+        console.warn(`marking trigger failed for job ${job.id}: ${error?.message ?? error}`);
       }
     }
   }

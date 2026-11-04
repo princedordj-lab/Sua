@@ -1,36 +1,8 @@
-import { createHash } from "node:crypto";
-import { readAssetBytes } from "./storage.js";
-import { withUser } from "./db.js";
 import { bulkModel, chatCompletion, timeoutForDeadline } from "./ai.js";
-import { enqueueStudyJob, pipelineConfigured, STALE_QUEUED_MS } from "./queue.js";
-import { leaseMsFor, processingBudgetMs, interruptedAfterMs } from "./budget.js";
-import { ACTIVE_JOB_STATES, decideJobCreation, hasSettledKind } from "./job-dedupe.js";
-import { lockNote } from "./note-lock.js";
-import { errorCodeFor } from "./job-recovery.js";
-import {
-  condenseMaterial,
-  prepareMaterial,
-  assembleSource,
-  sourceFromSegments,
-  writeNote,
-} from "./note-pipeline.js";
-import {
-  USER_MESSAGES,
-  UserFacingError,
-  JobYieldError,
-  isUserFacing,
-  isJobYield,
-  notePipeline,
-} from "../config/ai-pipeline.js";
+import { USER_MESSAGES, isUserFacing, notePipeline } from "../config/ai-pipeline.js";
 import { validateStudyPack } from "../config/study-pack-schema.js";
 import { prisma } from "../config/prisma.js";
-import { notifyUser } from "./push.js";
-import {
-  loadChunkedSource,
-  runLongDocJob,
-  chunkedSourceHash,
-  persistStudySet as persistStudySetPreservingSrs,
-} from "./long-doc.js";
+import { withUser } from "./db.js";
 
 // Free-plan monthly caps; warn-only until Milestone 5 flips ENFORCE_CAPS on.
 export const FREE_MONTHLY_LIMITS = {
@@ -39,77 +11,12 @@ export const FREE_MONTHLY_LIMITS = {
   references: Number(process.env.FREE_MONTHLY_REFERENCES ?? 20),
 };
 
-const USD_TO_GHS = Number(process.env.USD_TO_GHS_RATE ?? 15);
-const DAILY_SPEND_ALERT_GHS = Number(process.env.AI_DAILY_SPEND_ALERT_GHS ?? 50);
-
 function monthKey() {
   return new Date().toISOString().slice(0, 7);
 }
 
-function sourceHashOf(text) {
-  return createHash("sha1").update(text).digest("hex");
-}
-
 function char(value) {
   return String(value ?? "").trim();
-}
-
-function maybeGhs(usdMicros) {
-  return (usdMicros / 1_000_000) * USD_TO_GHS;
-}
-
-async function fetchAssetBytes(asset) {
-  try {
-    return await readAssetBytes(asset);
-  } catch (error) {
-    throw new Error(`storage fetch failed for asset ${asset.id}: ${error?.message ?? error}`);
-  }
-}
-
-/**
- * Stage updates run through withUser so row-level security applies with the
- * job owner's identity — every AI pipeline write happens as the student.
- * The `progress` argument ({ done, total }) is the additive long-file counter
- * the app renders ("Reading pages 41 of 212"); short jobs leave it untouched.
- */
-async function setStage(job, stage, state = "running", progress = null) {
-  // Cancel check: the claim no-ops when the job is no longer queued/running
-  // (deleted or cancelled). A claim count of zero means "stop quietly".
-  //
-  // The same write renews the lease. `setStage` is the one place every stage
-  // transition already goes through, so a pass that is still working keeps its
-  // claim alive without an extra round trip — the lease can no longer expire
-  // under a live pass and let a second invocation duplicate the work.
-  const claim = await prisma.job.updateMany({
-    where: { id: job.id, state: { in: ["queued", "running"] } },
-    data: {
-      stage,
-      state,
-      heartbeatAt: new Date(),
-      ...(state === "running"
-        ? { lockedUntil: new Date(Date.now() + leaseMsFor(processingBudgetMs())) }
-        : {}),
-      ...(progress
-        ? {
-            progressDone: Math.max(0, Number(progress.done ?? 0)),
-            progressTotal: Math.max(0, Number(progress.total ?? 0)),
-          }
-        : {}),
-    },
-  }).catch(() => ({ count: 1 }));
-  if (!claim.count) throw new JobCancelledError();
-  await withUser(job.user.clerkId, (tx) =>
-    tx.note.update({ where: { id: job.noteId }, data: { aiState: stage } }),
-  ).catch(() => {});
-}
-
-/** A cancelled job closes without retries, without a failure UI, silently. */
-class JobCancelledError extends Error {
-  constructor() {
-    super("Job was cancelled");
-    this.name = "JobCancelledError";
-    this.cancelled = true;
-  }
 }
 
 async function recordAiCall(jobId, step, result) {
@@ -126,259 +33,11 @@ async function recordAiCall(jobId, step, result) {
       },
     });
   } catch (error) {
-    // Deleting a note cascades its jobs away. A stage that was already in
-    // flight must not crash on the missing parent row — the NoteDeletedError
-    // guard stops the run at the next stage boundary.
+    // Deleting a note cascades its jobs away. A marking call that was already
+    // in flight must not crash on the missing parent row.
     if (error?.code === "P2003" || error?.code === "P2025") return;
     throw error;
   }
-}
-
-/**
- * Failed provider calls are diagnostics, not note content. Keeping them next
- * to the successful ones is what makes a slow or poisoned reduce wave visible
- * (status, kind and duration) without reading the source.
- */
-async function recordAiFailure(jobId, step, error, durationMs) {
-  try {
-    await prisma.aiCall.create({
-      data: {
-        jobId,
-        step: `${step}_failed`,
-        model: "unknown",
-        status: Number.isFinite(error?.status) ? error.status : null,
-        errorCode: String(error?.kind ?? error?.name ?? "ERROR").slice(0, 40),
-        durationMs: Number.isFinite(durationMs) ? Math.round(durationMs) : null,
-      },
-    });
-  } catch (inner) {
-    if (inner?.code === "P2003" || inner?.code === "P2025") return;
-    console.warn(`could not record failed AI call for job ${jobId}: ${inner?.message ?? inner}`);
-  }
-}
-
-// A note deleted mid-run surfaces as a missing row (P2025) from any later
-// write. It is not a retryable failure, so the pipeline closes the job quietly.
-class NoteDeletedError extends Error {
-  constructor(noteId) {
-    super("Note was deleted");
-    this.name = "NoteDeletedError";
-    this.noteId = noteId;
-  }
-}
-
-function isNoteGone(error) {
-  return error instanceof NoteDeletedError;
-}
-
-/**
- * P2025 means "record to update not found" — usually the note, but it could be
- * an asset. Confirm against the note itself before treating the run as deleted.
- */
-async function jobTargetDeleted(job, error) {
-  if (isNoteGone(error)) return true;
-  if (error?.code !== "P2025") return false;
-  const note = await withUser(job.user.clerkId, (tx) =>
-    tx.note.findFirst({ where: { id: job.noteId }, select: { id: true } }),
-  ).catch(() => null);
-  return !note;
-}
-
-/** Cheap guard so a deleted note stops costing AI calls at the next stage. */
-async function assertNoteAlive(job) {
-  const note = await withUser(job.user.clerkId, (tx) =>
-    tx.note.findFirst({ where: { id: job.noteId }, select: { id: true } }),
-  );
-  if (!note) throw new NoteDeletedError(job.noteId);
-}
-
-async function closeDeletedJob(job) {
-  await prisma.job
-    .updateMany({
-      where: { id: job.id },
-      data: {
-        state: "failed",
-        stage: "failed",
-        error: "Note was deleted",
-        finishedAt: new Date(),
-      },
-    })
-    .catch(() => {});
-}
-
-async function startAttempt(job) {
-  // Retry accounting is strict: a claim never pushes attempts past the row's
-  // own limit, even if a recovered pass and a retry race each other.
-  await prisma.$executeRaw`
-    UPDATE "jobs"
-    SET "startedAt" = NOW(),
-        "heartbeatAt" = NOW(),
-        "attempts" = LEAST("attempts" + 1, "maxAttempts"),
-        "updatedAt" = NOW()
-    WHERE "id" = ${job.id}
-  `.catch(() => {});
-  // The pipeline, not the device, owns what kind of page a note is. A rerun
-  // after a client-side mismatch therefore self-corrects on the next attempt.
-  const noteKind = job.kind === "course_reference" ? "reference" : "note";
-  await withUser(job.user.clerkId, (tx) =>
-    tx.note.update({ where: { id: job.noteId }, data: { noteKind } }),
-  ).catch((error) => {
-    // A deleted note must fail the job via its own path, not here.
-    console.warn(`noteKind update failed for note ${job.noteId}: ${error?.message ?? error}`);
-  });
-}
-
-function courseContextOf(note) {
-  return [
-    note.course.name,
-    note.course.code ? `course code ${note.course.code}` : "",
-  ]
-    .filter(Boolean)
-    .join(", ");
-}
-
-/**
- * Everything the note pipeline needs from the outside world. All of it runs
- * outside withUser — the pipeline only calls back into the database for short,
- * idempotent writes.
- */
-function noteDeps(job, documentExtraction, deadline = null) {
-  return {
-    record: (step, result) => recordAiCall(job.id, step, result),
-    recordFailure: (step, error, durationMs) =>
-      recordAiFailure(job.id, step, error, durationMs),
-    readBytes: (asset) => fetchAssetBytes(asset),
-    saveAssetText: (asset, value) =>
-      withUser(job.user.clerkId, (tx) =>
-        tx.asset.update({
-          where: { id: asset.id },
-          data: { extractedText: value },
-        }),
-      ),
-    setStage: (stage, progress) => setStage(job, stage, "running", progress),
-    assertAlive: () => assertNoteAlive(job),
-    // Wall-clock the invocation may spend on model calls. Stages stop starting
-    // new work past it and yield the job back to the queue (checkpointed).
-    deadline,
-    ...documentExtraction,
-  };
-}
-
-async function persistTranscript(job, note, transcript) {
-  // Keep the original capture on the note so the student can audit the AI.
-  await withUser(job.user.clerkId, (tx) =>
-    tx.note.update({ where: { id: note.id }, data: { transcript } }),
-  );
-}
-
-async function guardRerun(job, hash) {
-  // Caching: an identical source for the same destination reuses existing
-  // outputs. The kind is part of the identity — a study_set run must never
-  // make a later lecture_note run skip writing the note body.
-  const priorDone = await prisma.job.findFirst({
-    where: {
-      noteId: job.noteId,
-      kind: job.kind,
-      state: "done",
-      sourceHash: hash,
-      id: { not: job.id },
-    },
-  });
-  if (priorDone) {
-    await finishJob(job, hash);
-    return true;
-  }
-  return false;
-}
-
-/**
- * A file whose whole stored text fits one generation call skips the map/reduce
- * machinery: the stored page rows become the source directly, so the writer
- * (and the study set) see the entire document in one pass. Only pure-document
- * notes qualify — recordings and photos still need source assembly.
- *
- * Returns the prepared `source`, or null when the long-file path must run.
- *
- * Exported for the routing checks (`scripts/test-single-pass.mjs`).
- */
-export function singlePassSource(note, chunks) {
-  if (!chunks?.rows?.length) return null;
-  if (!(notePipeline.shortSourceChars > 0)) return null;
-  const assets = (note.assets ?? []).filter(
-    (asset) => asset.status === "active" && asset.publicId !== "pending",
-  );
-  if (!assets.length) return null;
-  if (assets.some((asset) => asset.kind !== "document")) return null;
-
-  const rows = chunks.rows.filter((row) => String(row.text ?? "").trim());
-  if (!rows.length) return null;
-
-  const segments = rows.map((row) => ({
-    index: row.index,
-    label: row.label ?? (row.startPage ? `p. ${row.startPage}` : null),
-    text: row.text,
-  }));
-
-  // A file note may also carry typed context the student wrote around the
-  // upload. assembleSource merges it the same way — the note body while there
-  // is no transcript yet — and taking this shortcut without it would hide text
-  // the student typed from the writer, the summary and the cards.
-  const typed = String(note.body ?? "").trim();
-  if (typed && !String(note.transcript ?? "").trim()) {
-    segments.unshift({ index: 0, label: null, text: typed });
-  }
-
-  const chars = segments.reduce((sum, segment) => sum + segment.text.length, 0);
-  if (chars > notePipeline.shortSourceChars) return null;
-
-  const pageCount = Math.max(
-    ...rows.map((row) => row.endPage ?? row.startPage ?? row.index),
-    rows.length,
-  );
-  return sourceFromSegments(segments, {
-    sourceType: "file",
-    pageCount,
-    truncated: assets.some((asset) => asset.truncated),
-  });
-}
-
-/**
- * A note that mixes documents with photos has no chunk rows for the pictures,
- * so the long-file path would silently drop them. Assembling the full source
- * settles whether the note fits one generation call; the photos are read once
- * here and would be read anyway on the way to generation.
- *
- * Returns the prepared `source`, or null when the note is too big (or is not
- * this kind of note), in which case the caller keeps the long-file path.
- */
-async function assembledShortSource(note, deps, chunks) {
-  if (!(notePipeline.shortSourceChars > 0)) return null;
-  const assets = (note.assets ?? []).filter(
-    (asset) => asset.status === "active" && asset.publicId !== "pending",
-  );
-  if (!assets.some((asset) => asset.kind === "image")) return null;
-  if (assets.some((asset) => asset.kind !== "document" && asset.kind !== "image")) {
-    return null;
-  }
-  // The document text alone already exceeds one call: assembling would read
-  // every photo only for the long-file path to run anyway.
-  const documentChars = (chunks?.rows ?? []).reduce(
-    (sum, row) => sum + String(row.text ?? "").length,
-    0,
-  );
-  if (documentChars > notePipeline.shortSourceChars) return null;
-
-  let source;
-  try {
-    source = await assembleSource(note, deps);
-  } catch (error) {
-    console.warn(`Mixed source assembly skipped: ${error?.message ?? error}`);
-    return null;
-  }
-  if (!source?.rawText || source.rawText.length > notePipeline.shortSourceChars) {
-    return null;
-  }
-  return source;
 }
 
 /**
@@ -395,7 +54,7 @@ export async function processQuizMarking(job) {
   const attemptId = payload.attemptId;
   if (!attemptId) throw new Error("quiz_marking payload is missing attemptId");
 
-  // The runner owns the job retry counter; keep the Job row in step with it.
+  // The task owns the job retry counter; keep the Job row in step with it.
   await prisma.job.update({
     where: { id: job.id },
     data: { state: "running", stage: "marking", startedAt: new Date(), attempts: { increment: 1 } },
@@ -541,43 +200,6 @@ async function finishMarkingJob(job) {
  * errors (rate limits, timeouts, stack traces) become the standard retry line:
  * the app promises not to charge a failed run, so it must not leak internals.
  */
-async function bumpRateLimitPasses(jobId) {
-  const rows = await prisma
-    .$queryRaw`
-      UPDATE "jobs"
-      SET "checkpoint" = jsonb_set(
-            COALESCE("checkpoint", '{}'::jsonb),
-            '{rateLimitPasses}',
-            to_jsonb(COALESCE(("checkpoint"->>'rateLimitPasses')::int, 0) + 1),
-            true
-          ),
-          "heartbeatAt" = NOW(),
-          "updatedAt" = NOW()
-      WHERE "id" = ${jobId}
-      RETURNING ("checkpoint"->>'rateLimitPasses')::int AS passes
-    `
-    .catch(() => []);
-  return rows?.[0]?.passes ?? 1;
-}
-
-/**
- * A 429 is not a failed attempt: finished batches are checkpointed, so the job
- * is parked and resumed after the provider's Retry-After (bounded). Only after
- * a few quiet passes does the student see the quota message.
- */
-async function rateLimitFailure(job, error) {
-  const passes = await bumpRateLimitPasses(job.id);
-  if (passes <= 3) {
-    throw new JobYieldError("rate_limit", {
-      retryAfterMs: error?.retryAfterMs ?? null,
-      reason: "rate_limit",
-    });
-  }
-  return new UserFacingError(
-    "The AI service hit its rate limit or daily quota. Wait a few minutes and tap Try again — finished pages are kept.",
-  );
-}
-
 async function setFailed(job, error) {
   const message = isUserFacing(error)
     ? error.message
@@ -589,12 +211,6 @@ async function setFailed(job, error) {
     state: "failed",
     stage: "failed",
     error: message.slice(0, 2000),
-    // A failed job must never keep a lease: the row would look "owned" and the
-    // queue would refuse to recover it. Every failure records a code so the
-    // diagnostics can group it instead of reading prose.
-    lockedUntil: null,
-    errorCode: errorCodeFor(error) ?? "PIPELINE_ERROR",
-    errorStage: job.stage ?? null,
     finishedAt: new Date(),
   };
   // Two independent writes: a missing job must not hide the note update, and a
@@ -605,22 +221,9 @@ async function setFailed(job, error) {
   ).catch(() => {});
 }
 
-// 2-minute chunks are the source unit; audio minutes ≈ asset count × 2.
-function totalAudioMinutes(note) {
-  const audioAssets = note.assets.filter((asset) => asset.kind === "audio").length;
-  return Math.max(1, Math.round((audioAssets || 1) * 2));
-}
-
 // ---------------------------------------------------------------------------
-// Generation + validation
+// Study pack generation + validation (the eval harness's entry point)
 // ---------------------------------------------------------------------------
-
-const REQUIRED_SECTIONS = {
-  Overview: "overview",
-  "Key Points": "keyPoints",
-  "Key Terms": "keyTerms",
-  "Likely Exam Questions": "examQuestions",
-};
 
 function studySetPrompt({ courseContext, durationMinutes, reduceNote = "" }) {
   const cardTarget = Math.min(20, Math.max(8, Math.round((durationMinutes / 60) * 10 + 10)));
@@ -750,213 +353,6 @@ function summaryToMarkdown(pack) {
     }
   }
   return lines.join("\n").trim();
-}
-
-async function persistStudySet(job, note, set) {
-  // Shared with the long-file pipeline: matched cards keep their SM-2
-  // progress (matched by normalised front), vanished cards soft-retire so
-  // review_logs stay intact, and the quiz row keeps its id so attempt history
-  // survives — only the questions inside it are replaced. Legacy contract:
-  // the note body stays untouched, only the summary is replaced.
-  await persistStudySetPreservingSrs(job.user.clerkId, note, set, true);
-}
-
-
-/** The asset that asks for AI conversion, if this one qualifies. */
-export function isConversionAsset(row) {
-  return (
-    row.status === "active" &&
-    (row.task === "lecture_note" || row.task === "course_reference") &&
-    (row.kind === "image" || row.kind === "document")
-  );
-}
-
-/**
- * Cheap pre-check for bulk callers: a sync of 100 typed notes must not open
- * 100 transactions to discover that none of them wants a conversion.
- */
-export function noteHasConversionCandidate(note) {
-  const assets = note?.assets;
-  return Array.isArray(assets) && assets.some(isConversionAsset);
-}
-
-/**
- * One statement for a whole sync chunk: which of these notes still want a
- * conversion? Replaces a per-note transaction (up to 100 of them) that ran
- * after the response had already been sent.
- */
-export async function notesAwaitingConversion(clerkId, noteIds) {
-  const ids = (noteIds ?? []).filter((id) => typeof id === "string" && id);
-  if (!ids.length || !pipelineConfigured()) return [];
-  const rows = await withUser(clerkId, (tx) =>
-    tx.note.findMany({
-      where: {
-        id: { in: ids },
-        assets: {
-          some: {
-            status: "active",
-            task: { in: ["lecture_note", "course_reference"] },
-            kind: { in: ["image", "document"] },
-          },
-        },
-      },
-      select: { id: true },
-    }),
-  );
-  return rows.map((row) => row.id);
-}
-
-/**
- * Pick up a finished upload whose note just arrived server-side (or vice
- * versa): when a note exists, has an active asset the student marked for AI
- * conversion, and no live job is already handling it, enqueue the conversion
- * job once. Runs in the caller's identity context, idempotent across repeated
- * syncs. Returns the created job or null.
- *
- * Idempotency is enforced by locking the note row before the check-then-create:
- * upload completion and the note sync routinely arrive together, and without
- * the lock both would read "no active job" and both create one.
- */
-export async function maybeEnqueueGeneration(clerkId, noteId) {
-  if (!pipelineConfigured()) return null;
-  const job = await withUser(clerkId, async (tx) => {
-    const note = await tx.note.findFirst({
-      where: { id: noteId },
-      include: { jobs: true, assets: true },
-    });
-    if (!note) return null;
-    // One conversion per requested destination: dedupe on active work and on
-    // a job that already produced this kind for the note. A completed
-    // study_set must not block a later lecture_note or reference conversion.
-    const asset = (note.assets ?? []).find(
-      (row) => isConversionAsset(row) && !hasSettledKind(note.jobs, row.task),
-    );
-    if (!asset) return null;
-
-    // Serialise the decision against every other creator for this note.
-    if (!(await lockNote(tx, note.id, note.userId))) return null;
-    const active = await tx.job.findFirst({
-      where: { noteId: note.id, state: { in: ACTIVE_JOB_STATES } },
-      orderBy: { createdAt: "desc" },
-    });
-    // A job that was queued but never picked up (a killed invocation) is dead:
-    // it must not block the conversion forever.
-    if (
-      decideJobCreation(active, {
-        staleQueuedMs: STALE_QUEUED_MS,
-        staleRunningMs: interruptedAfterMs(),
-      }) === "reuse"
-    ) {
-      return null;
-    }
-
-    const created = await tx.job.create({
-      data: { userId: note.userId, noteId: note.id, kind: asset.task },
-    });
-    await tx.note.update({
-      where: { id: note.id },
-      data: { aiState: "queued" },
-    });
-    return created;
-  });
-  if (!job) return null;
-  const { scheduled } = enqueueStudyJob({
-    jobId: job.id,
-    noteId: job.noteId,
-    userId: job.userId,
-    kind: job.kind,
-  });
-  if (!scheduled) {
-    console.warn(`generation job ${job.id} was created but could not be started`);
-  }
-  return job;
-}
-
-// ---------------------------------------------------------------------------
-// Usage, cost, notifications
-// ---------------------------------------------------------------------------
-
-/** Bumps per-product counters once, in one write, at the end of a job.
- * Split-mode jobs pass the number of generated part notes (overview free). */
-async function bumpUsage(userId, kind = "study_set", count = 1) {
-  const month = monthKey();
-  if (kind === "course_reference") {
-    await prisma.usage.upsert({
-      where: { userId_month: { userId, month } },
-      update: { references: { increment: count } },
-      create: { userId, month, references: count },
-    });
-    return;
-  }
-  await prisma.usage.upsert({
-    where: { userId_month: { userId, month } },
-    update: { summaries: { increment: count }, studySets: { increment: count } },
-    create: { userId, month, summaries: count, studySets: count },
-  });
-}
-
-async function checkDailySpend() {
-  const day = new Date();
-  day.setUTCHours(0, 0, 0, 0);
-  const result = await prisma.aiCall.aggregate({
-    _sum: { usdMicros: true },
-    where: { createdAt: { gte: day } },
-  });
-  const ghs = maybeGhs(result._sum.usdMicros ?? 0);
-  if (ghs > DAILY_SPEND_ALERT_GHS) {
-    console.warn(
-      `[AI SPEND ALERT] Today's AI spend is GHS ${ghs.toFixed(2)}, over the GHS ${DAILY_SPEND_ALERT_GHS} threshold.`,
-    );
-  }
-}
-
-async function finishJob(job, hash, meta = null) {
-  await withUser(job.user.clerkId, (tx) =>
-    tx.$transaction([
-      tx.job.update({
-        where: { id: job.id },
-        data: {
-          state: "done",
-          stage: "ready",
-          sourceHash: hash,
-          finishedAt: new Date(),
-          error: null,
-          // Diagnostics live on the job so the app can show what the AI read
-          // (pages used, truncation, check result) without a schema change.
-          ...(meta ? { payload: JSON.stringify(meta) } : {}),
-        },
-      }),
-      tx.note.update({ where: { id: job.noteId }, data: { aiState: "ready" } }),
-    ]),
-  );
-}
-
-// Expo Push: fire-and-forget (a failed notification must never fail the job).
-const NOTIFY_COPY = {
-  study_set: {
-    title: "Your study set is ready",
-    body: (note) => `${note.title || "Your note"} now has a summary, flashcards and a quiz.`,
-  },
-  lecture_note: {
-    title: "Your lecture note is ready",
-    body: (note) => `${note.title || "Your note"} now has a full note, summary, flashcards and a quiz.`,
-  },
-  course_reference: {
-    title: "Your course reference is ready",
-    body: (note) => `${note.title || "Your upload"} was saved to your course reference.`,
-  },
-};
-
-async function notifyStudent(job, note) {
-  const copy = NOTIFY_COPY[job.kind] ?? NOTIFY_COPY.study_set;
-  await notifyUser(job.userId, {
-    title: copy.title,
-    body: copy.body(note),
-    mobilePath: `/note/${job.noteId}`,
-    webPath: `/app/note/${job.noteId}`,
-    tag: `job-${job.id}`,
-    priority: "high",
-  });
 }
 
 /** Warn-only cap check; returns a warning string or null. */

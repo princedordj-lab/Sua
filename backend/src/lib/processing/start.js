@@ -15,7 +15,9 @@
  */
 
 import { prisma } from "../../config/prisma.js";
+import { withUser } from "../db.js";
 import { aiConfigured } from "../ai.js";
+import { hasSettledKind } from "../job-dedupe.js";
 import {
   MATERIAL_STATES,
   PROCESSING_STATES,
@@ -141,6 +143,63 @@ export async function startProcessing({ noteId, userId, kind, assetId = null }, 
 
   const result = await triggerProcessing(job, { assetId, db });
   return { job: { ...job, runId: result.runId ?? job.runId }, ...result, reused: false };
+}
+
+/**
+ * Which of these notes still want a run started, and with which asset.
+ *
+ * The sync tail used to open one transaction per pushed note — up to 100 of
+ * them, most discovering nothing to do — to answer a question that is a single
+ * read. `withUser`'s budget is WAN round trips, not rows, so the whole chunk is
+ * one query here and the caller only spends a Trigger.dev call on a note that
+ * actually wants conversion.
+ *
+ * A note qualifies when an active image/document asset asks for a conversion the
+ * note has not already had: `hasSettledKind` is the same rule `POST /jobs` uses,
+ * so a re-sync of an old note cannot re-bill a finished study set.
+ */
+export async function notesAwaitingConversion(clerkId, noteIds) {
+  const ids = (noteIds ?? []).filter((id) => typeof id === "string" && id);
+  if (!ids.length || !processingConfigured()) return [];
+  const tasks = ["lecture_note", "course_reference"];
+  const rows = await withUser(clerkId, (tx) =>
+    tx.note.findMany({
+      where: {
+        id: { in: ids },
+        assets: {
+          some: {
+            status: "active",
+            task: { in: tasks },
+            kind: { in: ["image", "document"] },
+          },
+        },
+      },
+      select: {
+        id: true,
+        userId: true,
+        assets: {
+          where: { status: "active", task: { in: tasks }, kind: { in: ["image", "document"] } },
+          orderBy: { createdAt: "asc" },
+          select: { id: true, task: true, kind: true },
+        },
+        jobs: { select: { kind: true, state: true } },
+      },
+    }),
+  );
+  const wanted = [];
+  for (const note of rows) {
+    const asset = note.assets.find((row) => !hasSettledKind(note.jobs, row.task));
+    if (!asset) continue;
+    wanted.push({
+      noteId: note.id,
+      userId: note.userId,
+      kind: asset.task,
+      // Only a document carries its own extraction run; a photo is read whole
+      // by the generation stage.
+      assetId: asset.kind === "document" ? asset.id : null,
+    });
+  }
+  return wanted;
 }
 
 /**
