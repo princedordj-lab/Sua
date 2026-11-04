@@ -34,9 +34,9 @@
     "r2:domain:add": "wrangler r2 bucket domain add sua-downloads",
     "r2:upload": "wrangler r2 object put",
     "test:processing": "tsx scripts/test-processing-pipeline.mjs",
-    "trigger:dev": "trigger.dev dev",
-    "trigger:deploy": "trigger.dev deploy",
-    "trigger:deploy:prod": "trigger.dev deploy --env prod"
+    "trigger:dev": "trigger dev",
+    "trigger:deploy": "trigger deploy",
+    "trigger:deploy:prod": "trigger deploy --env prod"
   },
   "keywords": [],
   "author": "",
@@ -48,7 +48,7 @@
     "@napi-rs/canvas": "0.1.80",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "7.10.0",
-    "@trigger.dev/sdk": "^4.8.3",
+    "@trigger.dev/sdk": "4.8.3",
     "@vercel/functions": "^2.1.0",
     "cloudinary": "^2.11.0",
     "cors": "^2.8.6",
