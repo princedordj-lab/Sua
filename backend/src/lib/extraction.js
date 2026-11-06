@@ -191,13 +191,14 @@ export async function extractNext({
   budgetMs = longDoc.extractBudgetMs,
   deps = extractionDeps,
 } = {}) {
-  const db = deps.db;
+  const resolvedDeps = { ...extractionDeps, ...(deps || {}) };
+  const db = resolvedDeps.db;
   let passes = 0;
   for (let i = 0; i < maxAssets; i += 1) {
     const assetId = await claimExtractionAsset({ targetAssetId, db });
     if (!assetId) break;
     try {
-      await runExtractionPass(assetId, budgetMs, deps);
+      await runExtractionPass(assetId, budgetMs, resolvedDeps);
       passes += 1;
     } catch (error) {
       warn("PASS_ERROR", `asset ${assetId}: ${error?.message ?? error}`);
@@ -232,7 +233,8 @@ function failAsset(db, assetId, code) {
  * Returns `{ ok, segments, pagesTotal, usablePages, fallbackPages, reasons,
  * ms }` or `{ ok: false }` when the bytes are not a parseable PDF.
  */
-export async function readLocalPdfPages(asset, bytes, deps = extractionDeps) {
+export async function readLocalPdfPages(asset, bytes, injectedDeps = {}) {
+  const deps = { ...extractionDeps, ...injectedDeps };
   const started = Date.now();
   let parsed;
   try {
@@ -279,10 +281,17 @@ export async function readLocalPdfPages(asset, bytes, deps = extractionDeps) {
 export async function runExtractionPass(
   assetId,
   budgetMs = longDoc.extractBudgetMs,
-  deps = extractionDeps,
+  injectedDeps = {},
 ) {
+  const deps = { ...extractionDeps, ...injectedDeps };
   const started = Date.now();
   const db = deps.db;
+  if (!db) {
+    throw new Error("db dependency is required for runExtractionPass");
+  }
+  if (typeof deps.readAssetBytes !== "function") {
+    throw new Error("readAssetBytes dependency must be a function");
+  }
   const asset = await db.asset.findUnique({ where: { id: assetId } });
   if (!asset || asset.kind !== "document" || asset.status !== "active") return null;
 
@@ -480,8 +489,15 @@ async function handleLlamaError(db, asset, error, stage, attempts) {
  * deliberately parked, and null when the caller should run the local pipeline.
  * Network calls happen outside any transaction; each write is a short update.
  */
-export async function tryLlamaParse(asset, format, bytes, deadline, deps = extractionDeps) {
-  if (!deps.llamaParseEnabled() || !deps.llamaParseEligible(format)) return null;
+export async function tryLlamaParse(asset, format, bytes, deadline, injectedDeps = {}) {
+  const deps = { ...extractionDeps, ...injectedDeps };
+  const isEnabled = typeof deps.llamaParseEnabled === "function"
+    ? deps.llamaParseEnabled()
+    : Boolean(deps.llamaParseEnabled);
+  const isEligible = typeof deps.llamaParseEligible === "function"
+    ? deps.llamaParseEligible(format)
+    : Boolean(deps.llamaParseEligible);
+  if (!isEnabled || !isEligible) return null;
 
   const storedError = String(asset.providerError ?? "");
   if (LLAMA_FALLBACK_PREFIXES.some((code) => storedError.startsWith(code))) return null;
@@ -833,8 +849,15 @@ async function persistLlamaPages(asset, format, result, bytes, deadline, deps) {
  * and PDFs whose every page lacks a usable text layer), so a successful read
  * never erases text the local extractor already recovered.
  */
-async function tryNativeRead(asset, bytes, format, deadline, deps = extractionDeps) {
-  if (!deps.nativeReadEnabled() || !deps.nativeReadEligible(format)) return null;
+async function tryNativeRead(asset, bytes, format, deadline, injectedDeps = {}) {
+  const deps = { ...extractionDeps, ...injectedDeps };
+  const isEnabled = typeof deps.nativeReadEnabled === "function"
+    ? deps.nativeReadEnabled()
+    : Boolean(deps.nativeReadEnabled);
+  const isEligible = typeof deps.nativeReadEligible === "function"
+    ? deps.nativeReadEligible(format)
+    : Boolean(deps.nativeReadEligible);
+  if (!isEnabled || !isEligible) return null;
 
   // The read is one request, but a slow 60-page document can outlive a pass
   // that is nearly out of budget. Keep enough of it for the request, otherwise
@@ -946,9 +969,16 @@ async function tryNativeRead(asset, bytes, format, deadline, deps = extractionDe
  * Returns the same `{ segments, pageCount, truncated, headings }` shape as
  * extractDocument, or the input unchanged when there is nothing to add.
  */
-export async function withEmbeddedVisuals(bytes, format, extracted, deadline, deps = extractionDeps) {
-  if (!deps.nativeReadEnabled() || !documentRead.embeddedImages) return extracted;
-  if (deps.nativeReadBlocked()) return extracted;
+export async function withEmbeddedVisuals(bytes, format, extracted, deadline, injectedDeps = {}) {
+  const deps = { ...extractionDeps, ...injectedDeps };
+  const isEnabled = typeof deps.nativeReadEnabled === "function"
+    ? deps.nativeReadEnabled()
+    : Boolean(deps.nativeReadEnabled);
+  const isBlocked = typeof deps.nativeReadBlocked === "function"
+    ? deps.nativeReadBlocked()
+    : Boolean(deps.nativeReadBlocked);
+  if (!isEnabled || !documentRead.embeddedImages) return extracted;
+  if (isBlocked) return extracted;
 
   const remaining = deadline ? deadline - Date.now() : documentRead.timeoutMs;
   if (remaining < NATIVE_MIN_BUDGET_MS) return extracted;
@@ -1024,7 +1054,8 @@ export async function withEmbeddedVisuals(bytes, format, extracted, deadline, de
   };
 }
 
-async function extractIntoChunks(asset, bytes, format, deadline, deps = extractionDeps, localPdf = null) {
+async function extractIntoChunks(asset, bytes, format, deadline, injectedDeps = {}, localPdf = null) {
+  const deps = { ...extractionDeps, ...injectedDeps };
   const db = deps.db;
   if (format !== "pdf" && format !== "docx" && format !== "pptx" && format !== "txt" && format !== "md") {
     await failAsset(db, asset.id, "UNREADABLE_FILE");
@@ -1258,7 +1289,8 @@ async function extractIntoChunks(asset, bytes, format, deadline, deps = extracti
  * Nothing here is destructive — a batch that fails leaves its rows exactly as
  * they were, so the next pass retries them and the local text survives.
  */
-async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, deps = extractionDeps }) {
+async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, deps: injectedDeps = {} }) {
+  const deps = { ...extractionDeps, ...injectedDeps };
   const db = deps.db;
   const remaining = longDoc.ocrMaxPages - (ocrPagesDone || 0);
   if (remaining <= 0) return { ocrPages: 0, blankPages: 0, unrecoveredPages: 0 };
