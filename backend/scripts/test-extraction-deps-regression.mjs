@@ -481,7 +481,7 @@ function makeMockDb(initialAssets = [], initialJobs = []) {
       });
     },
     (err) => {
-      return err.message.includes("Extraction settled in failed state");
+      return err.message.includes("Extraction did not settle");
     },
     "Failed extraction must throw and stop pipeline"
   );

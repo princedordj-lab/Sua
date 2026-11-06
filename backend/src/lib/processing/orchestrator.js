@@ -164,9 +164,12 @@ export async function runDirectProcessing(jobId, options = {}) {
           throw error;
         }
 
-        // Verify extraction reached terminal success
-        if (extractResult && ["failed", "partial"].includes(extractResult.state)) {
-          const err = new Error(`Extraction settled in ${extractResult.state} state`);
+        // Verify extraction reached terminal success. extractStage throws on
+        // failed / partial / parked-provider results, so this is a second gate
+        // for anything that returns a non-"done" state: a run must never
+        // prepare a source from pages it does not have.
+        if (extractResult && extractResult.state !== "done" && extractResult.state !== "skipped" && extractResult.state !== "resumed") {
+          const err = new Error(`Extraction did not settle: ${extractResult.state}`);
           await reportStageFailure(jobId, "extracting", err, deps);
           throw err;
         }

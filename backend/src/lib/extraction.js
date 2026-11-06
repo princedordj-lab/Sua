@@ -88,8 +88,10 @@ export const extractionDeps = {
 
 
 const OCR_PAGE_SCALE = notePipeline.ocrScale ?? 2;
-// A claim that died mid-pass is retried after this stale window.
-const RUNNING_STALE_MS = 8 * 60_000;
+// A claim that died mid-pass is retried after this stale window. Exported so
+// route-level kicks can offer the same rescuer to a `running` asset the claim
+// SQL alone would wait out.
+export const STALE_RUNNING_MS = 8 * 60_000;
 
 // Below this much remaining pass budget, a native read is not attempted: the
 // request would be cut off, and the resumable extractor can still make progress.
@@ -126,7 +128,7 @@ function formatMatchesSignature(buffer, format) {
  * FOR UPDATE SKIP LOCKED so concurrent triggers never double-run the asset.
  */
 export async function claimExtractionAsset({ targetAssetId = null, db = prisma } = {}) {
-  const staleAfter = `${Math.round(RUNNING_STALE_MS / 1000)} seconds`;
+  const staleAfter = `${Math.round(STALE_RUNNING_MS / 1000)} seconds`;
   return db.$transaction(async (tx) => {
     const rows = await (targetAssetId
       ? tx.$queryRaw`
@@ -163,26 +165,7 @@ export async function claimExtractionAsset({ targetAssetId = null, db = prisma }
 }
 
 /**
- * Fire-and-forget background extraction used for a
- * plain upload; a generation job runs the same pass through the pipeline.
- */
-export async function triggerExtraction(assetId) {
-  const run = extractNext({ targetAssetId: assetId }).catch((error) => {
-    warn("TRIGGER_ERROR", error?.message ?? error);
-  });
-  try {
-    const vercel = await import("@vercel/functions").catch(() => null);
-    if (typeof vercel?.waitUntil === "function") {
-      vercel.waitUntil(run);
-      return;
-    }
-  } catch {
-    // Not on Vercel.
-  }
-}
-
-/**
- * Run up to `maxAssets` extraction passes. Called by the tick cron, the
+ * Run up to `maxAssets` extraction passes. Called by the tick sweep, the
  * status-poll kick and the waitUntil trigger (which targets one asset).
  */
 export async function extractNext({
@@ -1327,7 +1310,7 @@ async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, de
         touched.add(row.index);
         continue;
       }
-      pages.push({ index: row.index, image });
+      pages.push({ index: row.index, image, rowText: String(row.text ?? "") });
     }
     if (!pages.length) continue;
 
@@ -1341,10 +1324,13 @@ async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, de
 
     for (const [slot, page] of pages.entries()) {
       let text = batchTexts?.[slot]?.text ?? null;
+      // Did the model answer (possibly with nothing readable) or fail?
+      let readable = text != null;
       if (text == null) {
         try {
           const single = await deps.geminiImageText({ bytes: page.image, mimeType: "image/png" });
           text = single?.text ?? null;
+          readable = text != null;
         } catch (error) {
           warn("OCR_SINGLE", `asset ${asset.id} page ${page.index}: ${error?.message ?? error}`);
         }
@@ -1352,12 +1338,22 @@ async function recoverUnreadablePages({ asset, bytes, deadline, ocrPagesDone, de
       processed += 1;
       touched.add(page.index);
       const usable = String(text ?? "").trim();
+      if (!usable && !readable) {
+        // The provider never answered: a transient failure must not be written
+        // onto the row — the row is left exactly as it was and a later pass
+        // retries it, still bounded by the file's ocrMaxPages budget. Only an
+        // answered-but-empty page below settles as failed.
+        continue;
+      }
       if (!usable) unrecoveredPages += 1;
+      // Never write OCR "nothing" over text the local layer did have: a failed
+      // fallback keeps whatever the page had before this attempt.
+      const stored = usable || String(page.rowText ?? "");
       await db.sourceChunk.update({
         where: { assetId_index: { assetId: asset.id, index: page.index } },
         data: {
-          text: usable,
-          hash: sha1(usable),
+          text: stored,
+          hash: sha1(stored),
           status: usable ? "done" : "failed",
           errorCode: usable ? null : "OCR_FAILED",
         },

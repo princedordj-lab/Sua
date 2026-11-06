@@ -33,6 +33,10 @@ import {
   writeNote,
 } from "../note-pipeline.js";
 import { chatCompletion, bulkModel, timeoutForDeadline } from "../ai.js";
+// Used by buildAiDeps: the generation pipeline must be able to re-read files the
+// page-wise extractor never touched (a document mixed with photos), and to
+// persist transcription/OCR so a retried run never pays for the same call twice.
+import { extractDocument, MAX_TEXT_CHARS } from "../extract.js";
 import { notifyUser } from "../push.js";
 import { longDoc } from "../../config/ai-pipeline.js";
 import { loadChunkedSource, runLongDocJob } from "../long-doc.js";
@@ -192,6 +196,31 @@ export async function extractStage({ jobId = null, assetId }, overrides = {}) {
     // Provider-side trouble (timeout, 5xx, a parked parse) is worth another run.
     throw new TransientProcessingError(`asset ${assetId} extraction failed: ${code}`, { code });
   }
+
+  // A provider parse parked on its poll backoff is work in flight, not a
+  // result. Returning here would let the run read pages that do not exist yet
+  // and fail the job "unreadable" while the parse is minutes from done. A
+  // transient throw releases the lease, records the failure, and a resumed run
+  // (status poll, the tick sweep, or a retry) continues the same parse.
+  const parkedAt = current.providerNextPollAt
+    ? new Date(current.providerNextPollAt).getTime()
+    : null;
+  if (parkedAt && parkedAt > Date.now()) {
+    throw new TransientProcessingError(
+      `asset ${assetId} is parked on its parse provider`,
+      { code: "PROVIDER_PARKED", retryAfterMs: parkedAt - Date.now() + 1_000 },
+    );
+  }
+
+  // A partial pass means the run ran out of its pass budget or its caps:
+  // everything stored survives on SourceChunk rows, and the next attempt
+  // continues from `nextPage` instead of paying for it again. Thrown as
+  // transient — never reported as ready, never lost.
+  if (current.extractState === "partial") {
+    throw new TransientProcessingError(`asset ${assetId} extraction is partial`, {
+      code: "EXTRACTION_PARTIAL",
+    });
+  }
   return summarizeAsset(current, { passes });
 }
 
@@ -285,8 +314,13 @@ function courseContextOf(note) {
  * The deps the generation helpers need (AI-call accounting, stage mirroring and
  * a liveness check). Deliberately tiny: a short write per call, never a
  * transaction around a provider call.
+ *
+ * `saveAssetText` and `extractDocument` are load-bearing: without them a
+ * recording conversion threw in `audioText` right after a successful
+ * transcription, and a photo on a file note spelled "unreadable" instead of
+ * falling back to the local page extractor.
  */
-function buildAiDeps(job, deps) {
+export function buildAiDeps(job, deps) {
   const db = deps.db;
   return {
     record: (step, result) => recordAiCall(db, job.id, step, result),
@@ -302,8 +336,35 @@ function buildAiDeps(job, deps) {
       }
     },
     readBytes: deps.readAssetBytes,
+    extractDocument,
+    saveAssetText: (asset, value) => saveAssetText(db, asset, value),
     deadline: null,
   };
+}
+
+/**
+ * Persist a transcription/OCR result on the asset row so the source assembler
+ * (and any retried run) never pays for the same model call again.
+ *
+ * First write wins — the filter matches only an empty column, the same
+ * first-write-wins rule per-page extraction uses. This applies to image/audio
+ * rows, which nothing else touches; a document's `extractedText` is written by
+ * extraction itself. A failed write must not fail the material: the call is
+ * recorded and the source assembler falls back to re-reading next attempt.
+ */
+export async function saveAssetText(db, asset, value) {
+  const text = String(value ?? "").trim();
+  if (!asset?.id || !text) return;
+  await db.asset
+    .updateMany({
+      where: { id: asset.id, extractedText: null },
+      data: { extractedText: text.slice(0, MAX_TEXT_CHARS) },
+    })
+    .catch((error) => {
+      console.warn(
+        `[materials] saveAssetText asset=${asset.id}: ${error?.message ?? error}`,
+      );
+    });
 }
 
 async function recordAiCall(db, jobId, step, result) {
