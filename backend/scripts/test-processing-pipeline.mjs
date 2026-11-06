@@ -6,8 +6,9 @@
 // to break in production: invalid model output, retry classification (429/5xx vs
 // permanent), duplicate upload-completion, duplicate trigger, partial retry that
 // keeps completed materials, honest status text, an honest completion verdict,
-// the completion push, a retry affordance for a run that stopped reporting, and
-// the notes stage choosing between one write call and map/reduce.
+// the completion push, a retry affordance for a run that stopped reporting, the
+// notes stage choosing between one write call and map/reduce, and the spec
+// materials reaching their model call through the injected deps.
 
 import assert from "node:assert/strict";
 import { MATERIAL_SPECS, finalizeStage, materialStage } from "../src/lib/processing/stages.js";
@@ -514,6 +515,54 @@ function makeFinishDb(materials, kind = "lecture_note") {
   }
 
   console.log("✓ a short document takes one write call, a long one takes map/reduce");
+}
+
+// --- 9. A spec material reaches its model call through the injected deps
+{
+  const job = {
+    id: "job-fc-1",
+    userId: "user-1",
+    noteId: "note-1",
+    kind: "study_set",
+    materials: {},
+    sourceText: "The first law of thermodynamics states that energy cannot be created or destroyed.",
+    note: { id: "note-1", courseId: "course-1", course: { name: "Thermodynamics", code: "ME 201" } },
+    user: { id: "user-1", clerkId: "user_test" },
+  };
+  const flashcardTx = {
+    findMany: async () => [],
+    create: async () => ({}),
+    update: async () => ({}),
+    updateMany: async () => ({}),
+  };
+  let calls = 0;
+  const result = await materialStage(job.id, "flashcards", {
+    db: {
+      job: { findUnique: async () => job },
+      note: { findUnique: async () => ({ id: job.noteId }) },
+      aiCall: { create: async () => ({}), count: async () => 0 },
+      flashcard: flashcardTx,
+    },
+    chatCompletion: async () => {
+      calls += 1;
+      return {
+        model: "mock",
+        text: JSON.stringify({
+          flashcards: Array.from({ length: 6 }, (_, index) => ({
+            front: `Q${index}`,
+            back: `A${index}`,
+          })),
+        }),
+      };
+    },
+    withUser: async (_clerkId, cb) => cb({ flashcard: flashcardTx }),
+    markStage: async () => {},
+    markMaterial: async () => {},
+  });
+  assert.equal(result.state, MATERIAL_STATES.done);
+  assert.equal(result.skipped, undefined, "the material actually ran");
+  assert.equal(calls >= 1, true, "the stage reached its model call");
+  console.log("✓ a spec material's deps carry chatCompletion through to its call");
 }
 
 console.log("\nAll processing-architecture checks passed.");

@@ -323,6 +323,11 @@ function courseContextOf(note) {
 export function buildAiDeps(job, deps) {
   const db = deps.db;
   return {
+    // Generation helpers get the AI call through deps (not the module import)
+    // so test overrides swap it in — materialStage spreads this object into
+    // the deps generateMaterial sees, and a dropped entry here surfaces as
+    // "deps.chatCompletion is not a function" on the first model call.
+    chatCompletion: deps.chatCompletion,
     record: (step, result) => recordAiCall(db, job.id, step, result),
     recordFailure: (step, error, durationMs) => recordAiFailure(db, job.id, step, error, durationMs),
     setStage: (stage, progress) =>
