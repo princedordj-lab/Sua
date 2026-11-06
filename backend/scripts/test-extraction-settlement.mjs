@@ -124,4 +124,4 @@ function fakeDb(asset) {
   console.log("✓ failed extraction is not mistaken for a usable source");
 }
 
-console.log("\\nAll extraction-settlement checks passed.");
+console.log("\nAll extraction-settlement checks passed.");
