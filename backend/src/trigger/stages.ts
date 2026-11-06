@@ -46,7 +46,11 @@ export const extractDocument = task({
   // PDF rendering and OCR are the heaviest work in the pipeline.
   machine: { preset: "medium-1x" },
   maxDuration: longDoc.extractBudgetMs / 1000 * 20,
-  retry: { maxAttempts: 3, minTimeoutInMs: 5_000, maxTimeoutInMs: 120_000, factor: 2, randomize: true },
+  // A provider parse can remain pending across several persisted poll
+  // intervals (up to LLAMAPARSE_TIMEOUT_MS). The stage throws a typed transient
+  // error with retryAfterMs, so these attempts resume the same asset without
+  // re-uploading or re-submitting the parse.
+  retry: { maxAttempts: 24, minTimeoutInMs: 5_000, maxTimeoutInMs: 60_000, factor: 2, randomize: true },
   concurrency: { total: 4 },
   catchError: catchErrorFor,
   run: async (payload, { ctx }) => {
