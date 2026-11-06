@@ -117,8 +117,40 @@ export async function extractStage({ jobId = null, assetId }, overrides = {}) {
     });
   }
 
-  if (!claimed && (asset.extractState === "done" || Boolean(asset.extractedText))) {
-    return summarizeAsset(asset, { resumed: true });
+  if (!claimed) {
+    if (
+      asset.extractState === "done" ||
+      (asset.extractState === "none" && String(asset.extractedText ?? "").trim())
+    ) {
+      // Legacy assets may already have usable text without extraction-state
+      // bookkeeping. Treat those as settled, but never mistake a pending or
+      // partial extraction with some text for a completed document.
+      return summarizeAsset(
+        { ...asset, extractState: "done" },
+        { resumed: true },
+      );
+    }
+    if (asset.extractState === "failed") {
+      const code = String(asset.extractErrorCode ?? "UNREADABLE_FILE");
+      const message =
+        UNREADABLE_MESSAGES[code] ?? "Couldn't read this file. Try a clearer PDF or re-upload.";
+      throw new PermanentProcessingError(`asset ${assetId} extraction failed: ${code}`, {
+        code,
+        safeMessage: message,
+      });
+    }
+
+    const nextPollAt = asset.providerNextPollAt
+      ? new Date(asset.providerNextPollAt).getTime()
+      : 0;
+    const retryAfterMs = nextPollAt > Date.now() ? nextPollAt - Date.now() : 5_000;
+    throw new TransientProcessingError(
+      `asset ${assetId} extraction is not claimable yet`,
+      {
+        code: nextPollAt > Date.now() ? "EXTRACTION_PROVIDER_PENDING" : "EXTRACTION_BUSY",
+        retryAfterMs,
+      },
+    );
   }
   if (jobId) {
     await markStage(
@@ -164,8 +196,26 @@ export async function extractStage({ jobId = null, assetId }, overrides = {}) {
         db,
       );
     }
-    if (["done", "failed", "partial"].includes(current.extractState)) break;
-    if (current.providerNextPollAt && current.providerNextPollAt.getTime() > Date.now()) break;
+    // A partial pass has checkpointed its SourceChunk rows and nextPage.
+    // Continue in this same Trigger.dev task until every page allowed by the
+    // extraction limits is settled; partial is not ready for normalization.
+    if (["done", "failed"].includes(current.extractState)) break;
+
+    // LlamaParse is intentionally polled only after its persisted backoff.
+    // Throwing a typed transient error lets Trigger.dev retry this extraction
+    // task at the right time instead of returning "pending" as success.
+    const nextPollAt = current.providerNextPollAt
+      ? new Date(current.providerNextPollAt).getTime()
+      : 0;
+    if (nextPollAt > Date.now()) {
+      throw new TransientProcessingError(
+        `asset ${assetId} document parse is still pending`,
+        {
+          code: "EXTRACTION_PROVIDER_PENDING",
+          retryAfterMs: nextPollAt - Date.now(),
+        },
+      );
+    }
     if (passes > 200) {
       throw new TransientProcessingError(`asset ${assetId} extraction did not settle`, {
         code: "EXTRACTION_LOOP",
