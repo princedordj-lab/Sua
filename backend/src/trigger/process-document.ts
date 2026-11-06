@@ -98,11 +98,15 @@ export const processDocument = task({
         await reportStageFailure(jobId, "extracting", error);
         throw error;
       }
-      if (["failed", "partial"].includes(extracted.output?.state)) {
-        logger.warn("extraction settled without full text", {
-          jobId,
-          state: extracted.output?.state,
-        });
+      if (extracted.output?.state !== "done") {
+        // Source preparation must never consume a partial or parked document.
+        // The extraction task normally retries these states itself; this guard
+        // protects the boundary if a task ever returns an unexpected state.
+        const state = extracted.output?.state ?? "unknown";
+        const error = new Error(`document extraction did not finish (state=${state})`);
+        logger.error("extraction did not reach a settled state", { jobId, assetId, state });
+        await reportStageFailure(jobId, "extracting", error);
+        throw error;
       }
     }
 
