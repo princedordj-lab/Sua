@@ -547,8 +547,10 @@ async function runPass({
   assert.equal(outcome.state, "done");
   assert.ok(rows[0].text.includes("a = v^2 / r"), "valid local text is preserved on quota failure");
   assert.equal(rows[0].status, "done");
-  assert.equal(rows[1].status, "failed", "the unrecoverable page is marked failed, not dropped");
-  assert.equal(rows[1].errorCode, "OCR_FAILED");
+  // The provider never answered: the page is left exactly as it was — pending,
+  // local text untouched — so a later pass retries it (bounded by ocrMaxPages)
+  // instead of this transient hiccup permanently muting the page.
+  assert.equal(rows[1].status, "pending", "an unanswered OCR stays pending: a later pass retries it");
   assert.equal(providers.calls.nativeRead, 0, "local text was usable, so no document read was attempted");
   console.log("✓ 6. Quota failure: local chunks preserved, extraction settles instead of hanging");
 }

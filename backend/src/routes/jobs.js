@@ -18,6 +18,7 @@ import {
   materialStates,
   shapeProcessing,
 } from "../lib/processing/state.js";
+import { jobIsAlive } from "../lib/job-dedupe.js";
 
 export const jobsRouter = Router();
 
@@ -153,12 +154,15 @@ jobsRouter.post("/", async (req, res) => {
       };
     }
     // One row per (note, kind, processing version): a repeated request finds the
-    // running row instead of starting a second run.
+    // running row instead of starting a second run. Liveness decides: a row
+    // whose state stuck at "queued/running" with a dead heartbeat must not
+    // stand in front of a real request, so the active check falls through and
+    // the idempotency key adopts the row for the run it never got.
     const active = await tx.job.findFirst({
       where: { noteId: note.id, kind, state: { in: ACTIVE_STATES } },
       orderBy: { createdAt: "desc" },
     });
-    if (active) return { existing: active };
+    if (active && jobIsAlive(active)) return { existing: active };
     const created = await ensureProcessingJob(
       { noteId: note.id, userId: user.id, kind },
       tx,

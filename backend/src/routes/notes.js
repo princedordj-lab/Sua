@@ -10,6 +10,7 @@ import {
   startProcessing,
   triggerAssetExtraction,
 } from "../lib/processing/start.js";
+import { STALE_RUNNING_MS } from "../lib/extraction.js";
 
 export const notesRouter = Router();
 
@@ -31,6 +32,9 @@ const assetSelect = {
   pagesDone: true,
   pagesTotal: true,
   truncated: true,
+  // Lets the single-note read reclaim a `running` pass a frozen instance
+  // abandoned (the claim SQL takes it once past the stale window).
+  updatedAt: true,
 };
 const noteInclude = {
   assets: { select: assetSelect, orderBy: { createdAt: "asc" } },
@@ -164,12 +168,21 @@ notesRouter.get("/:noteId", async (req, res) => {
   const note = loaded?.note ?? null;
   if (!note) return res.status(404).json({ error: "Note not found" });
   // Opportunistic resume for uploads without a generation job: a provider
-  // parse parked as pending is continued by the next note read. The claim
-  // gate keeps this from polling the provider more often than its backoff.
+  // parse parked as pending is continued by the next note read, and a pass a
+  // frozen instance abandoned is reclaimed once it has been running past the
+  // claim's stale window. The claim gate keeps this from polling the provider
+  // more often than its backoff, and rejects a `running` row that is still
+  // alive, so including it here costs nothing when nothing is stale.
   const stuck = note.assets?.find(
-    (asset) =>
-      asset.status === "active" &&
-      ["pending", "partial"].includes(asset.extractState ?? "none"),
+    (asset) => {
+      if (asset.status !== "active") return false;
+      const state = asset.extractState ?? "none";
+      if (state === "pending" || state === "partial") return true;
+      return (
+        state === "running" &&
+        Date.now() - new Date(asset.updatedAt).getTime() > STALE_RUNNING_MS
+      );
+    },
   );
   if (stuck) {
     triggerAssetExtraction(stuck.id).catch(() => {});

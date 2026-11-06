@@ -111,6 +111,11 @@ export function estimateTokens(text) {
  * Transcribe raw audio bytes with a Gemini model. Returns
  * { text, promptTokens, completionTokens } or throws. `mimeType` follows the
  * Cloudinary format (audio/mp4 for m4a, audio/mpeg for mp3, ...).
+ *
+ * Audio above the inline cap (roughly base64-inflated request sizes, so a
+ * long wav allowed by the upload limits) is uploaded once through the Files
+ * API and referenced by URI, exactly like native document reads; the uploaded
+ * copy is deleted right after the read, so nothing outlives the request.
  */
 export async function geminiTranscribe({ bytes, mimeType, languageHint }) {
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not set");
@@ -137,20 +142,37 @@ export async function geminiTranscribe({ bytes, mimeType, languageHint }) {
   }
 }
 
+// Gemini rejects inline requests near ~20 MB of *base64*; 8 MB of real bytes
+// (~11 MB base64) keeps comfortable headroom inside that limit.
+const TRANSCRIBE_INLINE_MAX_BYTES = 8 * 1024 * 1024;
+
 async function geminiTranscribeOnce({ bytes, mimeType, languageHint, model }) {
   const prompt =
     "Transcribe this lecture recording exactly as spoken. Keep the speaker's words; " +
     "do not summarise. Preserve technical terms verbatim. If a section is inaudible, " +
     "write [inaudible]. Output only the transcript text." +
     (languageHint ? ` The expected language is ${languageHint}.` : "");
-  const base64 = Buffer.from(bytes).toString("base64");
+  let audioPart;
+  let uploadedFile = null;
+  if (bytes.length > TRANSCRIBE_INLINE_MAX_BYTES) {
+    uploadedFile = await geminiUploadFile({
+      bytes,
+      mimeType,
+      displayName: "recording",
+    });
+    audioPart = { fileData: { fileUri: uploadedFile.uri, mimeType: uploadedFile.mimeType } };
+  } else {
+    audioPart = {
+      inlineData: {
+        data: Buffer.from(bytes).toString("base64"),
+        mimeType,
+      },
+    };
+  }
   const body = {
     contents: [
       {
-        parts: [
-          { text: prompt },
-          { inlineData: { data: base64, mimeType } },
-        ],
+        parts: [{ text: prompt }, audioPart],
       },
     ],
     generationConfig: { temperature: 0 },
@@ -184,6 +206,8 @@ async function geminiTranscribeOnce({ bytes, mimeType, languageHint, model }) {
     };
   } finally {
     done();
+    // Clean up best-effort; Google also removes uploaded files after 48h.
+    if (uploadedFile) await geminiDeleteFile(uploadedFile.name);
   }
 }
 

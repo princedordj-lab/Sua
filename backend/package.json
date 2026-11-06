@@ -35,7 +35,9 @@
     "r2:bucket:create": "wrangler r2 bucket create sua-downloads",
     "r2:bucket:list": "wrangler r2 bucket list",
     "r2:domain:add": "wrangler r2 bucket domain add sua-downloads",
-    "r2:upload": "wrangler r2 object put"
+    "r2:upload": "wrangler r2 object put",
+    "test:extraction-deps": "tsx scripts/test-extraction-deps-regression.mjs",
+    "test:rescue": "tsx scripts/test-pipeline-recovery.mjs"
   },
   "keywords": [],
   "author": "",

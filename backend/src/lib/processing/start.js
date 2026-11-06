@@ -22,6 +22,10 @@ import {
 } from "./state.js";
 import { runDirectProcessing } from "./orchestrator.js";
 import { extractNext } from "../extraction.js";
+// Static import on purpose: a dynamic import queued the waitUntil registration
+// behind a microtask, so a response that committed first froze the function
+// with the pass mid-flight — the row looked alive and nobody resumed it.
+import { waitUntil } from "@vercel/functions";
 
 /** Pipeline revision. Bump it to force every note to be rebuilt once. */
 export const PROCESSING_VERSION = "v1";
@@ -34,16 +38,13 @@ export const IDEMPOTENCY_TTL = "1h";
  * or standard background execution with unhandled rejection protection in Node/dev.
  */
 export function runInBackground(promise) {
+  // Registered synchronously (see the import note above). Outside a request
+  // context waitUntil is a no-op / throws, so this stays safe in dev — the
+  // promise below still runs in the Node process.
   try {
-    import("@vercel/functions")
-      .then((vercel) => {
-        if (typeof vercel?.waitUntil === "function") {
-          vercel.waitUntil(promise);
-        }
-      })
-      .catch(() => {});
+    waitUntil(promise);
   } catch {
-    // Not running on Vercel
+    // Not running on Vercel.
   }
 
   // Ensure errors do not escape as unhandled rejections
@@ -281,10 +282,23 @@ export async function cancelProcessingRun(runId) {
   return true;
 }
 
+// How long a transiently failed row waits before the automatic re-run. Short
+// on purpose: most transient failures are model throttling or a parked parse
+// whose own poll backoff already spaced the next attempt.
+const RESUBMIT_COOLDOWN_MS = 60_000;
+
 /** A row whose run never landed or that was interrupted can be resumed. */
 export async function needsResubmit(job) {
   if (!job) return false;
   if (job.triggerState === "failed") return true;
+  // A transient failure is not finished work: it must never be a dead end the
+  // next poll cannot climb out of. Permanent failures stay manual — retrying
+  // them only repeats the same spend.
+  if (job.processingState === PROCESSING_STATES.failed) {
+    if ((job.errorCategory ?? "transient") !== "transient") return false;
+    const idleMs = Date.now() - new Date(job.updatedAt ?? job.createdAt).getTime();
+    return idleMs > RESUBMIT_COOLDOWN_MS;
+  }
   if (["extracting", "ocr_processing", "generating", "queued"].includes(job.processingState)) {
     const isLocked = job.lockedUntil && new Date(job.lockedUntil).getTime() > Date.now();
     if (!isLocked) {

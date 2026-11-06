@@ -15,6 +15,7 @@ import { pruneNoteTombstones, retryStorageDeletions } from "./lib/note-deletion.
 import { sendDueReminders } from "./lib/reminders.js";
 import { sendStreakNotices } from "./lib/streak.js";
 import { budgetReport, minPhaseMs, processingBudgetMs, remainingMs } from "./lib/budget.js";
+import { resumeStalledWork } from "./lib/processing/sweep.js";
 import { prisma } from "./config/prisma.js";
 import { studyRouter } from "./routes/study.js";
 
@@ -94,10 +95,12 @@ function checkCronAuth(req) {
   return timingSafeEqual(expectedBuf, providedBuf);
 }
 
-// Background cron tick: the janitor. Document processing does NOT run here —
-// Direct Express processing owns extraction, OCR and generation (see src/lib/processing/*) — so this
-// sweep never competes with a processing run. It retries the object deletes that
-// failed with their note, drops tombstones no device can still need, sends the
+// Background cron tick: janitor phases plus one bounded rescue sweep. The
+// heavy lifting itself still belongs to Direct Express processing (see
+// src/lib/processing/*) — this sweep never competes with a live run: it only
+// resumes work nothing else is claiming (stalled extraction, interrupted or
+// transiently failed runs). It also retries the object deletes that failed
+// with their note, drops tombstones no device can still need, sends the
 // web-only daily reminder and runs the streak notices.
 //
 // Mounted before clerkMiddleware so it does not require student session auth.
@@ -140,6 +143,21 @@ async function handleTick(req, res) {
       skipped.push("janitor");
     }
 
+    // Rescue sweep: the client polls drive recovery while the app is open; this
+    // is the server-side backstop for an app that was closed mid-work. It
+    // claims stalled extraction assets and re-submits interrupted or
+    // transiently failed runs through the same entry points the polls use,
+    // bounded so it can never overrun the invocation on its own.
+    let rescues = null;
+    if (left() >= minPhaseMs()) {
+      rescues = await resumeStalledWork({ deadline }).catch((error) => {
+        console.warn("Rescue sweep failed:", error?.message ?? error);
+        return null;
+      });
+    } else {
+      skipped.push("rescues");
+    }
+
     // Web-only daily reminder; mobile schedules its own locally. Never fails
     // the tick, and no-ops when VAPID is unset.
     let reminders = null;
@@ -174,6 +192,7 @@ async function handleTick(req, res) {
     res.json({
       ok: true,
       janitor: { storage, tombstones },
+      rescues,
       reminders,
       streakNotices,
       budget: { totalMs: totalBudgetMs, usedMs: Date.now() - startedAt, skipped },

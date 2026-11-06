@@ -153,12 +153,16 @@ export async function renderPdfPage(buffer, pageNumber, scale = 2) {
     const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: copyOf(buffer) });
     try {
-      const result = await parser.getScreenshot({
-        partial: [pageNumber],
-        scale,
-        imageBuffer: true,
-        imageDataUrl: false,
-      });
+      const result = await withDeadline(
+        parser.getScreenshot({
+          partial: [pageNumber],
+          scale,
+          imageBuffer: true,
+          imageDataUrl: false,
+        }),
+        PARSE_TIMEOUT_MS,
+        `PDF page ${pageNumber} render exceeded its time budget`,
+      );
       const page = result.pages[0];
       return page?.data ? Buffer.from(page.data) : null;
     } finally {
@@ -186,6 +190,21 @@ function copyOf(buffer) {
 // One parse over the whole file returning every page's slot (kept even when
 // blank so page numbers stay true to the file). Exported for the resumable
 // extraction driver in lib/extraction.js.
+//
+// The parse itself must be bounded: the extraction budget is only checked
+// between pages, and a pathological PDF kept the parser busy past the function
+// ceiling. pdf-parse exposes no abort, so the deadline cancels the *await* —
+// the parser below is destroyed either way, and a timed-out pass is resumable.
+const PARSE_TIMEOUT_MS = Number(process.env.PDF_PARSE_TIMEOUT_MS) || 60_000;
+
+function withDeadline(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 export async function extractPdfPages(buffer) {
   // pdfjs-dist (pulled in by pdf-parse) evaluates `new DOMMatrix()` at module
   // scope and expects the canvas globals to exist in Node. Importing canvas
@@ -195,7 +214,11 @@ export async function extractPdfPages(buffer) {
   const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: copyOf(buffer) });
   try {
-    const result = await parser.getText({ pageJoiner: "" });
+    const result = await withDeadline(
+      parser.getText({ pageJoiner: "" }),
+      PARSE_TIMEOUT_MS,
+      "PDF text layer read exceeded its time budget",
+    );
     // Every page keeps its slot, even when it has no text layer: the pipeline
     // OCRs those pages, and page numbers must stay true to the file.
     const segments = result.pages.map((page) => ({
