@@ -1,7 +1,7 @@
 /**
  * The document-processing stages, as plain functions.
  *
- * Trigger.dev tasks (src/trigger/*) are thin wrappers around these, which keeps
+ * The direct orchestrator (src/lib/processing/orchestrator.js) invokes these, which keeps
  * every stage runnable — and testable — without the platform: the offline
  * harness in scripts/test-processing-pipeline.mjs calls them with fake deps.
  *
@@ -100,7 +100,7 @@ const PERMANENT_EXTRACT_CODES = new Set([
  *
  * A pass is resumable (SourceChunk rows + asset progress columns), so this
  * loops until the asset settles. Transient provider trouble is thrown as a
- * TransientProcessingError so Trigger.dev retries the run, and the next attempt
+ * TransientProcessingError so the orchestrator retries the run, and the next attempt
  * continues from `nextPage` instead of starting over.
  */
 export async function extractStage({ jobId = null, assetId }, overrides = {}) {
@@ -543,7 +543,7 @@ async function generateMaterial(spec, { material, courseContext, job, deps }) {
 /**
  * Shared shell for one material: skip if already done, mark it running, run the
  * generator, then record the outcome. A transient failure is re-thrown so
- * Trigger.dev retries the run (completed materials are untouched); a permanent
+ * the orchestrator retries the run (completed materials are untouched); a permanent
  * one is recorded and re-thrown as a controlled error for the orchestrator.
  */
 export async function materialStage(jobId, material, overrides = {}) {
@@ -841,7 +841,7 @@ const COMPLETION_NOTICE = {
 
 /**
  * Tell the student their study set is on the device. Awaited, not detached:
- * a Trigger.dev task is frozen the moment it returns, so an unawaited push
+ * serverless execution is frozen the moment it returns, so an unawaited push
  * would never reach Expo. A failed delivery is never a failed run.
  */
 async function notifyCompletion(job, deps) {

@@ -95,7 +95,7 @@ function checkCronAuth(req) {
 }
 
 // Background cron tick: the janitor. Document processing does NOT run here —
-// Trigger.dev owns extraction, OCR and generation (see src/trigger/*) — so this
+// Direct Express processing owns extraction, OCR and generation (see src/lib/processing/*) — so this
 // sweep never competes with a processing run. It retries the object deletes that
 // failed with their note, drops tombstones no device can still need, sends the
 // web-only daily reminder and runs the streak notices.
@@ -270,8 +270,7 @@ export default app;
 
 // Start server locally if not running on Vercel
 if (!process.env.VERCEL) {
-  // Local development: Trigger.dev runs the tasks (`npx trigger.dev dev`), so the
-  // API process has no background loop of its own.
+  // Local development: Direct Express processing runs asynchronously in the background.
   app.listen(port, () => {
     // One line that makes a plan/limit mismatch visible: if this says
     // platformMaxMs=300000 on a project capped at 60 s, every long pass will be
@@ -280,11 +279,6 @@ if (!process.env.VERCEL) {
     if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
       console.warn(
         "CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY not set — authenticated routes will fail.",
-      );
-    }
-    if (!process.env.TRIGGER_SECRET_KEY) {
-      console.warn(
-        "TRIGGER_SECRET_KEY not set — processingConfigured() is false, so /api/jobs and upload completion return 503 instead of generating. Run tasks with `npm run trigger:dev`.",
       );
     }
     if (

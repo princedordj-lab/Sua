@@ -79,7 +79,7 @@ function shapeJob(job) {
     progressUnit: PROGRESS_UNITS[job.stage] ?? null,
     // Server-computed sentence so mobile and web cannot disagree about units.
     stageDetail: stageDetail(job),
-    // Trigger.dev processing state (additive; the lifecycle the app renders).
+    // Direct processing lifecycle state (additive; the lifecycle the app renders).
     processingState: job.processingState ?? null,
     triggerState: job.triggerState ?? "none",
     runId: job.runId ?? null,
@@ -104,11 +104,9 @@ function requirePipeline(res) {
 /**
  * How the client should read a processing row.
  *
- * The queue-era reaper is gone: Trigger.dev owns retries and timeouts, so a
- * stale "running" row is never guessed at from timestamps. The only recovery
- * this API performs is re-submitting a row whose trigger call never landed
- * (`triggerState === "failed"`, or stuck "submitting"), which cannot create a
- * second run: Trigger.dev deduplicates on the document's idempotency key.
+ * The Direct Express orchestrator owns retries and recovery. The recovery
+ * this API performs is re-submitting a row that was interrupted or stalled,
+ * which deduplicates on the document's idempotency key.
  */
 async function recoverRow(job) {
   if (!job) return job;
@@ -189,7 +187,7 @@ jobsRouter.post("/", async (req, res) => {
   const warning = await warnIfOverCaps(userId);
   if (warning) console.warn(`[CAP WARNING] ${identity.email}: ${warning}`);
 
-  // Trigger.dev owns the run. A trigger failure is not fatal: the row stays with
+  // Direct orchestrator owns the run. An initiation failure is not fatal: the row stays with
   // triggerState "failed" and `POST /api/jobs/:id/retry` (or the next poll's
   // recovery) re-submits it without creating a second run.
   const started =
@@ -199,7 +197,7 @@ jobsRouter.post("/", async (req, res) => {
           userId: job.userId,
           kind: job.kind,
         }).catch((error) => {
-          console.warn(`trigger failed for job ${job.id}: ${error?.message ?? error}`);
+          console.warn(`start processing failed for job ${job.id}: ${error?.message ?? error}`);
           return null;
         })
       : null;
@@ -271,7 +269,7 @@ jobsRouter.post("/:id/cancel", async (req, res) => {
     return { id: job.id, cancelled: claim.count > 0 };
   });
   if (!cancelled) return res.status(404).json({ error: "Job not found" });
-  // Stop the Trigger.dev run too (best-effort: the row is the source of truth).
+  // Stop any active processing run (best-effort: row is the source of truth).
   const row = await prisma.job.findUnique({ where: { id: cancelled.id }, select: { runId: true } });
   if (row?.runId) await cancelProcessingRun(row.runId);
   res.json(cancelled);

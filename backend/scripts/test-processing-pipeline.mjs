@@ -1,6 +1,6 @@
-// Offline checks for the Trigger.dev document-processing architecture.
+// Offline checks for the document-processing architecture.
 //
-// Runs with no Trigger.dev, no Postgres and no AI provider: the trigger client
+// Runs with no external queue, no Postgres and no AI provider: the trigger client
 // is replaced by `setTriggerClient`, model output is validated through the stage
 // specs, and the state helpers are pure. What is asserted is the logic that used
 // to break in production: invalid model output, retry classification (429/5xx vs
@@ -64,7 +64,7 @@ import {
   console.log("✓ model output is validated before use; malformed arrays never reach a .map");
 }
 
-// --- 2. Retry classification (what Trigger.dev retries and what it does not)
+// --- 2. Retry classification (what the orchestrator retries and what it does not)
 {
   const rate = classifyFailure(
     Object.assign(new Error("429"), { kind: "rate_limit", status: 429, retryAfterMs: 30_000 }),

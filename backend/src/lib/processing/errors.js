@@ -1,7 +1,7 @@
 /**
  * Failure classification for document processing.
  *
- * Trigger.dev retries a run when the task throws. So the only decision that
+ * The processing orchestrator retries a run on transient errors. So the only decision that
  * matters is *what kind of failure* was thrown: a transient one (429, 5xx,
  * network, database capacity) must be thrown so the run is retried with
  * backoff; a permanent one (unsupported file, corrupt file, missing object,

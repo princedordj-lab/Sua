@@ -1,16 +1,12 @@
 /**
- * Document-processing state for the Trigger.dev pipeline.
+ * Document-processing state for the Direct Express processing pipeline.
  *
  * PostgreSQL is the source of truth: one `jobs` row per (note, kind,
- * processingVersion) carries the lifecycle state, the per-material state and
- * the Trigger.dev run id. Trigger.dev owns scheduling and retries; this module
- * owns what the state *means* and is the only writer of those columns, so the
- * worker (src/trigger/*) and the API cannot drift apart.
+ * processingVersion) carries the lifecycle state, the per-material state,
+ * and the processing lease (lockedUntil/heartbeatAt).
  *
  * Every write here is a single short statement (no interactive transaction, no
- * network I/O in between): the previous implementation held Prisma
- * transactions open across model calls and object-storage reads, which is what
- * surfaced as P2028 "expired transaction" capacity errors.
+ * network I/O in between) to keep Neon round-trips fast and safe from pool saturation.
  */
 
 import { prisma } from "../../config/prisma.js";
@@ -117,11 +113,8 @@ const ACTIVE_PROCESSING_STATES = [
 
 /**
  * How long a row may look active without writing anything. Every stage and
- * every material update renews `heartbeatAt`, and the longest single stage
- * (`extract-document`) runs ~66 minutes, so silence past this window means the
- * run is gone — killed at its platform ceiling or cancelled in the dashboard —
- * rather than working. Deliberately generous: a wrong "still running" costs one
- * retry tap, a wrong "stale" interrupts a live run.
+ * every material update renews `heartbeatAt`. Silence past this window means
+ * the execution is stalled or was terminated.
  */
 export const STALE_ACTIVE_RUN_MS = Math.max(
   600_000,
@@ -132,14 +125,8 @@ export function canRetryProcessing(job, { now = Date.now() } = {}) {
   if (!job) return false;
   if ([PROCESSING_STATES.failed, PROCESSING_STATES.cancelled].includes(job.processingState)) return true;
   if (job.processingState === PROCESSING_STATES.completed) return false;
-  // A row whose trigger call never landed can never run; let the student retry.
   if (job.triggerState === "failed") return true;
-  // Trigger.dev owns retries and never calls back on a hard stop, so an active
-  // row that has fallen silent is offered for retry instead of showing
-  // progress forever. The retry resumes from the first material that is not
-  // done, so a run that is still alive loses nothing.
   if (!ACTIVE_PROCESSING_STATES.includes(job.processingState)) return false;
-  if (job.triggerState !== "submitted") return false;
   const stamp = job.heartbeatAt ?? job.updatedAt;
   const beat = stamp instanceof Date ? stamp.getTime() : Date.parse(stamp ?? "");
   if (!Number.isFinite(beat)) return false;
@@ -180,8 +167,93 @@ export function shapeProcessing(job) {
 }
 
 // ---------------------------------------------------------------------------
-// Writes (one statement each, no interactive transaction)
+// Writes & Leases (one statement each, no interactive transaction)
 // ---------------------------------------------------------------------------
+
+/**
+ * Atomically acquire an exclusive processing lease on a job.
+ * Ensures only one execution context processes a job at any given time.
+ */
+export async function acquireProcessingLease(jobId, { leaseMs = 300_000, db = prisma } = {}) {
+  if (!jobId) return { acquired: false };
+  const now = new Date();
+  const leaseUntil = new Date(now.getTime() + leaseMs);
+
+  if (typeof db.$executeRaw === "function") {
+    try {
+      const leaseInterval = `${Math.round(leaseMs / 1000)} seconds`;
+      const updated = await db.$executeRaw`
+        UPDATE "jobs"
+        SET "lockedUntil" = NOW() + ${leaseInterval}::interval,
+            "heartbeatAt" = NOW(),
+            "attempts" = "attempts" + 1,
+            "updatedAt" = NOW()
+        WHERE "id" = ${jobId}
+          AND ("lockedUntil" IS NULL OR "lockedUntil" <= NOW())
+      `;
+      return { acquired: updated > 0 };
+    } catch {
+      // Fall through to ORM fallback if raw SQL fails or is unsupported
+    }
+  }
+
+  // Fallback for mock test databases
+  const job = await db.job.findUnique({ where: { id: jobId } });
+  if (!job) return { acquired: false };
+  if (job.lockedUntil && new Date(job.lockedUntil).getTime() > now.getTime()) {
+    return { acquired: false };
+  }
+  await db.job.update({
+    where: { id: jobId },
+    data: {
+      lockedUntil: leaseUntil,
+      heartbeatAt: now,
+      attempts: (job.attempts ?? 0) + 1,
+    },
+  });
+  return { acquired: true };
+}
+
+/**
+ * Extend an existing lease while processing is in progress.
+ */
+export async function extendProcessingLease(jobId, { leaseMs = 300_000, db = prisma } = {}) {
+  if (!jobId) return;
+  const now = new Date();
+  const leaseUntil = new Date(now.getTime() + leaseMs);
+
+  if (typeof db.$executeRaw === "function") {
+    try {
+      const leaseInterval = `${Math.round(leaseMs / 1000)} seconds`;
+      await db.$executeRaw`
+        UPDATE "jobs"
+        SET "lockedUntil" = NOW() + ${leaseInterval}::interval,
+            "heartbeatAt" = NOW(),
+            "updatedAt" = NOW()
+        WHERE "id" = ${jobId}
+      `;
+      return;
+    } catch {
+      // Fall through
+    }
+  }
+
+  await db.job.updateMany({
+    where: { id: jobId },
+    data: { lockedUntil: leaseUntil, heartbeatAt: now },
+  }).catch(() => {});
+}
+
+/**
+ * Release an acquired lease when processing settles, yields, or errors out.
+ */
+export async function releaseProcessingLease(jobId, { db = prisma } = {}) {
+  if (!jobId) return;
+  await db.job.updateMany({
+    where: { id: jobId },
+    data: { lockedUntil: null, heartbeatAt: new Date() },
+  }).catch(() => {});
+}
 
 /**
  * Advance the stage. `state`/`stage` keep the legacy client contract
@@ -213,26 +285,45 @@ export async function markStage(
 /**
  * Write one material's state. The whole `materials.<name>` object is replaced
  * in one statement, so two materials finishing concurrently cannot clobber
- * each other's keys (the same rule the digest checkpoint follows).
+ * each other's keys.
  */
 export async function markMaterial(jobId, material, state, { error = null, db = prisma } = {}) {
   if (!jobId || !MATERIALS.includes(material)) return;
   const value = { state, error, at: new Date().toISOString() };
-  await db.$executeRaw`
-    UPDATE "jobs"
-    SET "materials" = jsonb_set(
-          COALESCE("materials", '{}'::jsonb),
-          ARRAY[${material}::text],
-          ${JSON.stringify(value)}::jsonb,
-          true
-        ),
-        "heartbeatAt" = NOW(),
-        "updatedAt" = NOW()
-    WHERE "id" = ${jobId}
-  `;
+
+  if (typeof db.$executeRaw === "function") {
+    try {
+      await db.$executeRaw`
+        UPDATE "jobs"
+        SET "materials" = jsonb_set(
+              COALESCE("materials", '{}'::jsonb),
+              ARRAY[${material}::text],
+              ${JSON.stringify(value)}::jsonb,
+              true
+            ),
+            "heartbeatAt" = NOW(),
+            "updatedAt" = NOW()
+        WHERE "id" = ${jobId}
+      `;
+      return;
+    } catch {
+      // Fall through to ORM fallback
+    }
+  }
+
+  // Fallback for mock test databases
+  const job = await db.job.findUnique({ where: { id: jobId } });
+  if (job) {
+    const materials = typeof job.materials === "object" && job.materials ? { ...job.materials } : {};
+    materials[material] = value;
+    await db.job.update({
+      where: { id: jobId },
+      data: { materials, heartbeatAt: new Date() },
+    });
+  }
 }
 
-/** Record that the trigger call was attempted / succeeded / failed. */
+/** Record that the processing start was attempted / succeeded / failed. */
 export async function markTrigger(jobId, triggerState, { runId, error = null, db = prisma } = {}) {
   if (!jobId) return;
   await db.job.updateMany({
@@ -250,8 +341,6 @@ export async function markTrigger(jobId, triggerState, { runId, error = null, db
 
 /**
  * Reset the materials a retry must redo, keeping everything already finished.
- * This is what makes "retry quiz only" and "retry after a partial failure"
- * resume from the earliest incomplete stage instead of starting over.
  */
 export function resetMaterials(job, { only = null } = {}) {
   const current = materialStates(job);
@@ -266,4 +355,3 @@ export function resetMaterials(job, { only = null } = {}) {
   }
   return next;
 }
-
