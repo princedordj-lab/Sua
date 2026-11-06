@@ -314,7 +314,7 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
     }
 
     // Fast intake: never parse the file inside the request. Marking the row
-    // pending is all /complete does; the page-wise pass runs on Trigger.dev.
+    // pending is all /complete does; the page-wise pass runs in background.
     // Legacy assets keep their extractedText as the compat field, which is why
     // a row that already holds text is never re-parsed.
     const startExtraction = needsExtraction(asset);
@@ -332,7 +332,7 @@ uploadsRouter.post("/:id/complete", async (req, res) => {
   const asset = outcome.asset;
 
   // Nothing is extracted or generated here: the object is verified, the row says
-  // what it wants, and Trigger.dev runs it. This endpoint is safe to call
+  // what it wants, and the orchestrator runs it. This endpoint is safe to call
   // repeatedly — one idempotency key per document + kind + processing version
   // means a retry cannot start a second run.
   let processing = null;

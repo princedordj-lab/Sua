@@ -1,7 +1,7 @@
 /**
  * Starting (and re-starting) document processing from the API.
  *
- * Replaces Trigger.dev with Direct Express Processing.
+ * Direct Express Processing lifecycle management.
  * Uses `@vercel/functions` `waitUntil` to execute processing in the background
  * without blocking API responses.
  *

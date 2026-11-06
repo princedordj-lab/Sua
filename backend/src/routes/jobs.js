@@ -197,7 +197,7 @@ jobsRouter.post("/", async (req, res) => {
           userId: job.userId,
           kind: job.kind,
         }).catch((error) => {
-          console.warn(`trigger failed for job ${job.id}: ${error?.message ?? error}`);
+          console.warn(`start processing failed for job ${job.id}: ${error?.message ?? error}`);
           return null;
         })
       : null;

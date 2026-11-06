@@ -95,7 +95,7 @@ function checkCronAuth(req) {
 }
 
 // Background cron tick: the janitor. Document processing does NOT run here —
-// Trigger.dev owns extraction, OCR and generation (see src/trigger/*) — so this
+// Direct Express processing owns extraction, OCR and generation (see src/lib/processing/*) — so this
 // sweep never competes with a processing run. It retries the object deletes that
 // failed with their note, drops tombstones no device can still need, sends the
 // web-only daily reminder and runs the streak notices.

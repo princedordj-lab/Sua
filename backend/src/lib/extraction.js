@@ -163,8 +163,8 @@ export async function claimExtractionAsset({ targetAssetId = null, db = prisma }
 }
 
 /**
- * Fire-and-forget trigger used by the Trigger.dev extract-document task for a
- * plain upload; a generation job triggers the same pass through the pipeline.
+ * Fire-and-forget background extraction used for a
+ * plain upload; a generation job runs the same pass through the pipeline.
  */
 export async function triggerExtraction(assetId) {
   const run = extractNext({ targetAssetId: assetId }).catch((error) => {

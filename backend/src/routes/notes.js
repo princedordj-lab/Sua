@@ -174,8 +174,8 @@ notesRouter.get("/:noteId", async (req, res) => {
   if (stuck) {
     triggerAssetExtraction(stuck.id).catch(() => {});
   }
-  // Repair (never duplicate) a generation whose Trigger.dev submission never
-  // landed: Trigger.dev's idempotency key makes a re-submit the same run.
+  // Repair (never duplicate) a generation whose processing submission never
+  // landed: the job idempotency key and lease make a re-submit safe.
   const latest = loaded.latestJob;
   if (latest && needsResubmit(latest)) {
     retryProcessing(latest).catch(() => {});
