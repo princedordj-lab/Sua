@@ -144,7 +144,7 @@ export async function claimExtractionAsset({ targetAssetId = null, db = prisma }
           WHERE a."kind" = 'document' AND a."status" = 'active'
             AND (a."providerNextPollAt" IS NULL OR a."providerNextPollAt" <= NOW())
             AND (
-              a."extractState" IN ('none', 'pending', 'partial')
+              a."extractState" IN ('pending', 'partial')
               OR (a."extractState" = 'running' AND a."updatedAt" < NOW() - ${staleAfter}::interval)
             )
           ORDER BY a."updatedAt" ASC
