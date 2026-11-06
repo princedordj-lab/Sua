@@ -36,10 +36,9 @@ function catchErrorFor({ error }) {
       code: classified.code,
       retryAfterMs,
     });
-    return {
-      retryDelayInMs: retryAfterMs,
-      retry: { maxAttempts: 24, minTimeoutInMs: 5_000, maxTimeoutInMs: 60_000, factor: 2, randomize: true },
-    };
+    // Trigger.dev v4 catchError uses retryAt; the task-level retry policy
+    // below supplies the 24-attempt ceiling.
+    return { retryAt: new Date(Date.now() + retryAfterMs) };
   }
   if (classified.retryAfterMs) {
     logger.warn("retrying after provider delay", {
