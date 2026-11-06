@@ -1,17 +1,12 @@
 /**
  * Starting (and re-starting) document processing from the API.
  *
- * The API does not process anything: it writes the processing row, triggers one
- * Trigger.dev run and returns. Two boundaries are handled explicitly because a
- * database write and a Trigger.dev API call are NOT atomic:
+ * Replaces Trigger.dev with Direct Express Processing.
+ * Uses `@vercel/functions` `waitUntil` to execute processing in the background
+ * without blocking API responses.
  *
- *  1. Row written, trigger failed → the row stays with triggerState "failed".
- *     The document is not lost; `POST /api/jobs/:id/retry` (or a repeated
- *     `/complete`) re-submits it.
- *  2. Trigger succeeded, saving the run id failed → the run itself adopts its
- *     own id at start (`adoptRunId`), and the duplicate trigger a retry would
- *     send is deduplicated by Trigger.dev's idempotency key (one key per
- *     document + kind + processing version). No second queue, no second run.
+ * PostgreSQL maintains atomic processing leases and checkpoints so processing
+ * is completely resumable and idempotent.
  */
 
 import { prisma } from "../../config/prisma.js";
@@ -25,32 +20,58 @@ import {
   materialStates,
   resetMaterials,
 } from "./state.js";
+import { runDirectProcessing } from "./orchestrator.js";
+import { extractNext } from "../extraction.js";
 
 /** Pipeline revision. Bump it to force every note to be rebuilt once. */
 export const PROCESSING_VERSION = "v1";
 export const PROCESS_DOCUMENT_TASK = "process-document";
 export const IDEMPOTENCY_TTL = "1h";
 
-// Test seam: the offline harness supplies a fake Trigger.dev client.
-let triggerClient = null;
+/**
+ * Executes a promise in the background.
+ * Uses Vercel's `waitUntil` if available (keeps serverless function alive),
+ * or standard background execution with unhandled rejection protection in Node/dev.
+ */
+export function runInBackground(promise) {
+  try {
+    import("@vercel/functions")
+      .then((vercel) => {
+        if (typeof vercel?.waitUntil === "function") {
+          vercel.waitUntil(promise);
+        }
+      })
+      .catch(() => {});
+  } catch {
+    // Not running on Vercel
+  }
+
+  // Ensure errors do not escape as unhandled rejections
+  Promise.resolve(promise).catch((error) => {
+    console.error("[processing] background task error:", error?.message ?? error);
+  });
+}
+
+// Test seam: allows offline tests to intercept triggers.
+let directExecutor = null;
+export function setDirectExecutor(fn) {
+  directExecutor = fn;
+}
+
 export function setTriggerClient(client) {
-  triggerClient = client;
+  if (!client) {
+    directExecutor = null;
+    return;
+  }
+  directExecutor = async (taskId, payload, options) => {
+    if (typeof client.trigger === "function") {
+      return client.trigger(taskId, payload, options);
+    }
+  };
 }
 
 export function processingConfigured() {
-  return Boolean(process.env.DATABASE_URL && aiConfigured() && process.env.TRIGGER_SECRET_KEY);
-}
-
-async function client() {
-  if (triggerClient) return triggerClient;
-  const { tasks } = await import("@trigger.dev/sdk");
-  return {
-    trigger: (taskId, payload, options) => tasks.trigger(taskId, payload, options),
-    cancel: async (runId) => {
-      const { runs } = await import("@trigger.dev/sdk");
-      return runs.cancel(runId);
-    },
-  };
+  return Boolean(process.env.DATABASE_URL && aiConfigured());
 }
 
 /** One stable key per document + kind + processing version. */
@@ -97,47 +118,52 @@ export async function ensureProcessingJob(
 }
 
 /**
- * Trigger the orchestrator for a processing row.
- * Returns { triggered, runId, error } — never throws for a trigger failure, so
- * the endpoint can still answer 202 and expose a retry path.
+ * Trigger direct processing for a row.
+ * Returns { triggered, runId, error }.
  */
-export async function triggerProcessing(job, { assetId = null, db = prisma } = {}) {
-  const payload = {
-    jobId: job.id,
-    noteId: job.noteId,
-    userId: job.userId,
-    processingVersion: job.processingVersion ?? PROCESSING_VERSION,
-    ...(assetId ? { assetId } : {}),
-  };
-  await markTrigger(job.id, "submitting", { db });
-  try {
-    const api = await client();
-    const handle = await api.trigger(PROCESS_DOCUMENT_TASK, payload, {
-      idempotencyKey: `${job.idempotencyKey ?? job.id}:${job.processingVersion ?? PROCESSING_VERSION}`,
-      idempotencyKeyTTL: IDEMPOTENCY_TTL,
-      tags: [`job:${job.id}`, `note:${job.noteId}`],
-    });
-    await markTrigger(job.id, "submitted", { runId: handle?.id ?? null, db }).catch(() => {});
-    return { triggered: true, runId: handle?.id ?? null, error: null };
-  } catch (error) {
-    const message = "Sua could not start processing this file. Tap Try again.";
-    console.warn(
-      `[processing] trigger failed job=${job.id} code=${error?.name ?? "Error"} status=${Number.isFinite(error?.status) ? error.status : "-"}`,
-    );
-    await markTrigger(job.id, "failed", { error: message, db }).catch(() => {});
-    return { triggered: false, runId: null, error: message };
+export async function triggerProcessing(job, { assetId = null, material = null, db = prisma } = {}) {
+  const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await markTrigger(job.id, "submitting", { db }).catch(() => {});
+
+  if (directExecutor) {
+    try {
+      const payload = {
+        jobId: job.id,
+        noteId: job.noteId,
+        userId: job.userId,
+        processingVersion: job.processingVersion ?? PROCESSING_VERSION,
+        ...(assetId ? { assetId } : {}),
+        ...(material ? { material } : {}),
+      };
+      const handle = await directExecutor(PROCESS_DOCUMENT_TASK, payload, {
+        idempotencyKey: `${job.idempotencyKey ?? job.id}:${job.processingVersion ?? PROCESSING_VERSION}`,
+        idempotencyKeyTTL: IDEMPOTENCY_TTL,
+      });
+      await markTrigger(job.id, "submitted", { runId: handle?.id ?? runId, db }).catch(() => {});
+      return { triggered: true, runId: handle?.id ?? runId, error: null };
+    } catch (error) {
+      const message = "Sua could not start processing this file. Tap Try again.";
+      console.warn(`[processing] trigger execution failed job=${job.id}:`, error);
+      await markTrigger(job.id, "failed", { error: message, db }).catch(() => {});
+      return { triggered: false, runId: null, error: message };
+    }
   }
+
+  await markTrigger(job.id, "submitted", { runId, db }).catch(() => {});
+  runInBackground(runDirectProcessing(job.id, { assetId, material }));
+  return { triggered: true, runId, error: null };
 }
 
 /**
  * Full "start this document" path used by upload-completion and POST /jobs.
- * Safe to call repeatedly: an existing submitted/running row is returned as-is.
+ * Safe to call repeatedly: an existing running row is returned as-is.
  */
 export async function startProcessing({ noteId, userId, kind, assetId = null }, db = prisma) {
   const { job, created } = await ensureProcessingJob({ noteId, userId, kind }, db);
   const alreadyRunning =
     !created &&
     (["submitting", "submitted"].includes(job.triggerState) ||
+      (job.lockedUntil && new Date(job.lockedUntil).getTime() > Date.now()) ||
       ["extracting", "ocr_processing", "generating"].includes(job.processingState));
   if (alreadyRunning) return { job, triggered: false, runId: job.runId ?? null, reused: true };
 
@@ -147,16 +173,6 @@ export async function startProcessing({ noteId, userId, kind, assetId = null }, 
 
 /**
  * Which of these notes still want a run started, and with which asset.
- *
- * The sync tail used to open one transaction per pushed note — up to 100 of
- * them, most discovering nothing to do — to answer a question that is a single
- * read. `withUser`'s budget is WAN round trips, not rows, so the whole chunk is
- * one query here and the caller only spends a Trigger.dev call on a note that
- * actually wants conversion.
- *
- * A note qualifies when an active image/document asset asks for a conversion the
- * note has not already had: `hasSettledKind` is the same rule `POST /jobs` uses,
- * so a re-sync of an old note cannot re-bill a finished study set.
  */
 export async function notesAwaitingConversion(clerkId, noteIds) {
   const ids = (noteIds ?? []).filter((id) => typeof id === "string" && id);
@@ -194,8 +210,6 @@ export async function notesAwaitingConversion(clerkId, noteIds) {
       noteId: note.id,
       userId: note.userId,
       kind: asset.task,
-      // Only a document carries its own extraction run; a photo is read whole
-      // by the generation stage.
       assetId: asset.kind === "document" ? asset.id : null,
     });
   }
@@ -247,7 +261,7 @@ export async function retryProcessing(jobOrId, { material = null } = {}, db = pr
   // A material-only retry skips extraction (the source is already persisted).
   const assetId = material ? null : note.assets?.[0]?.id ?? null;
   const refreshed = await db.job.findUnique({ where: { id: job.id } });
-  const result = await triggerProcessing(refreshed, { assetId, db });
+  const result = await triggerProcessing(refreshed, { assetId, material, db });
   console.log(
     `[processing] retry job=${job.id} material=${material ?? "all"} kept=${kept.length ? kept.join(",") : "none"} triggered=${result.triggered}`,
   );
@@ -262,28 +276,24 @@ export async function adoptRunId(jobId, runId, db = prisma) {
     .catch(() => {});
 }
 
-/** Cancelling the run is best-effort; the row is what the API reports. */
+/** Cancelling the run: direct orchestrator checks job.processingState at every stage boundary. */
 export async function cancelProcessingRun(runId) {
-  if (!runId) return false;
-  try {
-    const api = await client();
-    await api.cancel(runId);
-    return true;
-  } catch (error) {
-    console.warn(`[processing] could not cancel run ${runId}: ${error?.name ?? "Error"}`);
-    return false;
-  }
+  return true;
 }
 
-/** A row whose trigger call never landed can be re-submitted without a queue. */
+/** A row whose run never landed or that was interrupted can be resumed. */
 export async function needsResubmit(job) {
   if (!job) return false;
   if (job.triggerState === "failed") return true;
-  const idleMs = Date.now() - new Date(job.updatedAt ?? job.createdAt).getTime();
-  return job.triggerState === "submitting" && idleMs > 2 * 60_000;
+  if (["extracting", "ocr_processing", "generating", "queued"].includes(job.processingState)) {
+    const isLocked = job.lockedUntil && new Date(job.lockedUntil).getTime() > Date.now();
+    if (!isLocked) {
+      const idleMs = Date.now() - new Date(job.updatedAt ?? job.createdAt).getTime();
+      return idleMs > 2 * 60_000;
+    }
+  }
+  return false;
 }
-
-
 
 /**
  * Extraction-only trigger for a plain upload (no generation requested).
@@ -291,23 +301,38 @@ export async function needsResubmit(job) {
  */
 export async function triggerAssetExtraction(assetId) {
   if (!assetId) return { triggered: false };
-  const api = await client();
-  const handle = await api.trigger("extract-document", { assetId }, {
-    idempotencyKey: `sua:extract:${assetId}`,
-    idempotencyKeyTTL: IDEMPOTENCY_TTL,
-    tags: [`asset:${assetId}`],
-  });
-  return { triggered: true, runId: handle?.id ?? null };
+  const runId = `extract_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  if (directExecutor) {
+    try {
+      await directExecutor("extract-document", { assetId });
+      return { triggered: true, runId };
+    } catch {
+      return { triggered: false, runId: null };
+    }
+  }
+  runInBackground(extractNext({ targetAssetId: assetId }));
+  return { triggered: true, runId };
 }
 
-/** Quiz marking is short AI work, but it must not run inside a request either. */
+/** Quiz marking: runs AI marking directly via background execution. */
 export async function triggerQuizMarking(jobId) {
   if (!jobId) return { triggered: false };
-  const api = await client();
-  const handle = await api.trigger("mark-quiz", { jobId }, {
-    idempotencyKey: `sua:mark:${jobId}`,
-    idempotencyKeyTTL: IDEMPOTENCY_TTL,
-    tags: [`job:${jobId}`],
-  });
-  return { triggered: true, runId: handle?.id ?? null };
+  const runId = `mark_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  if (directExecutor) {
+    try {
+      await directExecutor("mark-quiz", { jobId });
+      return { triggered: true, runId };
+    } catch {
+      return { triggered: false, runId: null };
+    }
+  }
+
+  runInBackground(
+    (async () => {
+      const { processQuizMarking } = await import("../pipeline.js");
+      const job = await prisma.job.findUnique({ where: { id: jobId }, include: { user: true } });
+      if (job) await processQuizMarking(job);
+    })(),
+  );
+  return { triggered: true, runId };
 }
