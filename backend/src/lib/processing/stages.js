@@ -19,7 +19,11 @@
 import { prisma } from "../../config/prisma.js";
 import { withUser } from "../db.js";
 import { readAssetBytes } from "../storage.js";
-import { claimExtractionAsset, runExtractionPass } from "../extraction.js";
+import {
+  claimExtractionAsset,
+  runExtractionPass,
+  extractionDeps,
+} from "../extraction.js";
 import {
   assembledShortSource,
   condenseMaterial,
@@ -138,10 +142,12 @@ export async function extractStage({ jobId = null, assetId }, overrides = {}) {
   for (;;) {
     passes += 1;
     await deps.runExtractionPass(assetId, longDoc.extractBudgetMs, {
+      ...extractionDeps,
       db,
       readAssetBytes: deps.readAssetBytes,
       record: deps.record,
       recordFailure: deps.recordFailure,
+      ...overrides,
     });
     current = await db.asset.findUnique({ where: { id: assetId } });
     if (!current) {
