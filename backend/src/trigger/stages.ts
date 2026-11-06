@@ -30,6 +30,17 @@ function catchErrorFor({ error }) {
   if (classified.category === "permanent") {
     return { skipRetrying: true };
   }
+  if (classified.code === "EXTRACTION_PROVIDER_PENDING" || classified.code === "EXTRACTION_BUSY") {
+    const retryAfterMs = classified.retryAfterMs ?? 5_000;
+    logger.info("resuming unfinished extraction", {
+      code: classified.code,
+      retryAfterMs,
+    });
+    return {
+      retryDelayInMs: retryAfterMs,
+      retry: { maxAttempts: 24, minTimeoutInMs: 5_000, maxTimeoutInMs: 60_000, factor: 2, randomize: true },
+    };
+  }
   if (classified.retryAfterMs) {
     logger.warn("retrying after provider delay", {
       code: classified.code,
