@@ -49,6 +49,19 @@ console.log("=== Running Normalization Test Suite ===");
   console.log("✓ 2. Missing or empty sections arrays produce explicit EMPTY_DOCUMENT error");
 }
 
+// 2b. An empty preferred field must not hide a populated fallback field
+{
+  const result = normalizeDocument({
+    segments: [],
+    pages: [
+      { page: 7, text: "A populated fallback page with enough readable lecture content." },
+    ],
+  });
+  assert.equal(result.segments.length, 1);
+  assert.equal(result.segments[0].label, "p. 7");
+  console.log("✓ 2b. Empty segments fall back to populated pages");
+}
+
 // 3. Null or malformed section content handling
 {
   const input = {
