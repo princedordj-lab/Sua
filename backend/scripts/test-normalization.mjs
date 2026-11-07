@@ -10,6 +10,8 @@ import {
   normalizeSegment,
   validateExtractorOutput,
 } from "../src/lib/normalization.js";
+import { prepareMaterial } from "../src/lib/note-pipeline.js";
+import { classifyFailure } from "../src/lib/processing/errors.js";
 
 console.log("=== Running Normalization Test Suite ===");
 
@@ -177,6 +179,56 @@ console.log("=== Running Normalization Test Suite ===");
   assert.equal(countWords("One two three four five"), 5);
   assert.equal(countWords("  Leading   and   trailing   spaces  with\nnewlines  "), 6);
   console.log("✓ 10. Word counting accurately calculates words across arbitrary whitespace");
+}
+
+// 11. The real note-preparation path uses the shared normalizer
+{
+  const pages = Array.from({ length: 4 }, (_, index) => ({
+    index: index + 1,
+    label: `p. ${index + 1}`,
+    text:
+      "University of Ghana - Department of Engineering\\n" +
+      `Unique lecture content for page ${index + 1}, including definitions and worked examples.\\n` +
+      "This is enough meaningful content to survive the header filter.",
+  }));
+  const prepared = await prepareMaterial({
+    note: { assets: [], body: "", transcript: "" },
+    kind: "lecture_note",
+    courseContext: "Engineering",
+    deps: {},
+    source: {
+      sourceType: "file",
+      segments: pages,
+      pageCount: 4,
+      truncated: false,
+      minutes: 0,
+    },
+  });
+
+  assert.equal(prepared.source.segments.length, 4);
+  assert.ok(!prepared.source.rawText.includes("University of Ghana - Department of Engineering"));
+  assert.ok(prepared.material.includes("## p. 1"));
+  assert.ok(prepared.meta.sourceWords > 0);
+  console.log("✓ 11. prepareMaterial uses shared normalization and preserves page labels");
+}
+
+// 12. Malformed extractor structures become a permanent, student-safe failure
+{
+  await assert.rejects(
+    () =>
+      prepareMaterial({
+        note: { assets: [], body: "", transcript: "" },
+        kind: "lecture_note",
+        courseContext: "",
+        deps: {},
+        source: { sourceType: "file", segments: [null], pageCount: 1 },
+      }),
+    (error) =>
+      error.userFacing === true &&
+      classifyFailure(error).category === "permanent" &&
+      classifyFailure(error).code === "UNUSABLE_SOURCE",
+  );
+  console.log("✓ 12. malformed normalized source is surfaced as a permanent safe failure");
 }
 
 console.log("\n=== ALL NORMALIZATION TESTS PASSED! ===");
