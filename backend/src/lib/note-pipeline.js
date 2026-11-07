@@ -27,6 +27,7 @@ import {
 // import { extractDocument, renderPdfPage } from "./extract.js"; // lazy — see below
 import { checkSourceFidelity } from "./numbers.js";
 import { classifyPageText } from "./page-text.js";
+import { countWords, ExtractionValidationError, normalizeDocument } from "./normalization.js";
 import { readImageNatively } from "./native-read.js";
 import {
   PROMPT_VERSION,
@@ -39,6 +40,7 @@ import {
 import {
   USER_MESSAGES,
   UserFacingError,
+  longDoc,
   notePipeline,
 } from "../config/ai-pipeline.js";
 
@@ -558,41 +560,6 @@ const FILLER = [
   [/\s+([,.;:!?])/g, "$1"],
 ];
 
-function cleanPageLines(segments) {
-  if (segments.length < 3) return segments;
-  const counts = new Map();
-  for (const segment of segments) {
-    const seen = new Set();
-    for (const line of segment.text.split("\n")) {
-      const key = line.trim().toLowerCase();
-      if (key.length < 3 || key.length > 120 || seen.has(key)) continue;
-      seen.add(key);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-  }
-  const threshold = segments.length * notePipeline.headerFooterPageRatio;
-  const repeated = new Set(
-    [...counts.entries()]
-      .filter(([, count]) => count > threshold)
-      .map(([line]) => line),
-  );
-  if (!repeated.size) return segments;
-  return segments.map((segment) => {
-    const original = segment.text;
-    const filtered = original
-      .split("\n")
-      .filter((line) => !repeated.has(line.trim().toLowerCase()))
-      .join("\n")
-      .trim();
-    // A repeated line is normally a running header/footer, but a short deck or
-    // handout can repeat real content on every page. Never let the filter eat a
-    // page down to nothing (or to just its page label) — that turns a readable
-    // upload into an empty note.
-    const floor = Math.min(notePipeline.ocrMinChars, original.trim().length);
-    return { ...segment, text: filtered.length >= floor ? filtered : original.trim() };
-  });
-}
-
 function cleanSegmentText(value, sourceType) {
   if (sourceType === "typed") return value.trim();
   let output = value.replace(PAGE_NUMBER_LINE, "");
@@ -608,12 +575,25 @@ function cleanSegmentText(value, sourceType) {
 }
 
 export function cleanSegments(segments, sourceType) {
-  const withoutRunning = sourceType === "file" ? cleanPageLines(segments) : segments;
-  return withoutRunning
-    .map((segment) => ({
-      ...segment,
-      text: cleanSegmentText(segment.text, sourceType),
-    }))
+  // The dedicated normalization layer validates and cleans extractor output
+  // before this stage. Keep this boundary defensive as it is also used after
+  // the optional recording-cleanup model, whose output is not trusted.
+  const safeSegments = Array.isArray(segments)
+    ? segments.filter((segment) => segment && typeof segment === "object")
+    : [];
+  return safeSegments
+    .map((segment) => {
+      const cleanedText = cleanSegmentText(
+        typeof segment.text === "string" ? segment.text : "",
+        sourceType,
+      );
+      return {
+        ...segment,
+        text: cleanedText,
+        charCount: cleanedText.length,
+        wordCount: countWords(cleanedText),
+      };
+    })
     .filter((segment) => segment.text);
 }
 
@@ -1024,11 +1004,47 @@ export async function prepareMaterial({ note, kind, courseContext, deps, source:
 
   await countedDeps.setStage("reading");
   await countedDeps.assertAlive?.();
-  const source = presetSource ?? (await assembleSource(note, countedDeps));
+  const extractedSource = presetSource ?? (await assembleSource(note, countedDeps));
+  // All source paths — page-wise extracted documents, image/audio assembly,
+  // typed notes, and the single-pass shortcut — pass through the same
+  // normalization contract before cleaning, splitting or digesting.
+  let normalized;
+  try {
+    normalized = normalizeDocument(
+      { segments: extractedSource?.segments },
+      {
+        // Keep the full extraction budget here. The later study-set condenser
+        // decides what fits a model call; normalizing must not silently truncate
+        // a long lecture to the normalizer's smaller default.
+        maxChars: longDoc.maxSourceChars,
+        filterHeadersFooters: extractedSource?.sourceType === "file",
+        headerFooterRatio: notePipeline.headerFooterPageRatio,
+        minCharsFloor: notePipeline.ocrMinChars,
+      },
+    );
+  } catch (error) {
+    if (error instanceof ExtractionValidationError) {
+      throw new UserFacingError(USER_MESSAGES.unreadable);
+    }
+    throw error;
+  }
+  // Keep the existing transcript/page-marker convention used by the note UI
+  // and source-fidelity checker while replacing its contents with normalized
+  // segments.
+  const normalizedText = buildTranscript(normalized.segments);
+  const source = {
+    ...extractedSource,
+    segments: normalized.segments,
+    rawText: normalizedText,
+    transcript: normalizedText,
+    truncated: Boolean(extractedSource?.truncated || normalized.truncated),
+    pageCount: extractedSource?.pageCount || normalized.pageCount,
+  };
   meta.sourceType = source.sourceType;
   meta.truncated = source.truncated;
   meta.pageCount = source.pageCount;
   meta.minutes = source.minutes;
+  meta.sourceWords = normalized.totalWords;
 
   if (
     kind === "course_reference" &&

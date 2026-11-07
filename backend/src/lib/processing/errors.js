@@ -79,6 +79,19 @@ export function classifyFailure(error) {
     };
   }
 
+  // UserFacingError is used for invalid or insufficient source content. The
+  // message is already safe for the student, and retrying the same bytes cannot
+  // make that content readable.
+  if (error.userFacing) {
+    return {
+      category: FAILURE_CATEGORY.permanent,
+      code: "UNUSABLE_SOURCE",
+      retryAfterMs: null,
+      safeMessage: String(error.message ?? "This source could not be read."),
+      status: statusOf(error),
+    };
+  }
+
   const status = statusOf(error);
   const kind = typeof error.kind === "string" ? error.kind : null;
   const message = String(error?.message ?? "").toLowerCase();

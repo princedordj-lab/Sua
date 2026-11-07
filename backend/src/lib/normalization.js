@@ -99,15 +99,27 @@ export function validateExtractorOutput(raw) {
     });
   }
 
-  const rawSegments = asArray(raw.segments ?? raw.pages ?? raw.sections ?? raw.blocks);
   const rawText = typeof raw.text === "string" ? raw.text.trim() : "";
+  const candidates = [raw.segments, raw.pages, raw.sections, raw.blocks];
+  const hasUsableSegment = (value) =>
+    asArray(value).some((segment) => {
+      if (!segment || typeof segment !== "object") return false;
+      const txt =
+        typeof segment.text === "string"
+          ? segment.text.trim()
+          : typeof segment.markdown === "string"
+            ? segment.markdown.trim()
+            : "";
+      return txt.length > 0;
+    });
 
-  // Check if any segment has usable text
-  const hasSegmentText = rawSegments.some((s) => {
-    if (!s || typeof s !== "object") return false;
-    const txt = typeof s.text === "string" ? s.text.trim() : (typeof s.markdown === "string" ? s.markdown.trim() : "");
-    return txt.length > 0;
-  });
+  // Extractors occasionally return more than one representation, e.g. an
+  // empty `segments` array alongside populated `pages`. Prefer the first
+  // representation that actually contains text instead of letting an empty
+  // higher-priority property hide usable content.
+  const selected = candidates.find(hasUsableSegment);
+  const rawSegments = selected === undefined ? [] : asArray(selected);
+  const hasSegmentText = rawSegments.length > 0;
 
   if (!hasSegmentText && !rawText) {
     throw new ExtractionValidationError("Extracted document has no readable text", {
@@ -247,6 +259,10 @@ export function normalizeDocument(raw, options = {}) {
     headerFooterRatio = 0.6,
     minCharsFloor = 30,
   } = options;
+  const charLimit =
+    Number.isFinite(Number(maxChars)) && Number(maxChars) > 0
+      ? Math.floor(Number(maxChars))
+      : 120_000;
 
   // 1. Validate
   const { rawSegments, rawText } = validateExtractorOutput(raw);
@@ -293,13 +309,13 @@ export function normalizeDocument(raw, options = {}) {
   const boundedSegments = [];
 
   for (const seg of segments) {
-    if (totalChars + seg.charCount <= maxChars) {
+    if (totalChars + seg.charCount <= charLimit) {
       boundedSegments.push(seg);
       totalChars += seg.charCount;
       totalWords += seg.wordCount;
     } else {
       truncated = true;
-      const room = maxChars - totalChars;
+      const room = charLimit - totalChars;
       if (room > 50) {
         // Truncate cleanly at a sentence or word boundary if possible
         let partialText = seg.text.slice(0, room);
