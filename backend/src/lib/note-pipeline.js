@@ -27,7 +27,7 @@ import {
 // import { extractDocument, renderPdfPage } from "./extract.js"; // lazy — see below
 import { checkSourceFidelity } from "./numbers.js";
 import { classifyPageText } from "./page-text.js";
-import { normalizeDocument } from "./normalization.js";
+import { ExtractionValidationError, normalizeDocument } from "./normalization.js";
 import { readImageNatively } from "./native-read.js";
 import {
   PROMPT_VERSION,
@@ -1003,19 +1003,30 @@ export async function prepareMaterial({ note, kind, courseContext, deps, source:
   // All source paths — page-wise extracted documents, image/audio assembly,
   // typed notes, and the single-pass shortcut — pass through the same
   // normalization contract before cleaning, splitting or digesting.
-  const normalized = normalizeDocument(
-    { segments: extractedSource?.segments },
-    {
-      // Keep the full extraction budget here. The later study-set condenser
-      // decides what fits a model call; normalizing must not silently truncate
-      // a long lecture to the normalizer's smaller default.
-      maxChars: longDoc.maxSourceChars,
-      filterHeadersFooters: extractedSource?.sourceType === "file",
-      headerFooterRatio: notePipeline.headerFooterPageRatio,
-      minCharsFloor: notePipeline.ocrMinChars,
-    },
-  );
-  const normalizedText = normalized.aiReadyText;
+  let normalized;
+  try {
+    normalized = normalizeDocument(
+      { segments: extractedSource?.segments },
+      {
+        // Keep the full extraction budget here. The later study-set condenser
+        // decides what fits a model call; normalizing must not silently truncate
+        // a long lecture to the normalizer's smaller default.
+        maxChars: longDoc.maxSourceChars,
+        filterHeadersFooters: extractedSource?.sourceType === "file",
+        headerFooterRatio: notePipeline.headerFooterPageRatio,
+        minCharsFloor: notePipeline.ocrMinChars,
+      },
+    );
+  } catch (error) {
+    if (error instanceof ExtractionValidationError) {
+      throw new UserFacingError(USER_MESSAGES.unreadable);
+    }
+    throw error;
+  }
+  // Keep the existing transcript/page-marker convention used by the note UI
+  // and source-fidelity checker while replacing its contents with normalized
+  // segments.
+  const normalizedText = buildTranscript(normalized.segments);
   const source = {
     ...extractedSource,
     segments: normalized.segments,
@@ -1028,7 +1039,7 @@ export async function prepareMaterial({ note, kind, courseContext, deps, source:
   meta.truncated = source.truncated;
   meta.pageCount = source.pageCount;
   meta.minutes = source.minutes;
-  meta.words = normalized.totalWords;
+  meta.sourceWords = normalized.totalWords;
 
   if (
     kind === "course_reference" &&
