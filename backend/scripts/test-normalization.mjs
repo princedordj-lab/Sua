@@ -200,8 +200,8 @@ console.log("=== Running Normalization Test Suite ===");
     index: index + 1,
     label: `p. ${index + 1}`,
     text:
-      "University of Ghana - Department of Engineering\\n" +
-      `Unique lecture content for page ${index + 1}, including definitions and worked examples.\\n` +
+      "University of Ghana - Department of Engineering\n" +
+      `Unique lecture content for page ${index + 1}, including definitions and worked examples.\n` +
       "This is enough meaningful content to survive the header filter.",
   }));
   const prepared = await prepareMaterial({
