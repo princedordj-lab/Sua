@@ -27,7 +27,7 @@ import {
 // import { extractDocument, renderPdfPage } from "./extract.js"; // lazy — see below
 import { checkSourceFidelity } from "./numbers.js";
 import { classifyPageText } from "./page-text.js";
-import { ExtractionValidationError, normalizeDocument } from "./normalization.js";
+import { countWords, ExtractionValidationError, normalizeDocument } from "./normalization.js";
 import { readImageNatively } from "./native-read.js";
 import {
   PROMPT_VERSION,
@@ -582,13 +582,18 @@ export function cleanSegments(segments, sourceType) {
     ? segments.filter((segment) => segment && typeof segment === "object")
     : [];
   return safeSegments
-    .map((segment) => ({
-      ...segment,
-      text: cleanSegmentText(
+    .map((segment) => {
+      const cleanedText = cleanSegmentText(
         typeof segment.text === "string" ? segment.text : "",
         sourceType,
-      ),
-    }))
+      );
+      return {
+        ...segment,
+        text: cleanedText,
+        charCount: cleanedText.length,
+        wordCount: countWords(cleanedText),
+      };
+    })
     .filter((segment) => segment.text);
 }
 
